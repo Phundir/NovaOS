@@ -1,0 +1,48 @@
+['a', 'b', 'c,d'] ['a,b', 'c', 'd'] ['', 'a', '', 'b', ''] [] [''] ['a', 'c']
+---hello--- 00x TeSt Hello World They'Re Bill'S
+0 4 1 1 2 True
+[5, 3, 1] [4, 3, 2, 1] [2, 4] nohtyp (3, 2, 1) [8, 5]
+[5, 2, -1, -4] [9, 7, 5, 3, 1] range(9, -1, -1) range(3, 6) []
+[('c', 0), ('b', 1), ('a', 1)] ['a', 'A', 'B', 'b'] [3, 2, 1]
+vide a a 2
+[1, 2] 0.75 20 False True [3, 8]
+[] [(1,)] {5: 'a', 6: 'b'} [] [0, 1, 2]
+ValueError: zip() argument 2 is shorter than argument 1
+(-4, 1) (-4, -1) -4 -4 1 -1 (-4.0, 0.5) -2 2 -4
+-8 0.25 - 1 1.0 - 0.001
+1e+100 1e-100 123.0 1e+16 -1e-05 1.4142135623730951 1e+301 -inf 1e-320 0.0
+100000.0 -0.0 12.0 10.0 0 7 1000 5 15
+ValueError: invalid literal for int() with base 10: '1e5'
+ValueError: invalid literal for int() with base 10: ''
+ValueError: invalid literal for int() with base 10: ' '
+ValueError: invalid literal for int() with base 10: '1.5'
+ValueError: invalid literal for int() with base 10: '0x'
+ValueError: invalid literal for int() with base 10: 'abc'
+ValueError: invalid literal for int() with base 10: '1__0'
+ValueError: could not convert string to float: ''
+ValueError: could not convert string to float: 'abc'
+ValueError: could not convert string to float: '1e'
+ValueError: could not convert string to float: '--1'
+ValueError: could not convert string to float: '1.2.3'
+True True True True bool True False
+True <lambda> len print
+None Ellipsis NotImplemented True <class 'int'> <built-in function len> ellipsis
+😀 233 ABC a\b a\nb 1
+b'abc' b'abc' b'x' - [0, 1, 2]
+[3, 1, 2, 4] [3, 1, 2, 4] True
+(1, 2, 3) (1, 2) False
+ababab
+[1, 3]
+[0, 1, 2, 3, 4]
+['x', 1, 'y', 3, 'z']
+ValueError: attempt to assign sequence of size 1 to extended slice of size 3
+{1: 'b'} {1.0: 'y'} 1
+[[1, 2], [3, 4]] [[99, 2], [3, 4]] [[1, 3], [2, 4]]
+[1, 2] 1 a b %% ab     r|l    |
+20 10
+nested 20    10 0b1010 3.14 1,234.5 -0.0 nan
+[Base(), Derived()] Derived() Derived() Base() Derived()
+int list __main__ (<class '__main__.Base'>,) <class 'object'>
+[1, 3] [1, 2, 3] ['a', 'b', 'c'] [2, 3] []
+['B', 'D'] [1, 2, 3] AB
+[0, 1, 2] [] 0 1

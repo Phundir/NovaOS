@@ -57,6 +57,7 @@ pub mod debug;
 pub mod js;
 pub mod libdev;
 pub mod manifest;
+pub mod python;
 pub mod runtime;
 pub mod rustc;
 pub mod sandbox;

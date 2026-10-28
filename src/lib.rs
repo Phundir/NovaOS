@@ -44,6 +44,7 @@ pub mod ports;
 pub mod power;
 pub mod process;
 pub mod prompt;
+pub mod python;
 pub mod random;
 pub mod rtc;
 pub mod scheduler;
@@ -800,6 +801,7 @@ fn task_phase15_selftest() -> ! {
 /// Self-test of phase 16: the shell and the terminal (16.0).
 fn task_phase16_selftest() -> ! {
     spawn_selftest_with_stack("js-autotest", task_js_selftest, 1024 * 1024);
+    spawn_selftest_with_stack("py-autotest", task_python_selftest, 256 * 1024);
     let (passed, failed) = shell::selftest::run();
     if failed == 0 {
         serial_println!(
@@ -820,6 +822,25 @@ fn task_phase16_selftest() -> ! {
         );
     } else {
         serial_println!("[test] phase 16.4 ECHEC - {} verifications incorrectes sur {}", failed, passed + failed);
+    }
+    selftest_done()
+}
+
+/// Self-test of the Python interpreter (16.5): the corpus checked against
+/// CPython 3.13, a program of several files, `dev interpret`.
+fn task_python_selftest() -> ! {
+    let started = idt::ticks();
+    let (conforming, passed, failed) = sdk::python::selftest::run();
+    let elapsed_ms = (idt::ticks() - started) * 1000 / TIMER_HZ as u64;
+    if failed == 0 {
+        serial_println!(
+            "[test] phase 16.5 validee - {} programmes conformes a CPython 3.13, {} verifications de dev interpret Python ({} ms)",
+            conforming,
+            passed,
+            elapsed_ms
+        );
+    } else {
+        serial_println!("[test] phase 16.5 ECHEC - {} verifications incorrectes sur {}", failed, passed + failed);
     }
     selftest_done()
 }

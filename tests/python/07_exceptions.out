@@ -1,0 +1,45 @@
+0 ValueError zero interdit ValueError('zero interdit') ('zero interdit',)
+0 finally
+1 KeyError 'cle' KeyError('cle') ('cle',)
+1 finally
+2 div division by zero
+2 finally
+3 lookup IndexError list index out of range
+3 finally
+4 KeyError 'x' KeyError('x') ('x',)
+4 finally
+5 ValueError invalid literal for int() with base 10: 'abc' ValueError("invalid literal for int() with base 10: 'abc'") ("invalid literal for int() with base 10: 'abc'",)
+5 finally
+6 autre NameError name 'undefined_name' is not defined
+6 finally
+7 autre TypeError can only concatenate str (not "int") to str
+7 finally
+8 autre AttributeError 'NoneType' object has no attribute 'attr'
+8 finally
+9 autre RuntimeError 
+9 finally
+10 ok
+10 else
+10 finally
+finally avant le retour
+try
+tour 0
+tour 1
+tour 2
+2
+code 42 42 True
+ValueError('b') KeyError('a') True
+ZeroDivisionError('division by zero')
+reraise x
+AssertionError: assertion fausse
+v False
+stop 5
+ModuleNotFoundError No module named 'module_inexistant'
+pop from empty list
+invalid literal for int() with base 10: '12x'
+ValueError('interne')
+True True -
+('une', 'deux') ('une', 'deux')
+ArithmeticError rattrape
+RecursionError: maximum recursion depth exceeded
+--- exit 3

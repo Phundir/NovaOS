@@ -113,6 +113,19 @@ impl Num {
         }
     }
 
+    /// The value as sign, integer significand and binary exponent:
+    /// `m * 2^e` (finite numbers only).
+    pub fn decompose(self) -> (bool, u64, i32) {
+        let p = self.parts();
+        (p.negative, p.m, p.e)
+    }
+
+    /// The double nearest `m * 2^e` (sign apart), ties to even; `m`'s
+    /// lowest bit may stand for lost bits below it (see `pack`).
+    pub fn from_parts(negative: bool, e: i32, m: u128) -> Num {
+        Self::pack(negative, e, m)
+    }
+
     /// Rounds `m * 2^e` (sign apart) to the nearest double, ties to even.
     /// `m`'s lowest bit may be a sticky bit standing for lost bits below
     /// it; there must be at least two bits of margin under the 53 kept.
@@ -555,7 +568,7 @@ impl Num {
     /// The exact decimal expansion of a finite positive number: digits
     /// (no leading or trailing zero) and `point` such that the value is
     /// 0.DIGITS * 10^point.
-    fn exact_decimal(self) -> (Vec<u8>, i32) {
+    pub fn exact_decimal(self) -> (Vec<u8>, i32) {
         let p = self.parts();
         let (digits, point) = if p.e >= 0 {
             let digits = Big::from_u128(p.m as u128).shl(p.e as u32).decimal();
@@ -576,11 +589,18 @@ impl Num {
     /// Rounds an exact expansion to `count` significant digits, halves
     /// up.
     fn round_digits(digits: &[u8], point: i32, count: usize) -> (Vec<u8>, i32) {
+        Self::round_digits_with(digits, point, count, false)
+    }
+
+    /// The same, an exact half going to the even digit when `even`.
+    fn round_digits_with(digits: &[u8], point: i32, count: usize, even: bool) -> (Vec<u8>, i32) {
         if digits.len() <= count {
             return (digits.to_vec(), point);
         }
         let mut kept = digits[..count].to_vec();
-        if digits[count] >= b'5' {
+        let exact_half = digits[count] == b'5' && digits[count + 1..].iter().all(|d| *d == b'0');
+        let up = if even && exact_half { kept.last().is_some_and(|d| (d - b'0') % 2 == 1) } else { digits[count] >= b'5' };
+        if up {
             let mut index = count;
             loop {
                 if index == 0 {
@@ -602,11 +622,14 @@ impl Num {
         (kept, point)
     }
 
-    /// The shortest digits that read back as this number.
-    fn shortest(self) -> (Vec<u8>, i32) {
+    /// The shortest digits that read back as this number (positive and
+    /// finite): digits and `point`, the value being 0.DIGITS * 10^point.
+    pub fn shortest(self) -> (Vec<u8>, i32) {
         let (digits, point) = self.exact_decimal();
+        // Of two shortest candidates at the same distance, the even one
+        // (ECMAScript's Number::toString, Python's repr).
         for count in 1..=17 {
-            let (candidate, candidate_point) = Self::round_digits(&digits, point, count);
+            let (candidate, candidate_point) = Self::round_digits_with(&digits, point, count, true);
             let exponent = candidate_point - candidate.len() as i32;
             if Self::from_decimal(&candidate, exponent).0 == self.abs().0 {
                 return (candidate, candidate_point);
@@ -1108,11 +1131,15 @@ impl Num {
             // the rounding of 1 + x.
             return Self::ONE.add(self);
         }
-        let x = wide::from_num(self);
+        Self::exp_wide(wide::from_num(self))
+    }
+
+    /// e^x of a fixed-point x (FRAC fractional bits), rounded once.
+    fn exp_wide(x: i128) -> Num {
         let k = x.div_euclid(wide::LN2 as i128);
         let r = (x - k * wide::LN2 as i128) as u128;
         let sum = wide::exp_reduced(r);
-        Self::pack(false, k as i32 - wide::FRAC as i32, sum)
+        Self::pack(false, (k as i32).saturating_sub(wide::FRAC as i32), sum)
     }
 
     /// x * 2^n.
@@ -1140,6 +1167,12 @@ impl Num {
         if self.equals(Self::ONE) {
             return Self::ZERO;
         }
+        let total = self.ln_wide();
+        Self::pack(total < 0, -(wide::FRAC as i32), total.unsigned_abs())
+    }
+
+    /// ln of a positive finite number in fixed point (FRAC bits).
+    fn ln_wide(self) -> i128 {
         let p = Self::normalized(self.parts());
         // value = (m / 2^52) * 2^(e + 52), m / 2^52 in [1, 2).
         let mut k = p.e as i128 + 52;
@@ -1149,10 +1182,72 @@ impl Num {
             m >>= 1;
             k += 1;
         }
-        let total = k * wide::LN2 as i128 + wide::ln_reduced(m);
-        Self::pack(total < 0, -(wide::FRAC as i32), total.unsigned_abs())
+        k * wide::LN2 as i128 + wide::ln_reduced(m)
     }
 
+    /// log2 x, with ln x divided by ln 2 in fixed point before the one
+    /// rounding: an exact power of two gives its exponent exactly.
+    pub fn log2(self) -> Num {
+        self.log_with(wide::LN2)
+    }
+
+    /// log10 by fdlibm's formula (glibc's and V8's): x = 2^k m, then
+    /// k log10(2) in two parts plus log(m) / ln(10). Not always correctly
+    /// rounded, but what CPython and Node print; exact for powers of ten.
+    pub fn log10(self) -> Num {
+        const IVLN10: Num = Num(0x3fdb_cb7b_1526_e50e);
+        const LOG10_2HI: Num = Num(0x3fd3_4413_509f_6000);
+        const LOG10_2LO: Num = Num(0x3d59_fef3_11f1_2b36);
+        if self.is_nan() || (self.is_sign_negative() && !self.is_zero()) {
+            return Self::NAN;
+        }
+        if self.is_zero() {
+            return Self::NEG_INFINITY;
+        }
+        if self.is_infinite() {
+            return self;
+        }
+        let mut x = self;
+        let mut k: i32 = 0;
+        let mut high = (x.0 >> 32) as u32;
+        if high < 0x0010_0000 {
+            // Subnormal: scaled up first.
+            k -= 54;
+            x = x.mul(Self::ONE.scale2(54));
+            high = (x.0 >> 32) as u32;
+        }
+        k += (high >> 20) as i32 - 1023;
+        let i = ((k as u32) & 0x8000_0000) >> 31;
+        let high = (high & 0x000f_ffff) | ((0x3ff - i) << 20);
+        let y = Self::from_i64((k + i as i32) as i64);
+        let m = Num((x.0 & 0xffff_ffff) | ((high as u64) << 32));
+        let z = y.mul(LOG10_2LO).add(IVLN10.mul(m.ln()));
+        z.add(y.mul(LOG10_2HI))
+    }
+
+    fn log_with(self, divisor: u128) -> Num {
+        if self.is_nan() || (self.is_sign_negative() && !self.is_zero()) {
+            return Self::NAN;
+        }
+        if self.is_zero() {
+            return Self::NEG_INFINITY;
+        }
+        if self.is_infinite() {
+            return self;
+        }
+        if self.equals(Self::ONE) {
+            return Self::ZERO;
+        }
+        let total = self.ln_wide();
+        let magnitude = total.unsigned_abs();
+        let value = ((magnitude / divisor) << wide::FRAC) | wide::div(magnitude % divisor, divisor);
+        Self::pack(total < 0, -(wide::FRAC as i32), value)
+    }
+
+    /// x^y, correctly rounded but in vanishingly rare cases: y ln x in
+    /// 116-bit fixed point (ln as `ln`, the product exact), then e^ as
+    /// `exp`, one rounding at the end. Repeated multiplication would
+    /// round at each step: `2 ** 0.5` must be `Math.SQRT2`.
     pub fn pow(self, exponent: Num) -> Num {
         if exponent.is_nan() {
             return Self::NAN;
@@ -1163,136 +1258,284 @@ impl Num {
         if self.is_nan() {
             return Self::NAN;
         }
-        if let Some(n) = exponent.to_i64_exact() {
-            if n.unsigned_abs() <= 1 << 20 {
-                let mut result = Self::ONE;
-                let mut base = self;
-                let mut count = n.unsigned_abs();
-                while count > 0 {
-                    if count & 1 == 1 {
-                        result = result.mul(base);
-                    }
-                    base = base.mul(base);
-                    count >>= 1;
-                }
-                return if n < 0 { Self::ONE.div(result) } else { result };
-            }
+        let integer = exponent.is_integer() && exponent.is_finite();
+        let odd = integer && exponent.abs().lt(Self::lit(1 << 53)) && exponent.to_i64_saturating() & 1 == 1;
+        // The exactly rounded cases.
+        if exponent.equals(Self::ONE) {
+            return self;
+        }
+        if exponent.equals(Self::TWO) {
+            return self.mul(self);
+        }
+        if exponent.equals(Self::ONE.neg()) {
+            return Self::ONE.div(self);
         }
         if self.abs().equals(Self::ONE) && exponent.is_infinite() {
             return Self::NAN;
         }
-        if self.is_sign_negative() && !self.is_zero() {
-            if exponent.is_infinite() {
-                return self.abs().pow(exponent);
-            }
+        if exponent.is_infinite() {
+            let grows = Self::ONE.lt(self.abs()) == !exponent.is_sign_negative();
+            return if grows { Self::INFINITY } else { Self::ZERO };
+        }
+        if self.is_sign_negative() && !self.is_zero() && !integer {
             return Self::NAN;
         }
-        if self.is_zero() {
-            return if exponent.is_sign_negative() { Self::INFINITY } else { Self::ZERO };
+        let negative = self.is_sign_negative() && odd;
+        let sign = |v: Num| if negative { v.neg() } else { v };
+        if self.is_zero() || self.is_infinite() {
+            // 0^y and inf^y: 0 or infinity, the sign of an odd power kept.
+            let large = self.is_infinite() != exponent.is_sign_negative();
+            return sign(if large { Self::INFINITY } else { Self::ZERO });
         }
-        exponent.mul(self.ln()).exp()
+        let base = self.abs();
+        if base.equals(Self::ONE) {
+            return sign(Self::ONE);
+        }
+        // Far beyond the range: the double estimate decides.
+        let estimate = exponent.mul(base.ln());
+        if Self::lit(1100).lt(estimate.abs()) {
+            return sign(if estimate.is_sign_negative() { Self::ZERO } else { Self::INFINITY });
+        }
+        let l = base.ln_wide();
+        let (y_negative, m, e) = exponent.decompose();
+        // |l| * m exactly (192 bits), then scaled by 2^e.
+        let magnitude = l.unsigned_abs();
+        let low = (magnitude & u64::MAX as u128) * m as u128;
+        let high = (magnitude >> 64) * m as u128 + (low >> 64);
+        let low = low as u64;
+        // The estimate bounds the result under 2^127: the shifts below
+        // lose no bit.
+        let product: u128 = if e >= 0 {
+            let full = (high << 64) | low as u128;
+            if high >> 63 != 0 || e as u32 >= full.leading_zeros() {
+                return sign(if (l < 0) != y_negative { Self::ZERO } else { Self::INFINITY });
+            }
+            full << e as u32
+        } else {
+            let shift = (-e) as u32;
+            if shift >= 192 {
+                0
+            } else if shift >= 64 {
+                high >> (shift - 64)
+            } else {
+                (high << (64 - shift)) | ((low as u128) >> shift)
+            }
+        };
+        if product >> 126 != 0 {
+            return sign(if (l < 0) != y_negative { Self::ZERO } else { Self::INFINITY });
+        }
+        let total = if (l < 0) != y_negative { -(product as i128) } else { product as i128 };
+        sign(Self::exp_wide(total))
     }
 
-    /// sin and cos by reduction to [-pi/4, pi/4] and Taylor series.
-    fn sin_cos(self) -> (Num, Num) {
-        // Cody-Waite: pi/2 in two parts, the first with few enough bits
-        // that quadrant * part is exact, so the reduction loses nothing
-        // for the arguments a page uses.
-        const PIO2_HIGH: Num = Num(0x3ff9_21fb_5440_0000);
-        const PIO2_LOW: Num = Num(0x3dd0_b461_1a62_6331);
-        let half_pi = Self::PI.div(Self::TWO);
-        let quadrant = self.div(half_pi).round();
-        let r = self.sub(quadrant.mul(PIO2_HIGH)).sub(quadrant.mul(PIO2_LOW));
-        let r2 = r.mul(r);
-        let mut sin = r;
-        let mut cos = Self::ONE;
-        let mut sin_term = r;
-        let mut cos_term = Self::ONE;
-        for index in 1..20 {
-            sin_term = sin_term.mul(r2).div(Self::lit((2 * index) * (2 * index + 1))).neg();
-            cos_term = cos_term.mul(r2).div(Self::lit((2 * index - 1) * (2 * index))).neg();
-            sin = sin.add(sin_term);
-            cos = cos.add(cos_term);
+    // --------------------------------------------------------
+    //  Trigonometry, in fixed point
+    // --------------------------------------------------------
+
+    /// |x| modulo pi/2 for |x| >= pi/4: the quadrant (mod 4) and the
+    /// remainder in fixed point, in [-pi/4, pi/4]. Payne-Hanek: the
+    /// window of 2/pi's bits that matters for x's exponent, times x's
+    /// significand, exactly; 1e300 reduces as well as 3.
+    fn reduce_pio2(self) -> (u32, i128) {
+        let (_, m, e) = self.abs().decompose();
+        // x * 2/pi = m * 2^e * T; bits i <= e - 2 of T only add multiples
+        // of 4, bits past e + 185 less than 2^-128.
+        let last = e + 185;
+        let first = (e - 1).max(1);
+        let mut window = [0u64; 4];
+        for i in first..=last {
+            let index = (i - 1) as usize;
+            let bit = (wide::TWO_OVER_PI[index / 64] >> (63 - index % 64)) & 1;
+            let mut carry = bit;
+            for limb in window.iter_mut() {
+                let next = *limb >> 63;
+                *limb = (*limb << 1) | carry;
+                carry = next;
+            }
         }
-        match quadrant.to_i64_saturating().rem_euclid(4) {
-            0 => (sin, cos),
-            1 => (cos, sin.neg()),
-            2 => (sin.neg(), cos.neg()),
-            _ => (cos.neg(), sin),
+        // m * window: five limbs.
+        let mut product = [0u64; 5];
+        let mut carry = 0u128;
+        for (i, limb) in window.iter().enumerate() {
+            let t = *limb as u128 * m as u128 + carry;
+            product[i] = t as u64;
+            carry = t >> 64;
         }
+        product[4] = carry as u64;
+        // Bits 61..187: x * 2/pi mod 4 with 124 fractional bits.
+        let mut v: u128 = 0;
+        for bit in (61..187).rev() {
+            v = (v << 1) | ((product[bit / 64] >> (bit % 64)) & 1) as u128;
+        }
+        let mut quadrant = (v >> 124) as u32 & 3;
+        let mut f = (v & ((1u128 << 124) - 1)) as i128;
+        if f >= 1i128 << 123 {
+            quadrant = (quadrant + 1) & 3;
+            f -= 1i128 << 124;
+        }
+        // To 116 bits, times pi/2.
+        let magnitude = f.unsigned_abs() >> 8;
+        let r = wide::mul(magnitude, wide::PIO2) as i128;
+        (quadrant, if f < 0 { -r } else { r })
+    }
+
+    /// sin r and cos r for r in [0, pi/4], fixed point: their series.
+    fn sin_cos_wide(r: u128) -> (u128, u128) {
+        let r2 = wide::mul(r, r);
+        let mut sin = r as i128;
+        let mut term = r;
+        let mut k = 1u128;
+        loop {
+            term = wide::mul(term, r2) / ((2 * k) * (2 * k + 1));
+            if term == 0 {
+                break;
+            }
+            sin += if k % 2 == 1 { -(term as i128) } else { term as i128 };
+            k += 1;
+        }
+        let mut cos = wide::ONE as i128;
+        let mut term = wide::ONE;
+        let mut k = 1u128;
+        loop {
+            term = wide::mul(term, r2) / ((2 * k - 1) * (2 * k));
+            if term == 0 {
+                break;
+            }
+            cos += if k % 2 == 1 { -(term as i128) } else { term as i128 };
+            k += 1;
+        }
+        (sin.max(0) as u128, cos.max(0) as u128)
+    }
+
+    /// sin x and cos x as signed fixed-point values.
+    fn sin_cos_fixed(self) -> (i128, i128) {
+        let a = self.abs();
+        let (quadrant, r) = if a.lt(Self::lit(785).div(Self::lit(1000))) {
+            let (_, m, e) = a.decompose();
+            (0, ((m as u128) << (e + wide::FRAC as i32) as u32) as i128)
+        } else {
+            a.reduce_pio2()
+        };
+        let (s, c) = Self::sin_cos_wide(r.unsigned_abs());
+        let s = if r < 0 { -(s as i128) } else { s as i128 };
+        let c = c as i128;
+        let (sin, cos) = match quadrant {
+            0 => (s, c),
+            1 => (c, -s),
+            2 => (-s, -c),
+            _ => (-c, s),
+        };
+        (if self.is_sign_negative() { -sin } else { sin }, cos)
+    }
+
+    fn from_wide(value: i128) -> Num {
+        Self::pack(value < 0, -(wide::FRAC as i32), value.unsigned_abs())
     }
 
     pub fn sin(self) -> Num {
         if !self.is_finite() {
             return Self::NAN;
         }
-        if self.is_zero() {
+        // sin x = x - x^3/6...: below 2^-27 the cube cannot move x.
+        if self.abs().lt(Self::ONE.scale2(-27)) {
             return self;
         }
-        self.sin_cos().0
+        Self::from_wide(self.sin_cos_fixed().0)
     }
 
     pub fn cos(self) -> Num {
         if !self.is_finite() {
             return Self::NAN;
         }
-        self.sin_cos().1
+        if self.abs().lt(Self::ONE.scale2(-27)) {
+            return Self::ONE;
+        }
+        Self::from_wide(self.sin_cos_fixed().1)
     }
 
     pub fn tan(self) -> Num {
-        let (sin, cos) = self.sin_cos();
         if !self.is_finite() {
             return Self::NAN;
         }
-        sin.div(cos)
+        if self.abs().lt(Self::ONE.scale2(-27)) {
+            return self;
+        }
+        let (s, c) = self.sin_cos_fixed();
+        if c == 0 {
+            return if s < 0 { Self::NEG_INFINITY } else { Self::INFINITY };
+        }
+        let (q, exponent) = wide::ratio(s.unsigned_abs(), c.unsigned_abs());
+        Self::pack((s < 0) != (c < 0), exponent, q)
     }
 
-    /// atan: reduced below tan(pi/12) by two identities, then a series.
+    /// A positive finite double in fixed point (truncated below 2^-116).
+    fn to_wide(self) -> u128 {
+        let (_, m, e) = self.decompose();
+        let shift = e + wide::FRAC as i32;
+        if shift >= 0 { (m as u128) << shift as u32 } else if shift > -64 { (m >> (-shift) as u32) as u128 } else { 0 }
+    }
+
+    /// atan of t in [0, 1], fixed point: t = c + d with c the nearest
+    /// eighth, atan t = atan c + atan((t - c) / (1 + t c)), the second by
+    /// its series (|argument| <= 1/16).
+    fn atan_wide(t: u128) -> i128 {
+        let k = ((t + (wide::ONE >> 4)) >> (wide::FRAC - 3)).min(8);
+        let c = k << (wide::FRAC - 3);
+        let den = wide::ONE + wide::mul(t, c);
+        let (num, negative) = if t >= c { (t - c, false) } else { (c - t, true) };
+        let u = wide::div(num, den);
+        let u2 = wide::mul(u, u);
+        let mut power = u;
+        let mut sum = u as i128;
+        let mut n = 1u128;
+        loop {
+            power = wide::mul(power, u2);
+            if power == 0 {
+                break;
+            }
+            let term = (power / (2 * n + 1)) as i128;
+            sum += if n % 2 == 1 { -term } else { term };
+            n += 1;
+        }
+        wide::ATAN_EIGHTHS[k as usize] as i128 + if negative { -sum } else { sum }
+    }
+
+    /// The angle of (x, y) for x, y >= 0 in fixed point, in [0, pi/2].
+    fn angle_wide(x: u128, y: u128) -> i128 {
+        if y == x {
+            return wide::ATAN_EIGHTHS[8] as i128;
+        }
+        if y < x {
+            Self::atan_wide(wide::div(y, x))
+        } else {
+            wide::PIO2 as i128 - Self::atan_wide(wide::div(x, y))
+        }
+    }
+
     pub fn atan(self) -> Num {
         if self.is_nan() || self.is_zero() {
             return self;
         }
-        if self.is_infinite() {
-            let half_pi = Self::PI.div(Self::TWO);
-            return if self.is_sign_negative() { half_pi.neg() } else { half_pi };
+        let a = self.abs();
+        if a.lt(Self::ONE.scale2(-27)) {
+            return self;
         }
-        let negative = self.is_sign_negative();
-        let mut x = self.abs();
-        let mut offset = Self::ZERO;
-        let mut inverted = false;
-        if x.partial_cmp(Self::ONE) == Some(Ordering::Greater) {
-            x = Self::ONE.div(x);
-            inverted = true;
-        }
-        // tan(pi/12) = 2 - sqrt(3).
-        let tan_pi_12 = Self::TWO.sub(Self::lit(3).sqrt());
-        if x.partial_cmp(tan_pi_12) == Some(Ordering::Greater) {
-            let sqrt3 = Self::lit(3).sqrt();
-            x = x.mul(sqrt3).sub(Self::ONE).div(sqrt3.add(x));
-            offset = Self::PI.div(Self::lit(6));
-        }
-        let x2 = x.mul(x);
-        let mut term = x;
-        let mut sum = x;
-        let mut index = 3;
-        while index < 80 {
-            term = term.mul(x2).neg();
-            let next = sum.add(term.div(Self::lit(index)));
-            if next.0 == sum.0 {
-                break;
+        let angle = if a.lt(Self::ONE.scale2(60)) {
+            if !Self::ONE.lt(a) {
+                Self::atan_wide(a.to_wide())
+            } else {
+                // 1/a in fixed point, then pi/2 - atan(1/a).
+                let (_, m, e) = a.decompose();
+                let (q, exponent) = wide::ratio(1, m as u128);
+                let shift = exponent - e + wide::FRAC as i32;
+                let inverse = if shift >= 0 { q << shift as u32 } else { q >> (-shift) as u32 };
+                wide::PIO2 as i128 - Self::atan_wide(inverse)
             }
-            sum = next;
-            index += 2;
-        }
-        let mut result = sum.add(offset);
-        if inverted {
-            result = Self::PI.div(Self::TWO).sub(result);
-        }
-        if negative {
-            result.neg()
         } else {
-            result
-        }
+            wide::PIO2 as i128
+        };
+        let r = Self::from_wide(angle);
+        if self.is_sign_negative() { r.neg() } else { r }
     }
 
     pub fn atan2(self, x: Num) -> Num {
@@ -1300,37 +1543,88 @@ impl Num {
         if y.is_nan() || x.is_nan() {
             return Self::NAN;
         }
+        let half_pi = Self::from_wide(wide::PIO2 as i128);
+        let pi = Self::from_wide(wide::PI as i128);
+        let signed = |v: Num| if y.is_sign_negative() { v.neg() } else { v };
+        if y.is_zero() {
+            return if x.is_sign_negative() { signed(pi) } else { y };
+        }
         if x.is_zero() {
-            if y.is_zero() {
-                return if x.is_sign_negative() {
-                    if y.is_sign_negative() { Self::PI.neg() } else { Self::PI }
-                } else {
-                    y
-                };
-            }
-            let half_pi = Self::PI.div(Self::TWO);
-            return if y.is_sign_negative() { half_pi.neg() } else { half_pi };
+            return signed(half_pi);
         }
-        let base = y.div(x).atan();
-        if x.is_sign_negative() {
-            if y.is_sign_negative() { base.sub(Self::PI) } else { base.add(Self::PI) }
+        if x.is_infinite() || y.is_infinite() {
+            let angle = match (x.is_infinite(), y.is_infinite(), x.is_sign_negative()) {
+                (true, true, false) => Self::from_wide(wide::PIO2 as i128 / 2),
+                (true, true, true) => Self::from_wide(3 * (wide::PIO2 as i128) / 2),
+                (true, false, false) => Self::ZERO,
+                (true, false, true) => pi,
+                _ => half_pi,
+            };
+            return signed(angle);
+        }
+        let (ay, ax) = (y.abs(), x.abs());
+        // The ratio of the two, from their significands.
+        let (_, my, ey) = ay.decompose();
+        let (_, mx, ex) = ax.decompose();
+        let (q, exponent) = wide::ratio(my as u128, mx as u128);
+        let scale = exponent + ey - ex;
+        // y/x tiny: the angle is y/x (or pi minus it).
+        let bits = 128 - q.leading_zeros() as i32 + scale;
+        if bits < -27 {
+            return if x.is_sign_negative() { signed(pi) } else { y.div(x) };
+        }
+        let angle = if bits <= 0 {
+            let shift = scale + wide::FRAC as i32;
+            let t = if shift >= 0 { q << shift as u32 } else { q >> (-shift) as u32 };
+            Self::atan_wide(t.min(wide::ONE))
         } else {
-            base
+            let (q2, exponent2) = wide::ratio(mx as u128, my as u128);
+            let shift = exponent2 + ex - ey + wide::FRAC as i32;
+            let t = if shift >= 0 { q2 << shift.min(127) as u32 } else { q2 >> (-shift).min(127) as u32 };
+            wide::PIO2 as i128 - Self::atan_wide(t.min(wide::ONE))
+        };
+        let angle = if x.is_sign_negative() { wide::PI as i128 - angle } else { angle };
+        signed(Self::from_wide(angle))
+    }
+
+    /// sqrt of a fixed-point value in [0, 1]: Newton from the double.
+    fn sqrt_wide(s: u128) -> u128 {
+        if s == 0 {
+            return 0;
         }
+        let estimate = Self::pack(false, -(wide::FRAC as i32), s).sqrt();
+        let mut y = estimate.to_wide().max(1);
+        for _ in 0..3 {
+            if s >= y {
+                break;
+            }
+            y = (y + wide::div(s, y)) / 2;
+        }
+        y
     }
 
     pub fn asin(self) -> Num {
         if self.abs().partial_cmp(Self::ONE) == Some(Ordering::Greater) || self.is_nan() {
             return Self::NAN;
         }
-        self.atan2(Self::ONE.sub(self.mul(self)).sqrt())
+        if self.abs().lt(Self::ONE.scale2(-27)) {
+            return self;
+        }
+        let a = self.abs().to_wide();
+        let c = Self::sqrt_wide(wide::ONE - wide::mul(a, a).min(wide::ONE));
+        let r = Self::from_wide(Self::angle_wide(c, a));
+        if self.is_sign_negative() { r.neg() } else { r }
     }
 
     pub fn acos(self) -> Num {
         if self.abs().partial_cmp(Self::ONE) == Some(Ordering::Greater) || self.is_nan() {
             return Self::NAN;
         }
-        Self::ONE.sub(self.mul(self)).sqrt().atan2(self)
+        let a = self.abs().to_wide();
+        let s = Self::sqrt_wide(wide::ONE - wide::mul(a, a).min(wide::ONE));
+        // acos |x| = angle of (|x|, sqrt(1 - x^2)); acos(-x) = pi - acos x.
+        let angle = Self::angle_wide(a, s);
+        Self::from_wide(if self.is_sign_negative() { wide::PI as i128 - angle } else { angle })
     }
 
     pub fn cbrt(self) -> Num {
@@ -1383,11 +1677,56 @@ mod wide {
     use super::Num;
 
     pub const FRAC: u32 = 116;
-    const ONE: u128 = 1 << FRAC;
+    pub const ONE: u128 = 1 << FRAC;
     /// floor(ln 2 * 2^116).
     pub const LN2: u128 = 0xb17217f7d1cf79abc9e3b39803f2f;
     /// sqrt(2) * 2^116, rounded up (only compared against).
     pub const SQRT2: u128 = 0x16a09e667f3bcc908b2fb1366ea958;
+    /// floor(pi/2 * 2^116) and floor(pi * 2^116).
+    pub const PIO2: u128 = 0x1921fb54442d18469898cc51701b83;
+    pub const PI: u128 = 0x3243f6a8885a308d313198a2e03707;
+    /// atan(k/8) for k = 0..8, floor(* 2^116).
+    pub const ATAN_EIGHTHS: [u128; 9] = [
+        0x0,
+        0x1fd5ba9aac2f6dc65912f313e7d11,
+        0x3eb6ebf25901bac55b71e7bd7de88,
+        0x5bd86507937bc239c55190916e7f2,
+        0x76b19c1586ed3da2b7f222f65e1d4,
+        0x8f005d5ef7f59f9b5c835e1665c43,
+        0xa4bc7d1934f7092419a87f2a457da,
+        0xb8053e2bc2319e73cb2da55210a44,
+        0xc90fdaa22168c234c4c6628b80dc1,
+    ];
+    /// The first 1280 bits of 2/pi (all fractional), for `reduce_pio2`.
+    pub const TWO_OVER_PI: [u64; 20] = [
+        0xa2f9836e4e441529, 0xfc2757d1f534ddc0, 0xdb6295993c439041, 0xfe5163abdebbc561, 0xb7246e3a424dd2e0,
+        0x06492eea09d1921c, 0xfe1deb1cb129a73e, 0xe88235f52ebb4484, 0xe99c7026b45f7e41, 0x3991d639835339f4,
+        0x9c845f8bbdf9283b, 0x1ff897ffde05980f, 0xef2f118b5a0a6d1f, 0x6d367ecf27cb09b7, 0x4f463f669e5fea2d,
+        0x7527bac7ebe5f17b, 0x3d0739f78a5292ea, 0x6bfb5fb11f8d5d08, 0x56033046fc7b6bab, 0xf0cfbc209af4361d,
+    ];
+
+    /// num / den for any non-zero num and den: q * 2^exponent with q of
+    /// 125 bits, its lowest bit sticky.
+    pub fn ratio(num: u128, den: u128) -> (u128, i32) {
+        let nz = num.leading_zeros() as i32 - 1;
+        let dz = den.leading_zeros() as i32 - 1;
+        let n = if nz >= 0 { num << nz as u32 } else { num >> 1 };
+        let d = if dz >= 0 { den << dz as u32 } else { den >> 1 };
+        let mut remainder = n;
+        let mut q = 0u128;
+        for _ in 0..125 {
+            q <<= 1;
+            if remainder >= d {
+                remainder -= d;
+                q |= 1;
+            }
+            remainder <<= 1;
+        }
+        if remainder != 0 {
+            q |= 1;
+        }
+        (q, dz - nz - 124)
+    }
 
     /// (a * b) >> FRAC, for a, b < 2^118.
     pub fn mul(a: u128, b: u128) -> u128 {
@@ -1402,7 +1741,7 @@ mod wide {
     }
 
     /// floor(a / b * 2^FRAC), for a < b < 2^118: long division.
-    fn div(a: u128, b: u128) -> u128 {
+    pub fn div(a: u128, b: u128) -> u128 {
         let mut remainder = a;
         let mut quotient = 0u128;
         for _ in 0..FRAC {

@@ -1,0 +1,25 @@
+a = [5, 3, 8, 1]
+a.append(9); a.insert(0, 7); a.extend([2, 2])
+print(a, a.count(2), a.index(8), a.pop(), a.pop(0), a)
+a.remove(2); a.sort(); print(a); a.reverse(); print(a)
+b = a.copy(); b[0] = 100; print(a[0], b[0], a == b, a is b)
+print(sorted([3, -1, 2], key=abs), sorted(["b", "A", "c"], key=str.lower), sorted([(1, "b"), (1, "a"), (0, "z")]))
+words = ["pomme", "kiwi", "banane", "fig"]
+print(sorted(words, key=len), sorted(words, key=lambda w: (-len(w), w)), max(words, key=len), min(words))
+m = [[1, 2, 3], [4, 5, 6]]
+print([row[1] for row in m], [[r[i] for r in m] for i in range(3)], list(zip(*m)), [x for row in m for x in row if x % 2])
+print([i * i for i in range(10) if i % 3 == 0], {i: i * i for i in range(4)}, {c for c in "mississippi"})
+a = list(range(10))
+a[2:5] = ["x"]; print(a); del a[::2]; print(a); a[1:1] = [0, 0]; print(a)
+print(list(enumerate("abc", 1)), list(zip("ab", [1, 2, 3])), list(map(str, [1, 2])), list(filter(None, [0, 1, "", "a"])))
+print(any(x > 3 for x in [1, 5]), all([]), [1, 2] + [3], [0] * 4, [[0] * 2] * 2, 3 in [1, 2, 3], list(reversed([1, 2, 3])))
+x, *y, z = [1, 2, 3, 4, 5]; print(x, y, z)
+(p, q), r = (1, 2), 3; print(p, q, r)
+first, second = "ab"; print(first, second)
+t = (1, 2, 3); print(t, t[1:], t * 2, t + (4,), len(t), t.count(2), t.index(3), (1,), ())
+print(list(range(0, 10, 3)), list(range(10, 0, -3)), range(5)[2], range(0, 20, 5)[-1], len(range(1, 100, 7)), 7 in range(0, 10, 7))
+nested = [1, [2, [3, [4]]]]
+print(nested, nested[1][1][1][0], str(nested))
+a = [1, 2, 3]; a.append(a); print(a)
+d = {}; d["self"] = d; print(d)
+print([1, 2, 3].__len__(), [].__class__, type([]) is list, isinstance([], (list, tuple)))

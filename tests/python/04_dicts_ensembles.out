@@ -1,0 +1,14 @@
+{'pomme': 3, 'kiwi': 2, 'banane': 5, 'fig': 7, 'y': 9} 4 True None 0 9 {'pomme': 3, 'kiwi': 2, 'banane': 5, 'fig': 7, 'y': 9}
+['pomme', 'kiwi', 'banane', 'fig', 'y'] [3, 2, 5, 7, 9] [('pomme', 3), ('kiwi', 2), ('banane', 5), ('fig', 7), ('y', 9)] 9 absent
+[('kiwi', 2), ('pomme', 3), ('banane', 5), ('fig', 7)] {3: 'pomme', 2: 'kiwi', 5: 'banane', 7: 'fig'} {'a': 0, 'b': 1, 'c': 2}
+{'a': 0, 'b': 0} {'a': 1, 'b': 2} {'x': 1} ('fig', 7) {'pomme': 3, 'kiwi': 2, 'banane': 5}
+{'le': 3, 'chat': 1, 'et': 2, 'chien': 1, 'rat': 1} le
+{2, 3, 20, 10} 4 True {2, 3} {10, 3, 20} {2, 10, 4, 20} True False
+{'e', 'h', 'l', 'o'} frozenset({1, 2, 3}) set() {1, 2, 5, 6} {3}
+['a', 'b'] {(1, 2)} {1.0} {0} True
+{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12} True {1: 'a', 2: 'b'}
+{} False {} []
+tuple float none bool {(1, 2): 'tuple', 3.5: 'float', None: 'none', True: 'bool'}
+dict_keys(['pomme', 'kiwi', 'banane', 'nouveau']) 4 True
+{'kiwi'} - ['nouveau', 'banane', 'kiwi', 'pomme']
+RuntimeError: dictionary changed size during iteration

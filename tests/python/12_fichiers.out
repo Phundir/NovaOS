@@ -1,0 +1,19 @@
+ecrit 5
+'ligne un\nligne deux\ntrois'
+ligne un
+['ligne deux\n', 'trois']
+0 ligne un
+1 ligne deux
+2 trois
+3 quatre
+True True False 33
+('dossier/fichier.tar', '.gz') c.txt /a/b a/b/c
+a/c/d ('/x', 'y') True ('.bashrc', '')
+False
+FileNotFoundError 2 No such file or directory _inexistant.txt
+[Errno 2] No such file or directory: '_inexistant.txt'
+invalid mode: 'z'
+b'\x00\x01binaire' 9 bytes
+''
+['sous']
+False

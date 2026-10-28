@@ -64,6 +64,19 @@ phase de conception. Ce ne sont pas des réglages.
 - **Heap free-list**, pas buddy. Le kernel alloue peu et par gros blocs ; la
   fragmentation n'est pas le problème dominant. La fusion des blocs adjacents se
   fait à l'insertion, pas par un balayage postérieur.
+- **Listes rapides devant la free-list** (28 octobre 2026, 16.5). Les
+  interprètes ont cassé la prémisse « peu et par gros blocs » : un programme
+  Python alloue et libère des millions d'objets de 16 à 200 octets, et chaque
+  allocation parcourait une liste fragmentée en milliers de trous (un test de
+  tri : 0,8 s sur l'hôte, 87 s dans le noyau). Un bloc de 512 octets au plus
+  (alignement 16 au plus) est arrondi au multiple de 16 et, libéré, gardé sur
+  la liste de sa classe : la demande suivante de cette classe le reprend en
+  O(1). Les listes gardent 8 Mio au plus ; une demande que la liste principale
+  ne peut pas servir leur fait d'abord tout rendre (avec fusion), et
+  `room_for` aussi quand c'est le plus grand bloc qui manque. Résultat : 13 s
+  au lieu de 87 s pour le même test, 39 s au lieu de 119 s pour `make test`.
+  Toujours pas de buddy : la fragmentation reste mesurée par `room_for`, pas
+  constatée.
 - **Tout le premier MiB est réservé** au frame allocator : IVT, BDA, EBDA, zone
   VGA, ROM BIOS, et le trampoline SMP à `0x8000`.
 
@@ -72,7 +85,7 @@ phase de conception. Ce ne sont pas des réglages.
 | Région | Base | Contenu |
 |---|---|---|
 | Fenêtre physique | `0xFFFF800000000000` | 4 GiB en pages de 1 GiB — couvre le MMIO APIC |
-| Heap kernel | `0xFFFF808000000000` | 4 MiB en pages de 4 KiB |
+| Heap kernel | `0xFFFF808000000000` | 64 MiB en pages de 4 KiB (4 MiB à l'origine, voir `heap::HEAP_SIZE`) |
 | Kernel | `0xFFFFFFFF80000000` | Code, données, pile — pages de 2 MiB |
 | Code utilisateur | `0x400000` | Pages 4 KiB, bit USER, non modifiable |
 | Pile utilisateur | `0x800000` | Pages 4 KiB, bit USER, modifiable, NX |
@@ -4618,6 +4631,113 @@ dans un appel système qui s'endort revenait à la vie au réveil suivant.
 L'autotest 15.6.1 l'a attrapé une fois sur une dizaine de démarrages (un
 programme qui dort par tranches de 20 ms). **À ne pas réintroduire** :
 aucun changement d'état ne doit écraser `Dead`.
+
+## Interprète Python de `dev interpret` (phase 16.5) — décisions
+
+### Une machine à pile, pas un parcours d'arbre
+
+Le moteur JavaScript (16.1) parcourt l'arbre : `await` y attend sur place
+et les générateurs s'exécutent d'un bloc. Pour Python, le source est
+compilé en code à pile façon CPython (`python/compile.rs`, `code.rs`) et
+les cadres vivent **sur le tas** (`vm.rs`) : un appel Python empile un
+cadre, il ne récursionne pas en Rust. D'où de vrais générateurs (`yield`
+suspend un cadre, `send`, `throw`, `close`, `yield from`) et une
+récursion bornée par `sys.getrecursionlimit()` (1000) et non par la pile
+du noyau. Rust ne récursionne que quand du code natif rappelle Python
+(`sorted(key=...)`, un `__eq__` depuis un dict), chaque niveau contrôlé
+contre la marge de pile.
+
+### CPython comme témoin, jusqu'au dernier chiffre
+
+Le critère de 16.5 est la sortie de CPython 3.13 sur le même programme :
+`tests/python/*.py` et leurs `*.out` écrits par
+`tools/pyhost/reference.sh`, que `make py-test` (hôte, une seconde) et
+l'autotest du noyau rejouent. Ce qui en découle :
+- entiers illimités (`int.rs`), `//` et `%` vers moins l'infini, hachage
+  modulo 2^61 - 1 ;
+- flottants : le `Num` à virgule flottante logicielle du moteur JS, `repr`
+  le plus court, `round` sur la valeur décimale exacte (`round(2.675, 2)`
+  = 2.67), `sum` de flottants compensé (Neumaier, comme 3.12+) ;
+- ensembles : la table de `setobject.c` reproduite (sondes, fusion avec
+  redimensionnement anticipé, `^` partant d'une copie de l'opérande de
+  droite, littéraux de plus de deux constantes passant par un frozenset)
+  et le hachage SipHash-1-3 des chaînes à clé nulle : un ensemble
+  s'affiche dans l'ordre de `PYTHONHASHSEED=0 python3` ;
+- `random` : Mersenne Twister ensemencé comme `_randommodule.c` et les
+  algorithmes de `random.py` (`_randbelow`, `shuffle`, `sample`) :
+  `random.seed(42)` donne les tirages de CPython ;
+- messages d'erreur mot pour mot, nom qualifié compris
+  (`A.m() missing 1 required positional argument: 'x'`).
+
+### Bibliothèque standard : native ou en Python
+
+`math`, `random`, `sys`, `time`, `os`, `os.path`, `json`, `re`,
+`traceback` sont écrits en Rust. `collections`, `itertools`,
+`functools`, `dataclasses`, `enum`, `typing`, `abc`, `heapq`, `bisect`,
+`operator`, `copy`, `contextlib`, `string` sont **en Python**
+(`modules/lib/*.py`, compilés au premier import) : c'est la façon la plus
+courte de les écrire justes. `dataclass` et `namedtuple` génèrent leur
+`__init__`/`__new__` par `exec`, comme CPython, pour en avoir la
+signature et les messages. Les cadres de ces modules ne comptent pas dans
+la limite de récursion et n'apparaissent pas dans les traces : ils
+tiennent la place du C de CPython (un `lru_cache` récursif va aussi
+profond).
+
+### `re` sur le moteur d'expressions régulières du JavaScript
+
+Pas de second moteur : la syntaxe Python est traduite (`(?P<nom>`,
+`(?P=nom)`, `\A`, `\Z`, le `$` qui accepte un `\n` final, `.` qui ne
+s'arrête qu'à `\n`, `^`/`$` multilignes qui ne connaissent que `\n`,
+drapeaux en ligne, VERBOSE) et chaque motif compilé trois fois
+(recherche, ancrage à une position, `fullmatch`). Limite : `\d`, `\w`,
+`\s` ASCII.
+
+### Pas de métaclasses : des crochets à leur place
+
+`metaclass=` est accepté et sans effet. Ce que les métaclasses donnent
+aux bibliothèques passe par des crochets de classe que l'interprète
+consulte : `__class_iter__`, `__class_len__`, `__class_contains__`,
+`__class_repr__` (pour `for c in Color`, `len(Color)`, `<enum 'Color'>`),
+`__init_subclass__` (implicitement méthode de classe, comme en CPython)
+pour fabriquer les membres d'un `Enum`, calculer les méthodes abstraites
+d'un `ABC`, transformer un `NamedTuple`. Le protocole des descripteurs
+(`__get__`, `__set__`, `__delete__`, `__set_name__`) est complet.
+
+### Les cycles de références libérés en fin d'exécution
+
+Les valeurs sont comptées par référence (`Rc`). Une classe est dans sa
+propre MRO, un objet peut se contenir : sans ramasse-miettes, chaque
+exécution fuirait dans le tas du noyau. Chaque conteneur (liste, dict,
+ensemble, instance, classe, fonction, cellule, générateur, itérateur) est
+inscrit, faiblement, dans un registre élagué quand il double ; la fin de
+l'exécution les vide tous, ce qui casse tous les cycles. Un seul
+programme Python à la fois (`BUSY`) : le registre est global.
+
+### Fichiers : lus à l'ouverture, écrits à la fermeture
+
+`open` lit le fichier entier ; l'écriture se fait au `close`, au `flush`
+ou en fin d'exécution pour un fichier laissé ouvert (CPython le fait à la
+finalisation). Les chemins relatifs partent du répertoire du programme,
+comme pour Node (16.3).
+
+### Bugs du moteur JavaScript trouvés en route
+
+Comparés à la libm de CPython (glibc) sur des milliers de valeurs :
+- `sin`, `cos`, `tan`, `atan` étaient faux au dernier chiffre une fois
+  sur deux (séries en double, réduction de Cody-Waite) : réécrits en
+  virgule fixe 116 bits avec une réduction de Payne-Hanek (1280 bits de
+  2/pi), un seul arrondi ; `asin`, `acos`, `atan2` de même ;
+- `pow` arrondissait à chaque multiplication (`2 ** 0.5` donnait
+  1.414213562373095) : y ln x calculé exactement en virgule fixe, puis
+  exp, un seul arrondi ;
+- la représentation la plus courte départageait vers le haut deux
+  candidats à égale distance ; ECMAScript et CPython prennent le chiffre
+  pair ;
+- `log10` suit désormais la formule de fdlibm (celle de la glibc et de
+  V8) : c'est ce que CPython et Node affichent.
+Les écarts restants avec CPython (environ 1 sur 1300) sont tous des cas où
+la glibc n'est pas correctement arrondie et Nova l'est (vérifié avec
+mpmath).
 
 ---
 

@@ -785,8 +785,8 @@ fn check_runtime_table(report: &mut Report) {
     // `check_runtime_priority`, which needs the volume; here only the
     // absence of a delegated runtime, which needs nothing.
     report.check(
-        "aucun runtime Python n'est declare",
-        runtime::resolve(Language::Python, None).is_none(),
+        "aucun runtime Java n'est declare",
+        runtime::resolve(Language::Java, None).is_none(),
     );
     report.check(
         "l'extension .py designe Python",
@@ -2321,20 +2321,22 @@ fn check_cli(report: &mut Report, now: u64) {
         ),
     }
 
-    // A language with no interpreter in place must produce a **named** refusal.
-    let fake = alloc::format!("{}/faux.py", project);
+    // A language with no interpreter in place must produce a **named**
+    // refusal (Java: its row of 13.2 still needs a JVM nothing here
+    // carries; Python has had one since 16.5).
+    let fake = alloc::format!("{}/Faux.java", project);
     let _ = crate::fs::write_file(
         &fake,
-        b"print('x')\n",
+        b"class Faux {}\n",
         Credentials::kernel(),
         Mode::private_file(),
         now,
     );
     report.check(
-        "Python sans runtime est refuse nommement",
+        "Java sans runtime est refuse nommement",
         matches!(
             cli::execute(&alloc::format!("dev interpret {}", fake), now),
-            Err(DevError::RuntimeMissing(Language::Python))
+            Err(DevError::RuntimeMissing(Language::Java))
         ),
     );
 

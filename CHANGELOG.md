@@ -8,6 +8,45 @@ a été observé, reste dans `ROADMAP.md` ; les décisions dans `DECISIONS.md`.
 Schéma de version : `0.{phase}.{correctif}` — la phase est la dernière de
 la roadmap dont le code est complet.
 
+## [0.15.7] — 2026-10-28
+
+Phase 16.5 : un interprète Python 3 pour `dev interpret main.py`.
+
+### Ajouté
+
+- **Interprète Python** (`crate::python`, sans dépendance au noyau) :
+  compilation vers un code à pile façon CPython, cadres sur le tas,
+  générateurs complets, fermetures, classes à héritage multiple,
+  descripteurs, exceptions chaînées ; `int` illimité, `float`, `str`,
+  `bytes`, `list`, `tuple`, `dict`, `set`, `frozenset`.
+- **Bibliothèque standard** : `math`, `random` (mêmes tirages que
+  CPython), `sys`, `time`, `os`, `os.path`, `json`, `re`, `traceback` en
+  Rust ; `collections`, `itertools`, `functools`, `dataclasses`, `enum`,
+  `typing`, `abc`, `heapq`, `bisect`, `operator`, `copy`, `contextlib`,
+  `string` en Python.
+- **`dev interpret main.py`** : modules et paquets locaux, fichiers relatifs
+  au dossier du programme, droits de la session, trace et code de sortie
+  comme CPython.
+- **Corpus `tests/python/`** : vingt programmes dont la sortie est celle de
+  CPython 3.13 au caractère près ; `make py-test` les rejoue sur l'hôte
+  (`tools/pyhost`, ajouté à `make test-all` et à la CI), l'autotest dans le
+  noyau (`[test] phase 16.5 validee`).
+
+### Modifié
+
+- **Tas du noyau** : listes rapides par classe de taille (blocs de 512
+  octets au plus) devant la liste chaînée ; `make test` passe de 119 s à
+  39 s, le programme Python le plus lourd de 87 s à 13 s.
+
+### Corrigé
+
+- **Moteur JavaScript** (flottants) : `sin`, `cos`, `tan`, `atan`, `asin`,
+  `acos`, `atan2` correctement arrondis (virgule fixe, réduction de
+  Payne-Hanek) ; `pow` en un seul arrondi (`2 ** 0.5`) ; la représentation
+  la plus courte départage vers le chiffre pair ; `log10` comme fdlibm.
+- Le trou laissé devant un bloc fortement aligné n'est plus perdu quand il
+  fait moins de 16 octets.
+
 ## [0.15.6] — 2026-10-28
 
 Phase 16.4 : un débogueur pour `dev run --debug`.

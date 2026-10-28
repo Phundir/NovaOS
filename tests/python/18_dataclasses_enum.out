@@ -1,0 +1,17 @@
+Point(x=1, y=2) Point(x=3, y=0) True True {'x': 1, 'y': 2} (1, 2) ['x', 'y']
+Point(x=1, y=9) Point.__init__ True
+Inventory(items=['pomme', 'poire']) 2 Inventory(items=[])
+[Version(major=1, minor=2, tags=()), Version(major=1, minor=5, tags=()), Version(major=2, minor=0, tags=())] True
+FrozenInstanceError: cannot assign to field 'major'
+TypeError: Point.__init__() missing 1 required positional argument: 'x'
+TypeError: unhashable type: 'Point'
+3 Post(a=1, b=5)
+Color.RED <Color.GREEN: 2> Color.BLUE Color.RED RED 1 [<Color.RED: 1>, <Color.GREEN: 2>, <Color.BLUE: 3>] 3
+True True True True ['RED', 'GREEN', 'BLUE']
+ValueError: 7 is not a valid Color
+True 11 [<Prio.LOW: 1>, <Prio.HIGH: 10>] 10 True 1 10
+[('A', 1), ('B', 2), ('C', 3)]
+True False False 6
+rouge True [<Coul.ROUGE: 'rouge'>, <Coul.VERT: 'vert'>]
+[<Alias.A: 1>] True
+ValueError: duplicate values found in <enum 'Alias'>: B -> A

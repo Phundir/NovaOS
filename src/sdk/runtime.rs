@@ -24,11 +24,12 @@
 //!
 //! `Language::Script` is not in 13.2. It is a deliberate addition, of the
 //! same kind as the `NETWORK` flag added to the binary format in phase
-//! 5.6.4: 15.2 shows `dev interpret main.py`, so the SDK must have an
-//! interpreter, and writing a complete Python interpreter is not an
-//! option. Nova Script stands in its place -- it is written entirely in
-//! `sdk::script`, and it is flagged as an extension so that nobody takes
-//! it for a line of the specification.
+//! 5.6.4: 15.2 shows `dev interpret main.py`, and when 9.1.4 was written
+//! the SDK had no Python. Nova Script stood in its place -- written
+//! entirely in `sdk::script`, flagged as an extension so that nobody
+//! takes it for a line of the specification. Since 16.5 the Python row
+//! itself is `Interpreted` (`crate::python`, `sdk::python`); Nova Script
+//! stays, for the programs written for it.
 //!
 //! ## Locations (13.3, step 9.5.8)
 //!
@@ -267,7 +268,7 @@ pub static TABLE: &[RuntimeSpec] = &[
         targets: APP_ONLY,
         system_required: NONE_FORMATS,
         extensions: &["py"],
-        support: Support::Delegated,
+        support: Support::Interpreted,
         directory: "python",
     },
     RuntimeSpec {

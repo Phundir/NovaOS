@@ -9,6 +9,27 @@
 //! The free list is the one kept: it is amply enough for the needs of the
 //! kernel, which allocates little and in large blocks. A buddy allocator
 //! can replace it if the fragmentation becomes measurable.
+//!
+//! ## Quick lists for small blocks
+//!
+//! The interpreters (JavaScript, Python) broke the "little and in large
+//! blocks" premise: a Python program allocates and frees millions of
+//! 16 to 200 byte objects, and the free list, fragmented into thousands of
+//! holes, made every one of them a walk of that list -- a sorting test
+//! that takes 0.8 s on the host took 87 s in the kernel.
+//!
+//! So a block of at most `QUICK_MAX` bytes (alignment 16 at most) is
+//! rounded up to a multiple of 16 and, once freed, kept on a list of its
+//! size class instead of returning to the main list: the next request of
+//! that class takes it back in O(1), without walking anything. Blocks of a
+//! class are carved from the main list at alignment 16, so any of them
+//! fits any request of the class.
+//!
+//! What the quick lists hold is free memory the main list does not see.
+//! Two things keep it from being lost to the large requests: the lists
+//! keep at most `QUICK_CAP` bytes (beyond, a freed block goes back to the
+//! main list as before), and a request the main list cannot satisfy first
+//! hands every quick block back to it -- with merging -- and tries again.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::mem::{align_of, size_of};
@@ -61,8 +82,22 @@ impl FreeBlock {
     }
 }
 
+/// Largest request served by the quick lists.
+const QUICK_MAX: usize = 512;
+/// Granularity (and alignment) of the quick size classes.
+const QUICK_STEP: usize = 16;
+/// Size classes: 16, 32, ... `QUICK_MAX`.
+const QUICK_CLASSES: usize = QUICK_MAX / QUICK_STEP;
+/// Most bytes the quick lists may keep away from the main list.
+const QUICK_CAP: usize = 8 * 1024 * 1024;
+
 pub struct LinkedListAllocator {
     head: FreeBlock,
+    /// Heads of the quick lists, one per size class: the first word of a
+    /// free block is the address of the next one, 0 ends the list.
+    quick: [usize; QUICK_CLASSES],
+    /// Bytes held by the quick lists.
+    quick_bytes: usize,
     allocated: usize,
     allocations: usize,
     deallocations: usize,
@@ -72,6 +107,8 @@ impl LinkedListAllocator {
     pub const fn new() -> Self {
         LinkedListAllocator {
             head: FreeBlock::new(0),
+            quick: [0; QUICK_CLASSES],
+            quick_bytes: 0,
             allocated: 0,
             allocations: 0,
             deallocations: 0,
@@ -158,7 +195,12 @@ impl LinkedListAllocator {
     /// Checks that a block can satisfy the request once aligned, and that
     /// any remainder stays usable.
     fn split_check(block: &FreeBlock, size: usize, align: usize) -> Result<usize, ()> {
-        let start = align_up(block.start_addr(), align);
+        let mut start = align_up(block.start_addr(), align);
+        if start > block.start_addr() && start - block.start_addr() < size_of::<FreeBlock>() {
+            // The hole in front would be too small to be reinserted: the
+            // next aligned address leaves one that can be.
+            start += align;
+        }
         let end = start.checked_add(size).ok_or(())?;
 
         if end > block.end_addr() {
@@ -175,6 +217,54 @@ impl LinkedListAllocator {
         Ok(start)
     }
 
+    /// Takes a block of size `size` and alignment `align` from the main
+    /// list, handing the remainders back to it. Null if none fits.
+    fn take(&mut self, size: usize, align: usize) -> *mut u8 {
+        let Some((block, start)) = self.find_block(size, align) else {
+            return ptr::null_mut();
+        };
+        // The bounds of the block are read before any reinsertion:
+        // `push_free` writes a node at the address it is given, which may
+        // overwrite the node `block` still names.
+        let block_start = block.start_addr();
+        let block_end = block.end_addr();
+        let end = start + size;
+
+        // Tail remainder.
+        if block_end > end {
+            unsafe { self.push_free(end, block_end - end) };
+        }
+        // Head remainder: the requested alignment may leave a hole in
+        // front of the area returned. Without this reinsertion it would be
+        // lost for good on every strongly aligned allocation -- a slow but
+        // real leak.
+        if start > block_start {
+            unsafe { self.push_free(block_start, start - block_start) };
+        }
+        start as *mut u8
+    }
+
+    /// Hands every block of the quick lists back to the main list, where
+    /// they merge with their neighbours.
+    fn flush_quick(&mut self) {
+        for class in 0..QUICK_CLASSES {
+            let size = (class + 1) * QUICK_STEP;
+            while self.quick[class] != 0 {
+                let addr = self.quick[class];
+                // SAFETY: a quick block is free memory of the heap whose
+                // first word was written by `dealloc`.
+                self.quick[class] = unsafe { (addr as *const usize).read() };
+                unsafe { self.push_free(addr, size) };
+            }
+        }
+        self.quick_bytes = 0;
+    }
+
+    /// The quick class of a normalised request, if it has one.
+    fn quick_class(size: usize, align: usize) -> Option<usize> {
+        (size <= QUICK_MAX && align <= QUICK_STEP).then(|| size.div_ceil(QUICK_STEP) - 1)
+    }
+
     pub fn allocated_bytes(&self) -> usize {
         self.allocated
     }
@@ -189,7 +279,7 @@ impl LinkedListAllocator {
 
     /// Free bytes in all, and the largest single free block.
     pub fn free_and_largest(&self) -> (usize, usize) {
-        let mut total = 0;
+        let mut total = self.quick_bytes;
         let mut largest = 0;
         let mut current = &self.head;
         while let Some(ref next) = current.next {
@@ -202,7 +292,7 @@ impl LinkedListAllocator {
 
     /// Sum of the blocks still free.
     pub fn free_bytes(&self) -> usize {
-        let mut total = 0;
+        let mut total = self.quick_bytes;
         let mut current = &self.head;
         while let Some(ref next) = current.next {
             total += next.size;
@@ -235,44 +325,54 @@ pub struct Heap(SpinLock<LinkedListAllocator>);
 
 unsafe impl GlobalAlloc for Heap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let (size, align) = adjust_layout(layout);
+        let (mut size, mut align) = adjust_layout(layout);
         let mut allocator = self.0.lock();
-
-        match allocator.find_block(size, align) {
-            Some((block, start)) => {
-                // The bounds of the block are read before any reinsertion:
-                // `push_free` writes a node at the address it is given,
-                // which may overwrite the node `block` still names.
-                let block_start = block.start_addr();
-                let block_end = block.end_addr();
-                let end = start + size;
-
-                // Tail remainder.
-                if block_end > end {
-                    unsafe { allocator.push_free(end, block_end - end) };
-                }
-                // Head remainder: the requested alignment may leave a hole
-                // in front of the area returned. Without this reinsertion
-                // it would be lost for good on every strongly aligned
-                // allocation -- a slow but real leak.
-                if start > block_start {
-                    unsafe { allocator.push_free(block_start, start - block_start) };
-                }
-
+        let class = LinkedListAllocator::quick_class(size, align);
+        if let Some(class) = class {
+            size = (class + 1) * QUICK_STEP;
+            align = QUICK_STEP;
+            let head = allocator.quick[class];
+            if head != 0 {
+                // SAFETY: the first word of a quick block names the next.
+                allocator.quick[class] = unsafe { (head as *const usize).read() };
+                allocator.quick_bytes -= size;
                 allocator.allocated += size;
                 allocator.allocations += 1;
-                start as *mut u8
+                return head as *mut u8;
             }
-            None => ptr::null_mut(),
         }
+
+        let mut block = allocator.take(size, align);
+        if block.is_null() && allocator.quick_bytes > 0 {
+            allocator.flush_quick();
+            block = allocator.take(size, align);
+        }
+        if !block.is_null() {
+            allocator.allocated += size;
+            allocator.allocations += 1;
+        }
+        block
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        let (size, _) = adjust_layout(layout);
+        let (mut size, align) = adjust_layout(layout);
         let mut allocator = self.0.lock();
+        let class = LinkedListAllocator::quick_class(size, align);
+        if let Some(class) = class {
+            size = (class + 1) * QUICK_STEP;
+        }
         allocator.allocated -= size;
         allocator.deallocations += 1;
-        unsafe { allocator.push_free(ptr as usize, size) };
+        match class {
+            Some(class) if allocator.quick_bytes + size <= QUICK_CAP => {
+                // SAFETY: the block is the caller's no more; its first word
+                // becomes the link.
+                unsafe { (ptr as *mut usize).write(allocator.quick[class]) };
+                allocator.quick[class] = ptr as usize;
+                allocator.quick_bytes += size;
+            }
+            _ => unsafe { allocator.push_free(ptr as usize, size) },
+        }
     }
 }
 
@@ -358,9 +458,24 @@ const SCRIPT_RESERVE: usize = 16 * 1024 * 1024;
 /// string or array, and throws a `RangeError` instead. The largest free
 /// block must hold the request with half of it to spare: a vector that
 /// grows moves to a new block before freeing the old.
+///
+/// The blocks the quick lists hold count as free but not toward the
+/// largest block: when that is what falls short, they go back to the main
+/// list -- which may merge them into a block large enough -- and the
+/// answer is given again.
 pub fn room_for(bytes: usize) -> bool {
-    let (free, largest) = ALLOCATOR.0.lock().free_and_largest();
-    free >= bytes.saturating_add(SCRIPT_RESERVE) && largest >= bytes.saturating_add(bytes / 2)
+    let mut allocator = ALLOCATOR.0.lock();
+    let fits = |(free, largest): (usize, usize)| {
+        free >= bytes.saturating_add(SCRIPT_RESERVE) && largest >= bytes.saturating_add(bytes / 2)
+    };
+    if fits(allocator.free_and_largest()) {
+        return true;
+    }
+    if allocator.quick_bytes == 0 {
+        return false;
+    }
+    allocator.flush_quick();
+    fits(allocator.free_and_largest())
 }
 
 pub fn dump_state() {

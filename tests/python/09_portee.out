@@ -1,0 +1,26 @@
+global
+local
+2
+1 None
+UnboundLocalError: cannot access local variable 'y' where it is not associated with a value
+NameError: name 'not_defined' is not defined
+11
+[2, 2, 2]
+fuite?
+[(1, 0), (2, 0), (2, 1)]
+{0: [], 1: [0], 2: [0, 1]}
+120
+while sans break 5
+for vide: else
+name 'total' is not defined
+[1] [1] True
+2 1
+[1, 9, 3]
+1 False
+3
+False
+2 True ['C', 'K', 'a', 'b', 'c', 'f', 'g', 'i', 'j', 'n', 'o', 'x', 'y']
+[('p', 1), ('q', 2), ('r', 3)]
+7 3 [0, 1, 4, 9]
+49 9
+5

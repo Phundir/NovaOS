@@ -1,0 +1,21 @@
+Rex fait ouaf (doucement) Puppy('Rex') 1 True True (<class '__main__.Puppy'>, <class '__main__.Dog'>, <class '__main__.Animal'>, <class 'object'>)
+Puppy Puppy {'name': 'Rex', 'age': 1} True def
+Vec(4, 6) Vec(3, 6) Vec(2, 4) True True 2 2 [1, 2] Vec(-1, -2) False True 10
+[Vec(1, 2), Vec(1, 5), Vec(2, 1)] {Vec(1, 2)} Vec(1, 0) Vec(1, 2)
+100 212.0 statique statique
+ValueError: trop froid
+AttributeError: property 'fahrenheit' of 'Temp' object has no setter
+True
+DBCA ['D', 'B', 'C', 'A', 'object']
+False 2
+TypeError: unhashable type: 'Eq'
+entree
+sortie ValueError
+apres with
+[1, 2, 3, 4] 55
+desc:42 _attr
+1 2 {'a': 1, 'b': 2}
+[1, 2, 3, 4] 10 4 1 True MyList
+1 ZZ {'a': 1}
+MyInt(5) 6 10 True MyInt(5)
+<class 'int'> <class 'str'> <class 'NoneType'> <class 'builtin_function_or_method'> <class 'type'> <class '__main__.Vec'> Vec Vec

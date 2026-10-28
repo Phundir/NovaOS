@@ -1,0 +1,17 @@
+bonjour le monde BONJOUR LE MONDE Bonjour Le Monde bONJOUR LE mONDE Bonjour le monde bonjour le monde
+['Bonjour', 'le', 'Monde'] ['B', 'nj', 'ur le M', 'nde'] ['B', 'njour le Monde'] ['Bonjour le M', 'nde'] ['a', 'b', '', 'c'] ['x', 'y']
+1 12 8 3 True True
+B0nj0ur le M0nde B0nj0ur le Monde a-b-c ('Bonjour', ' ', 'le Monde') ('Bonjour le', ' ', 'Monde')
+pad pad pad pad ***abc*** abc...    abc
+00042 -0042 True True True True False True
+B e jour Bon Monde Bjreoe ednoM el ruojnoB 16 True True
+"l'ete" 'dit "oui"' 'tab\tnewline\n' 'both \' and "' 'cafe\xe9'
+ababab x=5 012.3% ab    | ff FF 10 'q'
+1 2 b a Bob!    mid     0003.142
+3.14 00042 0xff 1,234,567 25.0%    s 1100 'a' 1+1=2
+axbxc olleh ['a', 'a', 'a', 'b', 'n', 'n'] ['a', 'b', 'c'] 123 1.5 [1, 'a']
+b'\xc3\xa9' abc ['multi', 'line', 'text'] a   b a
+llo Hel True CAFÉ ss
+xxyyzz bc  abc 8364 €
+1,234.57 -42  42 ***x*** 003 1.2345e-05 1.23457e+08
+1e-05 1e+16 1.23e+03 0 2 2 1.000000e+100

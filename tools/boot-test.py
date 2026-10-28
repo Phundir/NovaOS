@@ -51,6 +51,7 @@ DEFAULT_VERDICTS = [
     (r"\[test\] phase 16\.2 validee", "16.2 DOM et navigateur"),
     (r"\[test\] phase 16\.3 validee", "16.3 dev interpret (Node)"),
     (r"\[test\] phase 16\.4 validee", "16.4 debogueur"),
+    (r"\[test\] phase 16\.5 validee", "16.5 dev interpret (Python)"),
 ]
 
 # Verdicts that only exist when a framebuffer does (-vga none drops them).

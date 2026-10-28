@@ -81,7 +81,7 @@ nova-os/
 │   ├── multiboot.rs           Parsing des tags Multiboot2
 │   ├── memory.rs              Tables de pages, traduction, mapping
 │   ├── frame.rs               Frame allocator bitmap
-│   ├── heap.rs                Heap free-list + global_allocator
+│   ├── heap.rs                Heap free-list + listes rapides + global_allocator
 │   │
 │   ├── pci.rs                 Enumeration du bus PCI (0xCF8/0xCFC)
 │   ├── ahci.rs                Pilote AHCI minimal — un port, une commande
@@ -282,6 +282,21 @@ nova-os/
 │   │   │                      paquets, modules, manifestes (phase 15)
 │   │   ├── rsa.rs bignum.rs   Verification RSA PKCS #1 v1.5 et PSS
 │   │   └── selftest.rs        Vecteurs publies, au demarrage
+│   ├── python/                Interprète Python 3 (16.5), sans dépendance
+│   │   │                          au noyau (compilé aussi sur l'hôte)
+│   │   ├── mod.rs             PyHost, compile, run_code, traces, run_main
+│   │   ├── lex.rs parse.rs    Indentation, f-strings ; descente récursive
+│   │   ├── ast.rs symtable.rs L'arbre ; portées (local, cellule, libre)
+│   │   ├── compile.rs code.rs Code à pile façon CPython, blocs d'exception
+│   │   ├── vm.rs              Cadres sur le tas, générateurs, exceptions
+│   │   ├── ops.rs             Attributs, opérateurs, comparaisons, hachage
+│   │   ├── value.rs           Valeurs, classes, registre des conteneurs
+│   │   ├── int.rs dict.rs     Entiers illimités ; dict ordonné, table set
+│   │   ├── format.rs          repr, format(), %, str.format
+│   │   ├── builtins.rs        print, sorted, sum, round, eval/exec...
+│   │   ├── types/             Méthodes de str, list, dict, int, object...
+│   │   └── modules/           import ; math, random, sys, time, os, json,
+│   │                          re, traceback ; lib/*.py (collections...)
 │   ├── debug.rs               Traçage d'un programme ring 3 (16.4) :
 │   │                          points d'arret int3, pas TF, registres,
 │   │                          memoire par la fenetre physique
@@ -432,6 +447,8 @@ nova-os/
 │   │   ├── debug/             dev run --debug (16.4) : session,
 │   │   │   │                  commandes (ndb), symboles, pile
 │   │   │   └── selftest.rs    Session tapee dans un shell
+│   │   ├── python/            dev interpret main.py (16.5) : hôte noyau,
+│   │   │   │                  tâche dev-py, droits ; autotest (corpus)
 │   │   ├── js/                dev interpret main.js / main.ts (16.3)
 │   │   │   ├── mod.rs         Hote, require, import (ESM, CJS, JSON),
 │   │   │   │                  detection du genre, tache dev-js, droits
@@ -2486,6 +2503,34 @@ Le genre d'un fichier : `.mjs`/`.mts` module ES, `.cjs`/`.cts` CommonJS,
 ou `export` au premier niveau (la détection de Node 22 et de Bun),
 CommonJS sinon. Un `.ts` reçoit en plus `require`, `__filename` et
 `__dirname` même en module ES, comme sous Bun.
+
+## 11 sexdecies. `dev interpret main.py` (phase 16.5)
+
+```
+dev interpret main.py x (cli::interpret)
+  -> sdk::python::run_file(chemin, arguments, entree, droits)
+       BUSY (un programme a la fois), JOB ; spawn "dev-py" (pile 1 Mio)
+  dev-py : run_here -> python::run_main(KernelHost, chemin, source)
+       Vm::new : types integres, module builtins
+       compile : lex -> parse -> symtable -> compile -> Code
+       run_code(__main__) : boucle de la VM, cadres sur le tas
+         import -> sys.modules, natifs, lib/*.py, fichiers du programme
+       fin : fichiers ouverts ecrits, trace imprimee, teardown
+            (registre vide : les cycles sont casses)
+  -> PyRun { sortie, erreurs, code, arret }
+```
+
+| Où | Quoi |
+|---|---|
+| `Vm::frames` | les cadres Python en cours ; un générateur garde le sien hors de la pile |
+| `Vm::handling` | les exceptions en cours de traitement (`sys.exc_info`, `__context__`) |
+| `Vm::modules` | `sys.modules` |
+| `value::REGISTRY` | chaque conteneur créé, faiblement ; vidé en fin d'exécution |
+| `KernelHost` | fichiers relatifs au répertoire du programme, droits de l'appelant, horloge, `heap::room_for` |
+
+Le banc hôte (`tools/pyhost/`) compile les mêmes fichiers avec `std`
+dessous et rejoue `tests/python/` contre les sorties de CPython 3.13
+(`make py-test`).
 
 ## 12. Points d'extension immédiats
 

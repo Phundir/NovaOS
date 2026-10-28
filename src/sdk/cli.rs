@@ -222,6 +222,8 @@ pub enum Output {
     InterpretedRust(rustc::Interpreted),
     /// `dev interpret` on a `.js`: Nova's JavaScript engine (16.3).
     InterpretedJs(super::js::JsRun),
+    /// `dev interpret` on a `.py`: Nova's Python interpreter (16.5).
+    InterpretedPython(super::python::PyRun),
     /// `dev run --debug` (16.4): the program stopped on its entry, a
     /// debugging session open on it (`sdk::debug`).
     Debugging(super::debug::Started),
@@ -347,6 +349,15 @@ impl Output {
                     lines.push(alloc::format!("arret : {}", error));
                 }
                 lines.push(alloc::format!("code de sortie : {} - {} module(s)", run.exit_code, run.modules));
+                lines
+            }
+            Output::InterpretedPython(run) => {
+                let mut lines: Vec<String> = run.output.iter().map(|line| alloc::format!("  {}", line)).collect();
+                lines.extend(run.errors.iter().map(|line| alloc::format!("  {}", line)));
+                if let Some(reason) = &run.halted {
+                    lines.push(alloc::format!("arret : {}", reason));
+                }
+                lines.push(alloc::format!("code de sortie : {}", run.exit_code));
                 lines
             }
             Output::Packaged(report) => alloc::vec![
@@ -1096,6 +1107,12 @@ fn interpret(command: &Command) -> Result<Output, DevError> {
         let arguments: Vec<String> = command.positional.iter().skip(1).map(|a| String::from(*a)).collect();
         let run = super::js::run_file(&path, &arguments, super::js::session_rights()).map_err(DevError::BadCommand)?;
         return Ok(Output::InterpretedJs(run));
+    }
+    // Python (16.5): its own task, its modules beside the program.
+    if language == Language::Python {
+        let arguments: Vec<String> = command.positional.iter().skip(1).map(|a| String::from(*a)).collect();
+        let run = super::python::run_file(&path, &arguments, Vec::new(), super::js::session_rights()).map_err(DevError::BadCommand)?;
+        return Ok(Output::InterpretedPython(run));
     }
     let source = read_text(&path)?;
     // The other interpreters the SDK carries. Nova Script is the one added

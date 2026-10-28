@@ -202,7 +202,7 @@ BENCH_MIB   ?= 512
 BENCH_ACCEL ?=
 BENCH_PORT  ?= 8000
 
-.PHONY: js-test test test-smp1 test-novga test-recovery test-all dist version venus venus-check shaders kmd-test webroot nova-libc disk-migrate disk-lifs print-qemu-flags print-qemu-headless bench-net all kernel iso audio-devices run run-full run-smp run-nogui log debug debug-int clean check check-ascii police racines re prev unprev cargo-build disk disk-reset check-export run-netdump run-nonet
+.PHONY: js-test py-test test test-smp1 test-novga test-recovery test-all dist version venus venus-check shaders kmd-test webroot nova-libc disk-migrate disk-lifs print-qemu-flags print-qemu-headless bench-net all kernel iso audio-devices run run-full run-smp run-nogui log debug debug-int clean check check-ascii police racines re prev unprev cargo-build disk disk-reset check-export run-netdump run-nonet
 
 all: iso
 
@@ -541,7 +541,18 @@ $(JSHOST): $(wildcard tools/jshost/*.rs tools/jshost/web/*.rs) $(shell find src/
 js-test: $(JSHOST)
 	$(JSHOST)
 
-test-all: js-test test test-smp1 test-novga test-recovery
+# L'interprete Python compile pour l'hote : le corpus tests/python/ compare
+# a CPython 3.13 (les .out de tools/pyhost/reference.sh), sans QEMU.
+PYHOST := $(BUILD_DIR)/pyhost
+
+$(PYHOST): $(wildcard tools/pyhost/*.rs tools/pyhost/web/*.rs tools/pyhost/web/js/*.rs) $(shell find src/python -name '*.rs' -o -name '*.py') src/web/js/num.rs src/web/js/big.rs src/web/js/regex.rs
+	@mkdir -p $(BUILD_DIR)
+	rustc --edition 2024 -O -o $@ tools/pyhost/main.rs
+
+py-test: $(PYHOST)
+	$(PYHOST) --corpus tests/python
+
+test-all: js-test py-test test test-smp1 test-novga test-recovery
 
 # `make dist` : ce que publie une release (.github/workflows/release.yml).
 # Le noyau y est depouille de ses informations de debogage (92 -> 8 Mio) ;

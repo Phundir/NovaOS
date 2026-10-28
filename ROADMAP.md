@@ -21,14 +21,14 @@ x86_64, GRUB/Multiboot2.
 | Phase 6 — Couche OS | ✅ terminée | 6.1 → 6.5, 120 ou 121 vérifications selon le matériel présent |
 | Phase 7 — Système graphique | ✅ terminée | 7.1 → 7.7, 13 + 140 vérifications ; le tableau visuel se confirme à l'écran, pas en série |
 | Phase 8 — SPM & mises à jour | ✅ terminée | 8.1 → 8.5, 224 vérifications |
-| Phase 9 — SDK & langages | 🔄 en cours | 23 cases sur 27 ; 425 vérifications ; 9.1.3 (débogueur) fermée par 16.4 et 9.5.6 (Node/Bun) par 16.3 ; les 4 restantes (C, C#, Java, Python) sont les étapes 16.5 à 16.8 |
+| Phase 9 — SDK & langages | 🔄 en cours | 24 cases sur 27 ; 425 vérifications ; 9.1.3 (débogueur) fermée par 16.4, 9.5.6 (Node/Bun) par 16.3, 9.5.5 (Python) par 16.5 ; les 3 restantes (C, C#, Java) sont les étapes 16.6 à 16.8 |
 | Phase 10 — Finitions | ✅ terminée | 10.1 → 10.4, 340 vérifications |
 | Phase 11 — Navigateur Web Browser (fork de Firefox) | ✅ close (24 septembre 2026) | Close sur décision de l'utilisateur ; 11.5 et 11.15 cochées sur les relevés série des 22-23 septembre ; quatre cases non faites, reportées : 11.10.1 (→ 12.8.2), retrait de `navigateur.cus` (11.10.2), GPU (11.12.6 → phase 13), rectangle de `PRESENT` (11.13.6) |
 | Phase 12 — Navigateur natif (libc Nova) | 🔧 implémentée, à valider | Navigateur en `.cus` sur la libc Nova ; objets du noyau sortis de `src/linux/` vers `src/posix/` (23 septembre, soir) ; aucune case cochée |
 | Phase 13 — Pile graphique Nova et accélération GPU | 🔧 faite hors Firefox, à valider | Spec acceptée (24 septembre) ; pilote virtio-gpu 3D, anneau Venus, encodeur généré et vérifié (68 commandes), cœur GPU, écran et plan curseur au cœur, compositeur sur le GPU (égal au pixel près au processeur), `SYS_GPU_*`, bibliothèques C et Rust, modules `.kmd` signés, délai de garde éprouvé ; 75 vérifications ; aucune case cochée (validation de l'utilisateur attendue) ; Firefox (13.0, 13.9-13.10, 13.11.1) reporté par l'utilisateur |
 | Phase 14 — LIFS (nouveau type de partition, liens CoW et Tag) | 🔧 implémentée, à valider | Décisions 14.1 prises (24 septembre) ; GPT/MBR, partitions montées une lettre chacune, racine LIFS, plus aucun formatage implicite ; LIFS (arbres B+, étendues, clones CoW, Tag, index inverse, journal) ; `SYS_FS_NODE_*` ; `tools/lifs.py` et reprise NovaFS → LIFS ; 81 vérifications LIFS dont 32 coupures simulées ; aucune case cochée (validation de l'utilisateur attendue) |
 | Phase 15 — Mises à jour atomiques des applications | ✅ faite (28 octobre 2026) | Proposition de l'utilisateur du 24 septembre 2026 ; points 15.1 tranchés sous mandat d'autonomie ; JSON, Ed25519 (ENTERPRISE enfin signé), HTTPS en flux, pointeur atomique, registre signé, versions à part, lancement par le pointeur, nettoyage différé, `spm.dsa` ; 70 vérifications ; reste 15.6.2 (canal par application dans l'interface) et 15.7.3 partiel |
-| Phase 16 — Langages et outils (fin de la phase 9) | 🔄 en cours | 16.0 (shell, terminal, recovery), 16.1 (moteur JavaScript, 95 cas vérifiés contre Node 22) et 16.2 (DOM et scripts du navigateur, 30 cas vérifiés contre jsdom + 12 vérifications du navigateur) et 16.3 (`dev interpret` pour Node et Bun, modules ES, TypeScript, sorties comparées à Node 22 et Bun) et 16.4 (débogueur de `dev run --debug`) faites le 28 octobre 2026 ; restent Python, C, Java, C# |
+| Phase 16 — Langages et outils (fin de la phase 9) | 🔄 en cours | 16.0 (shell, terminal, recovery), 16.1 (moteur JavaScript, 95 cas vérifiés contre Node 22) et 16.2 (DOM et scripts du navigateur, 30 cas vérifiés contre jsdom + 12 vérifications du navigateur) et 16.3 (`dev interpret` pour Node et Bun, modules ES, TypeScript, sorties comparées à Node 22 et Bun) et 16.4 (débogueur de `dev run --debug`) et 16.5 (interprète Python, 20 programmes conformes à CPython 3.13) faites le 28 octobre 2026 ; restent C, Java, C# |
 | Phase 17 — Reliquats système de fichiers et POSIX | 📝 planifiée | Ce que les phases 12 et 14 ont laissé ouvert hors Firefox : page de temps, autotest appel par appel, `copy_file_range`/clonage, Tag dans l'explorateur, GPT de secours, partitionneur |
 | Phase 18 — Firefox sur la pile Nova | ⏸ chez l'auteur | 12.5, 12.7, 12.8, 13.0, 13.9, 13.10, 13.11.1 : demandent la construction du fork et le GPU de la machine de l'auteur |
 
@@ -46,11 +46,11 @@ cochées sur 229.** Les sept restantes sont toutes en phase 9, et elles
 sont nommées juste en dessous. Il ne reste donc **plus de case à ouvrir**
 — seulement des limites à lever, listées phase par phase plus bas.
 
-**Prochaine étape : 16.5, interprète Python** ; la phase 15 et les
+**Prochaine étape : 16.6, compilateur C** ; la phase 15 et les
 étapes 16.0 (shell, terminal, recovery), 16.1 (moteur JavaScript), 16.2
 (scripts du navigateur intégré), 16.3 (`dev interpret` pour Node et
-Bun, modules ES, TypeScript) et 16.4 (débogueur) sont faites (28
-octobre 2026).
+Bun, modules ES, TypeScript), 16.4 (débogueur) et 16.5 (interprète
+Python) sont faites (28 octobre 2026).
 (L'ancien choix « un espace d'adressage par processus » ou « élargir le
 sous-ensemble Rust » est derrière nous : les espaces privés sont faits
 depuis 11.3, et le reste de la phase 9 forme la phase 16.)
@@ -179,12 +179,12 @@ Sous quatre cœurs (`make run-smp`), les mêmes huit verdicts, avec
 nombre de cœurs. Celui de la phase 6 varie lui aussi, mais pour deux
 autres raisons, détaillées à la fin de « Comment valider la phase 10 ».
 
-Toutes les cases sont cochées **sauf quatre**, toutes en phase 9 (9.1.3
-est fermée par 16.4, 9.5.6 par 16.3) :
+Toutes les cases sont cochées **sauf trois**, toutes en phase 9 (9.1.3
+est fermée par 16.4, 9.5.6 par 16.3, 9.5.5 par 16.5) :
 
 | Case | Ce qui manque |
 |---|---|
-| 9.5.2 à 9.5.5 | C/C++, C#, Java, Python : la table du §13.2 est en données et la résolution refuse nommément ; ce sont les étapes 16.5 à 16.8 |
+| 9.5.2 à 9.5.4 | C/C++, C#, Java : la table du §13.2 est en données et la résolution refuse nommément ; ce sont les étapes 16.6 à 16.8 |
 
 **9.5.1 est fermée depuis le 5 septembre 2026** : `sdk::rustc` compile un
 sous-ensemble défini de Rust en x86_64 qui s'exécute en ring 3, et
@@ -1356,7 +1356,7 @@ Deux configurations supplémentaires doivent passer :
 - [ ] 9.5.2 C/C++ (LLVM JIT + natif) — *déclaré au tableau, résolu, refusé nommément ; aucune toolchain*
 - [ ] 9.5.3 C# (Mono allégé + transpilation) — *idem*
 - [ ] 9.5.4 Java (JVM maison minimale) — *idem*
-- [ ] 9.5.5 Python (rustpython) — *idem*
+- [x] 9.5.5 Python (rustpython) — *colonne interprète fermée par 16.5 (interprète de Nova, sorties identiques à CPython 3.13 sur le corpus) ; la colonne compilateur (« rustpython → natif ») reste ouverte*
 - [x] 9.5.6 Node.js / Bun (moteurs JS/TS → Rust) — *colonne interprète fermée par 16.3 (moteur de Nova, TypeScript à types effacés) ; la colonne compilateur est l'ETR du 9.6*
 - [x] 9.5.7 ASM x86_64 (émulateur sandboxé) — *chaîne complète : `dev build` assemble, édite les liens et produit un binaire qui **s'exécute en ring 3**. Ce que le §13.2 appelle « émulateur sandboxé » est ici le bac à sable du 9.3, qui fait tourner le vrai code au lieu de l'émuler*
 - [x] 9.5.8 Emplacements runtimes (`/sys/runtimes/` vs `/users/{user}/runtimes/`) — *la priorité du §13.3 est éprouvée : un descripteur posé chez un compte masque celui du système, un autre compte ne le voit pas, son retrait rend la main*
@@ -4240,9 +4240,86 @@ contrainte supplémentaires, tous verts :
   (`binfmt::loader`) ; pas d'attache à un processus Linux (11.5) ni à un
   thread déjà en cours.
 #### 16.5 Python (9.5.5)
-- [ ] 16.5.1 Interprète d'un sous-ensemble défini de Python 3 (indentation,
+- [x] 16.5.1 Interprète d'un sous-ensemble défini de Python 3 (indentation,
   entiers illimités, `str`, `list`, `dict`, `tuple`, fonctions, classes,
   exceptions) : `dev interpret main.py`
+
+**Validation de 16.5 (28 octobre 2026, sous mandat d'autonomie).**
+Relevés de `make test` (4 cœurs, deux démarrages), `make test-smp1`,
+`make test-novga` et `make test-recovery`, tous verts ; `make py-test`
+sur l'hôte :
+
+```
+[test] phase 16.5 validee - 20 programmes conformes a CPython 3.13, 50 verifications de dev interpret Python (15610 ms)
+[py-test] 20 programmes conformes a CPython 3.13, 0 en echec (848 ms)
+```
+
+- **Le sous-ensemble défini dépasse celui de la case** : c'est Python 3.13
+  moins une liste fermée (plus bas). Lexer (indentation, f-strings
+  imbriquées, chaînes brutes et d'octets), analyse, table des symboles
+  (`global`, `nonlocal`, cellules, fermetures), compilation vers un code à
+  pile façon CPython, machine virtuelle à cadres sur le tas : générateurs
+  complets (`send`, `throw`, `close`, `yield from`), compréhensions,
+  décorateurs, `with`, `try/except/else/finally`, exceptions chaînées
+  (`__cause__`, `__context__`, notes), `*args/**kwargs`, paramètres
+  positionnels seuls et nommés seuls, classes à héritage multiple (MRO C3),
+  `super()`, propriétés et descripteurs, `__slots__` accepté, méthodes
+  spéciales (opérateurs, comparaisons, conteneurs, contexte, itération,
+  `__hash__`, `__format__`), sous-classes des types natifs.
+- **Types** : `int` illimité, `float` (le `Num` logiciel du moteur JS),
+  `bool`, `str`, `bytes`, `list`, `tuple`, `dict` (ordonné), `set`,
+  `frozenset`, `range`, `slice`, vues de dict, `None`, `Ellipsis`,
+  `NotImplemented`.
+- **Bibliothèque** : en Rust `math`, `random`, `sys`, `time`, `os`,
+  `os.path`, `json`, `re`, `traceback` ; en Python `collections`,
+  `itertools`, `functools`, `dataclasses`, `enum`, `typing`, `abc`,
+  `heapq`, `bisect`, `operator`, `copy`, `contextlib`, `string`.
+- **Le témoin est CPython 3.13** (`PYTHONHASHSEED=0`) : vingt programmes de
+  `tests/python/` (bases, chaînes, listes, dicts et ensembles, fonctions,
+  classes, exceptions, générateurs, portée, entiers, formatage, fichiers,
+  erreur finale, entrée standard, algorithmes, collections, itertools et
+  functools, dataclasses et enum, modules divers) donnent **au caractère
+  près** la sortie de CPython, ordre des ensembles, tirages de `random`,
+  derniers chiffres des flottants et messages d'erreur compris. Le même
+  corpus est rejoué dans le noyau par l'autotest (`sdk/python/selftest.rs`)
+  et sur l'hôte par `make py-test` (`tools/pyhost`, ajouté à `test-all`).
+- **Dans Nova** : `dev interpret main.py` (`sdk/python/`) exécute le
+  programme dans une tâche à lui (`dev-py`, 1 Mio de pile) avec les droits
+  de la session ; `import util` trouve `util.py` à côté de `main.py`, un
+  dossier à `__init__.py` est un paquet ; les chemins relatifs partent du
+  dossier du programme. L'autotest écrit un projet de plusieurs fichiers
+  (module, paquet, fichier de données, entrée standard), vérifie la sortie,
+  le code de sortie 1, la trace (`Traceback`, ligne source, exception
+  nommée) et le fichier écrit sur le volume, puis passe par la vraie
+  commande `dev interpret bonjour.py a b c` (sortie, code de sortie 2).
+- **Moteur JavaScript corrigé en route** (les flottants sont partagés) :
+  `sin`, `cos`, `tan`, `atan`, `asin`, `acos`, `atan2` en virgule fixe
+  avec réduction de Payne-Hanek, `pow` en un seul arrondi, départage pair
+  de la représentation la plus courte, `log10` selon fdlibm. `make
+  js-test` reste à 95 cas sur 95.
+- **Tas du noyau** : les listes rapides par classe de taille (voir
+  DECISIONS) ramènent le programme le plus lourd du corpus de 87 s à 13 s
+  dans QEMU (TCG), et `make test` de 119 s à 39 s.
+
+**Ce qui reste ouvert dans la 16.5**
+- Hors du sous-ensemble : `async`/`await`, `match`, métaclasses actives
+  (`metaclass=` est accepté et sans effet ; des crochets de classe en
+  tiennent lieu), nombres complexes, échappes `\N{...}` ; `bytearray` et
+  `memoryview` n'existent pas (`NameError`).
+- `re` : `\d`, `\w`, `\s` ne connaissent que l'ASCII.
+- Absents : `statistics`, `datetime`, `decimal`, `fractions`, `pathlib`,
+  `subprocess`, `socket`, `threading`, `asyncio`, `unittest`, `pickle`.
+- `random.seed("texte")` ne donne pas les tirages de CPython (graine
+  entière seulement).
+- Fichiers lus en entier à l'ouverture et écrits à la fermeture ; pas
+  d'accès concurrent entre deux programmes.
+- Messages d'erreur de syntaxe en français et sans caret ; les traces ne
+  soulignent pas l'expression fautive (CPython 3.13 le fait).
+- `Enum(valeur)` réexécute `__init__` d'un membre défini par une classe à
+  `__init__` personnalisé ; `Flag` composé sans pseudo-membres nommés comme
+  CPython.
+- Performance : 3 à 4 fois CPython sur l'hôte ; un programme à la fois
+  (`BUSY`), le registre des conteneurs étant global.
 #### 16.6 C (9.5.2)
 - [ ] 16.6.1 Compilateur d'un sous-ensemble défini de C vers x86_64, binaire
   Nova qui s'exécute en ring 3 ; C++ refusé nommément

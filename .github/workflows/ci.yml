@@ -77,6 +77,9 @@ jobs:
       - name: Moteur JavaScript sur l'hote (corpus 16.1)
         run: make js-test
 
+      - name: Interprete Python sur l'hote (corpus 16.5, sorties de CPython 3.13)
+        run: make py-test
+
       - name: Controles statiques
         run: |
           make check-ascii

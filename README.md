@@ -182,6 +182,7 @@ Exécuter et déboguer :
 
 ```text
 root:/$ dev interpret main.ts              # JavaScript / TypeScript (Node, Bun)
+root:/$ dev interpret main.py              # Python 3 (sorties identiques a CPython 3.13)
 root:/$ dev run --debug --projet mon-app   # le programme s'arrete a son entree
 (ndb) arret calcule                        # point d'arret sur une fonction
 (ndb) continuer
@@ -209,7 +210,8 @@ root:/$ dev run --debug --projet mon-app   # le programme s'arrete a son entree
 | `make test` | Démarrage sans fenêtre, verdicts d'autotest jugés automatiquement |
 | `make test-recovery` | Démarrage en mode recovery, commandes tapées sur la console série |
 | `make js-test` | Le moteur JavaScript compilé pour l'hôte : son corpus en 0,2 s |
-| `make test-all` | `js-test` + `test` + monocœur + sans écran + recovery (ce que fait la CI) |
+| `make py-test` | L'interprète Python compilé pour l'hôte : `tests/python/` comparé aux sorties de CPython 3.13 |
+| `make test-all` | `js-test` + `py-test` + `test` + monocœur + sans écran + recovery (ce que fait la CI) |
 | `make dist` | Ce que publie une release (`build/dist/`) |
 | `make check` | Chaînes ASCII, symboles non résolus, instructions SSE, segments |
 | `make debug` | QEMU en attente de GDB sur `:1234` |
@@ -233,20 +235,21 @@ autotest qui imprime un **verdict** sur la console série.
 
 ```
 [test] phase 7.1 validee - 13 verifications du framebuffer
-[test] phases 3 et 4 validees - 227 verifications conformes aux specs 3 a 5
-[test] phase 5 validee - 282 verifications de l'API systeme (spec 6)
+[test] phases 3 et 4 validees - 250 verifications conformes aux specs 3 a 5
+[test] phase 5 validee - 283 verifications de l'API systeme (spec 6)
 [test] phase 6 validee - 128 verifications de la couche OS
 [test] phase 7 validee - 214 verifications du systeme graphique
-[test] phase 8 validee - 224 verifications de SPM et des mises a jour (spec 10 et 11)
+[test] phase 8 validee - 226 verifications de SPM et des mises a jour (spec 10 et 11)
 [test] phase 9 validee - 425 verifications du SDK (spec 13 et 15)
 [test] phase 10 validee - 340 verifications des finitions (spec 12, 14 et 16)
 [test] phase 13 validee - 37 verifications de la pile graphique, sans GPU (absent)
-[test] phase 15 validee - 70 verifications des mises a jour atomiques (spec 10.5)
+[test] phase 15 validee - 73 verifications des mises a jour atomiques (spec 10.5)
 [test] phase 16.0 validee - 60 verifications du shell et du terminal (spec 1.1, 2.2)
-[test] phase 16.1 validee - 95 cas du moteur JavaScript (2270 ms)
-[test] phase 16.2 validee - 30 cas du DOM, 12 verifications du navigateur
+[test] phase 16.1 validee - 95 cas du moteur JavaScript (1200 ms)
+[test] phase 16.2 validee - 31 cas du DOM, 12 verifications du navigateur
 [test] phase 16.3 validee - 30 verifications de dev interpret (Node, Bun), 8 cas de modules et TypeScript
 [test] phase 16.4 validee - 25 verifications du debogueur (9 arrets en ring 3)
+[test] phase 16.5 validee - 20 programmes conformes a CPython 3.13, 50 verifications de dev interpret Python (15610 ms)
 ```
 
 `make test` démarre l'ISO sans fenêtre (`tools/boot-test.py`), arrête
@@ -374,6 +377,14 @@ en rendu logiciel.
   `.ts`) exécute un programme Node ou Bun : `require` et `import` de
   modules locaux et JSON, `fs`, `path`, `os`, `util`, `events`,
   `process`.
+- **Python 3** (`dev interpret main.py`) : machine à pile à cadres sur le
+  tas (vrais générateurs, récursion bornée par `sys.getrecursionlimit()`),
+  entiers illimités, classes, exceptions chaînées, descripteurs, modules
+  locaux et paquets ; `math`, `random` (mêmes tirages que CPython à graine
+  égale), `json`, `re`, `os`, `collections`, `itertools`, `functools`,
+  `dataclasses`, `enum`, `typing`... Le corpus `tests/python/` donne la
+  sortie de CPython 3.13 caractère pour caractère. Hors sous-ensemble :
+  `async`, `match`, métaclasses, `complex`.
 - **Shell** : interprète de commandes (fichiers, tâches, mémoire, disques,
   `spm`, `dev`), fenêtre **Terminal** avec historique et défilement, shell
   sur la console série et mode recovery.
@@ -475,7 +486,7 @@ d'interruption, appels système, invariants — est dans
 | 13 | Pile graphique Nova et GPU | 🔧 à valider |
 | 14 | LIFS et partitions | 🔧 à valider |
 | 15 | Mises à jour atomiques des applications, Ed25519 | ✅ |
-| 16 | Langages et outils : shell et terminal ✅, JavaScript et TypeScript (navigateur et `dev interpret`) ✅, débogueur ✅ ; Python, C, Java | 🔄 |
+| 16 | Langages et outils : shell et terminal ✅, JavaScript et TypeScript (navigateur et `dev interpret`) ✅, débogueur ✅, Python ✅ ; C, Java | 🔄 |
 | 17 | Reliquats système de fichiers et POSIX | 📝 |
 | 18 | Firefox sur la pile Nova (machine de l'auteur) | ⏸ |
 
