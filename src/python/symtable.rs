@@ -58,6 +58,7 @@ pub struct Scope {
     /// Its locals inner scopes capture.
     pub cells: Vec<Rc<str>>,
     pub generator: bool,
+    pub coroutine: bool,
     /// Uses `super` or `__class__`: the enclosing class gets a
     /// `__class__` cell.
     pub needs_class_cell: bool,
@@ -116,6 +117,7 @@ impl Builder {
             frees: Vec::new(),
             cells: Vec::new(),
             generator: false,
+            coroutine: false,
             needs_class_cell: false,
         });
         self.table.scopes[self.current].children.push(index);
@@ -244,6 +246,7 @@ impl Builder {
                 self.bind(&def.name);
                 let saved = self.current;
                 self.current = self.push(ScopeKind::Function, &def.name, function_key(def));
+                self.scope().coroutine = def.is_async;
                 self.params(&def.params).map_err(|mut e| {
                     e.line = def.line;
                     e
@@ -355,6 +358,59 @@ impl Builder {
                 self.expr(test)?;
                 message.as_ref().map_or(Ok(()), |m| self.expr(m))
             }
+            StmtKind::Match(subject, cases) => {
+                self.expr(subject)?;
+                for case in cases {
+                    self.pattern(&case.pattern)?;
+                    if let Some(guard) = &case.guard {
+                        self.expr(guard)?;
+                    }
+                    self.body(&case.body)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn pattern(&mut self, pattern: &Pattern) -> Result<(), SymError> {
+        match pattern {
+            Pattern::Wildcard | Pattern::Singleton(_) | Pattern::Star(None) => Ok(()),
+            Pattern::Capture(name) | Pattern::Star(Some(name)) => {
+                self.bind(name);
+                Ok(())
+            }
+            Pattern::Value(expr) => self.expr(expr),
+            Pattern::Sequence(items) | Pattern::Or(items) => {
+                for item in items {
+                    self.pattern(item)?;
+                }
+                Ok(())
+            }
+            Pattern::Mapping(items, rest) => {
+                for (key, value) in items {
+                    self.expr(key)?;
+                    self.pattern(value)?;
+                }
+                if let Some(rest) = rest {
+                    self.bind(rest);
+                }
+                Ok(())
+            }
+            Pattern::Class(class, args, kwargs) => {
+                self.expr(class)?;
+                for arg in args {
+                    self.pattern(arg)?;
+                }
+                for (_, value) in kwargs {
+                    self.pattern(value)?;
+                }
+                Ok(())
+            }
+            Pattern::As(inner, name) => {
+                self.pattern(inner)?;
+                self.bind(name);
+                Ok(())
+            }
         }
     }
 
@@ -369,6 +425,9 @@ impl Builder {
         self.scope().params.push(dot.clone());
         self.bind(&dot);
         self.scope().generator = generator;
+        if generators.iter().any(|c| c.is_async) {
+            self.scope().coroutine = true;
+        }
         for (index, clause) in generators.iter().enumerate() {
             if index > 0 {
                 self.expr(&clause.iter)?;
@@ -494,6 +553,13 @@ impl Builder {
             ExprKind::Yield(value) => {
                 self.scope().generator = true;
                 value.as_ref().map_or(Ok(()), |v| self.expr(v))
+            }
+            ExprKind::Await(value) => {
+                // An `await` makes a comprehension asynchronous.
+                if self.scope().kind == ScopeKind::Comprehension {
+                    self.scope().coroutine = true;
+                }
+                self.expr(value)
             }
             ExprKind::YieldFrom(value) => {
                 self.scope().generator = true;
@@ -656,6 +722,7 @@ pub fn build(body: &[Stmt]) -> Result<Table, SymError> {
                 frees: Vec::new(),
                 cells: Vec::new(),
                 generator: false,
+                coroutine: false,
                 needs_class_cell: false,
             }],
             by_node: BTreeMap::new(),

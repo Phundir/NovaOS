@@ -1,0 +1,11 @@
+b'HELLO WORLD' [b'Hello', b'World'] b'Hell0 W0rld' 6 True 101 b'ell' [72, 101, 108] b'ello Worl' b'a-b' 3 48656c6c6f20576f726c64 b'AB' Hello World
+b'hello world' b'Hello World' b'hELLO wORLD' False True [b'x', b'y'] b'x' [b'a', b'b', b'', b'c'] (b'Hello', b' ', b'World') b'**Hello World**' 4 2 48:65:6c:6c:6f:20:57:6f:72:6c:64
+bytearray(b'AXYZdefgh') 9 65 bytearray(b'XYZ') b'AXYZdefgh' bytearray(b'AXYZDEFGH') AXYZdefgh [65, 88, 89]
+bytearray(b'XYZde') 102 bytearray(b'XYZde') True True True False
+bytearray(b'!!edZYX!') bytearray(b'!!edZYX!!!edZYX!') bytearray(b'\x00\x00\x00') bytearray(b'h\xc3\xa9') bytearray(b'\x01\x02\xff') True [bytearray(b''), bytearray(b''), bytearray(b'edZYX'), bytearray(b'')]
+unhashable type: 'bytearray'
+byte must be in range(0, 256)
+b'\xe9' b'\xc3\xa9' é ÿ ab�c abc
+UnicodeDecodeError 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte
+b'xxyyzz' b'heo' [b'a', b'b'] True True
+bytearray(b'') bytearray(b'x') True bytearray

@@ -45,7 +45,7 @@ pub fn new_str(vm: &mut Vm, _class: &Rc<Class>, args: &[Value], kwargs: &[(Rc<st
             return match core::str::from_utf8(b) {
                 Ok(s) => Ok(Value::str(s)),
                 Err(_) => {
-                    let class = vm.types.unicode_error.clone();
+                    let class = vm.types.unicode_decode_error.clone();
                     Err(vm.error(&class, "'utf-8' codec can't decode bytes"))
                 }
             };
@@ -630,9 +630,12 @@ fn format_map(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Valu
     ret(text)
 }
 
-fn encode(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+fn encode(vm: &mut Vm, a: &[Value], kw: &[(Rc<str>, Value)]) -> PyResult<Value> {
     let s = this_str(vm, a, "encode")?;
-    Ok(Value::Bytes(Rc::from(s.as_bytes())))
+    let encoding = a.get(1).cloned().or_else(|| kw.iter().find(|(k, _)| &**k == "encoding").map(|(_, v)| v.clone()));
+    let encoding = encoding.unwrap_or(Value::str("utf-8"));
+    let bytes = super::bytes::build(vm, &[Value::str(&s), encoding], &[])?;
+    Ok(Value::Bytes(Rc::from(bytes)))
 }
 
 fn translate(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {

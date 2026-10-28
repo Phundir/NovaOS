@@ -35,8 +35,12 @@ pub enum Value {
     Bool(bool),
     Int(Int),
     Float(Num),
+    /// A complex number: real and imaginary parts.
+    Complex(Num, Num),
     Str(Rc<str>),
     Bytes(Rc<[u8]>),
+    /// `bytearray`: mutable bytes.
+    ByteArray(Rc<RefCell<Vec<u8>>>),
     List(Rc<RefCell<Vec<Value>>>),
     Tuple(Rc<[Value]>),
     Dict(Rc<RefCell<Dict>>),
@@ -153,6 +157,8 @@ pub struct Class {
     pub base: Base,
     /// A unique number: `id`, and the order of classes in errors.
     pub id: usize,
+    /// The class of this class when it is not `type`.
+    pub metaclass: RefCell<Option<Rc<Class>>>,
 }
 
 pub struct Instance {
@@ -194,6 +200,9 @@ pub struct Generator {
     pub frame: Option<super::vm::Frame>,
     pub running: bool,
     pub name: Rc<str>,
+    /// 0 a generator, 1 a coroutine (`async def`), 2 an asynchronous
+    /// generator (`async def` with `yield`).
+    pub kind: u8,
 }
 
 pub struct Module {
@@ -537,6 +546,7 @@ impl Class {
             dict: RefCell::new(Dict::new()),
             base,
             id: NEXT_CLASS_ID.next(),
+            metaclass: RefCell::new(None),
         });
         track(Tracked::Class(Rc::downgrade(&class)));
         class

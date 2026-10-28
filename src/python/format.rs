@@ -218,8 +218,10 @@ fn repr_inner(vm: &mut Vm, value: &Value) -> PyResult<String> {
         Value::Bool(b) => String::from(if *b { "True" } else { "False" }),
         Value::Int(i) => int_text(vm, i)?,
         Value::Float(f) => float_repr(*f),
+        Value::Complex(r, i) => super::types::complex::repr(*r, *i),
         Value::Str(s) => str_repr(s),
         Value::Bytes(b) => bytes_repr(b),
+        Value::ByteArray(b) => alloc::format!("bytearray({})", bytes_repr(&b.borrow())),
         Value::List(l) => {
             let items = l.borrow().clone();
             items_repr(vm, at(), &items, "[", "]", "[...]")?
@@ -284,6 +286,14 @@ fn repr_inner(vm: &mut Vm, value: &Value) -> PyResult<String> {
             }
         }
         Value::Class(c) => {
+            // A metaclass's own `__repr__`.
+            let meta = c.metaclass.borrow().clone();
+            if let Some(Value::Function(_)) = meta.as_ref().and_then(|m| m.lookup("__repr__")) {
+                let method = meta.as_ref().and_then(|m| m.lookup("__repr__")).unwrap_or(Value::None);
+                if let Value::Str(s) = vm.call(&method, core::slice::from_ref(value), &[])? {
+                    return Ok(String::from(&*s));
+                }
+            }
             // A metaclass's repr (`<enum 'Color'>`), through its hook.
             if c.lookup("__class_repr__").is_some() {
                 let c = c.clone();
@@ -326,8 +336,13 @@ fn repr_inner(vm: &mut Vm, value: &Value) -> PyResult<String> {
             alloc::format!("<{} object at {:#x}>", name, at())
         }
         Value::Generator(g) => {
-            let name = g.borrow().name.clone();
-            alloc::format!("<generator object {} at {:#x}>", name, at())
+            let (name, kind) = (g.borrow().name.clone(), g.borrow().kind);
+            let what = match kind {
+                0 => "generator",
+                1 => "coroutine",
+                _ => "async_generator",
+            };
+            alloc::format!("<{} object {} at {:#x}>", what, name, at())
         }
         Value::Module(m) => {
             if m.file.is_empty() {
@@ -761,6 +776,9 @@ pub fn format(vm: &mut Vm, value: &Value, spec: &str) -> PyResult<String> {
     }
     if spec.is_empty() {
         return str_of(vm, value);
+    }
+    if let Value::Complex(r, i) = value {
+        return super::types::complex::format(vm, *r, *i, spec);
     }
     let type_name = vm.type_name(value);
     let parsed = parse_spec(vm, spec, &type_name)?;

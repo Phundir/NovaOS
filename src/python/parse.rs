@@ -37,6 +37,10 @@ struct Parser {
     depth: usize,
     /// Inside a function (yield allowed), a loop (break allowed).
     functions: usize,
+    /// For each enclosing function, innermost last: is it `async def`?
+    asyncs: Vec<bool>,
+    /// Counter of the hidden names `async for` and `async with` use.
+    hidden: usize,
 }
 
 impl Parser {
@@ -168,10 +172,23 @@ impl Parser {
                 "for" => Some(self.for_stmt()?),
                 "try" => Some(self.try_stmt()?),
                 "with" => Some(self.with_stmt()?),
-                "def" => Some(self.def_stmt(Vec::new())?),
+                "def" => Some(self.def_stmt(Vec::new(), false)?),
                 "class" => Some(self.class_stmt(Vec::new())?),
-                "async" => return self.error("async/await ne sont pas pris en charge"),
-                "match" if self.match_statement_ahead() => return self.error("l'instruction match n'est pas prise en charge"),
+                "async" => {
+                    self.advance();
+                    if self.is_kw("def") {
+                        Some(self.def_stmt(Vec::new(), true)?)
+                    } else if self.is_kw("for") || self.is_kw("with") {
+                        if !self.asyncs.last().copied().unwrap_or(false) {
+                            let what = if self.is_kw("for") { "for" } else { "with" };
+                            return self.error(&alloc::format!("'async {}' outside async function", what));
+                        }
+                        return if self.is_kw("for") { self.async_for(line) } else { self.async_with(line) };
+                    } else {
+                        return self.error("syntaxe invalide apres async");
+                    }
+                }
+                "match" if self.match_statement_ahead() => Some(self.match_stmt()?),
                 _ => None,
             },
             Tok::Op("@") => Some(self.decorated()?),
@@ -200,6 +217,401 @@ impl Parser {
             i += 1;
         }
         false
+    }
+
+    // --------------------------------------------------------
+    //  async for, async with: rewritten with await
+    // --------------------------------------------------------
+
+    fn hidden_name(&mut self) -> Rc<str> {
+        self.hidden += 1;
+        Rc::from(alloc::format!("$a{}", self.hidden).as_str())
+    }
+
+    /// `async for target in iterable: body else: orelse` becomes
+    ///
+    /// ```text
+    /// $it = (iterable).__aiter__()
+    /// while True:
+    ///     try:
+    ///         $v = await $it.__anext__()
+    ///     except StopAsyncIteration:
+    ///         orelse
+    ///         break
+    ///     target = $v
+    ///     body
+    /// ```
+    fn async_for(&mut self, line: u32) -> PResult<Vec<Stmt>> {
+        self.advance(); // for
+        let target = self.target_list()?;
+        self.expect_kw("in")?;
+        let iterable = self.star_expressions()?;
+        let body = self.block()?;
+        let orelse = if self.is_kw("else") {
+            self.advance();
+            self.block()?
+        } else {
+            Vec::new()
+        };
+        let it = self.hidden_name();
+        let v = self.hidden_name();
+        let e = |kind: ExprKind| Expr { kind, line };
+        let st = |kind: StmtKind| Stmt { kind, line };
+        let call = |object: Expr, method: &str| {
+            e(ExprKind::Call(Box::new(e(ExprKind::Attribute(Box::new(object), Rc::from(method)))), Vec::new()))
+        };
+        let mut handler_body = orelse;
+        handler_body.push(st(StmtKind::Break));
+        let fetch = st(StmtKind::Try {
+            body: alloc::vec![st(StmtKind::Assign(
+                alloc::vec![e(ExprKind::Name(v.clone()))],
+                e(ExprKind::Await(Box::new(call(e(ExprKind::Name(it.clone())), "__anext__")))),
+            ))],
+            handlers: alloc::vec![ExceptHandler {
+                kind: Some(e(ExprKind::Name(Rc::from("StopAsyncIteration")))),
+                name: None,
+                body: handler_body,
+                line,
+            }],
+            orelse: Vec::new(),
+            finalbody: Rc::new(Vec::new()),
+        });
+        let mut loop_body = alloc::vec![fetch, st(StmtKind::Assign(alloc::vec![target], e(ExprKind::Name(v))))];
+        loop_body.extend(body);
+        Ok(alloc::vec![
+            st(StmtKind::Assign(alloc::vec![e(ExprKind::Name(it))], call(iterable, "__aiter__"))),
+            st(StmtKind::While(e(ExprKind::Const(Const::True)), loop_body, Vec::new())),
+        ])
+    }
+
+    /// `async with ctx as target: body` becomes
+    ///
+    /// ```text
+    /// $m = ctx
+    /// target = await $m.__aenter__()
+    /// $f = False
+    /// try:
+    ///     try:
+    ///         body
+    ///     except BaseException as $e:
+    ///         $f = True
+    ///         if not await $m.__aexit__($e.__class__, $e, None):
+    ///             raise
+    /// finally:
+    ///     if not $f:
+    ///         await $m.__aexit__(None, None, None)
+    /// ```
+    fn async_with(&mut self, line: u32) -> PResult<Vec<Stmt>> {
+        self.advance(); // with
+        let parenthesized = self.is_op("(") && self.with_items_parenthesized();
+        if parenthesized {
+            self.advance();
+        }
+        let mut items = Vec::new();
+        loop {
+            if parenthesized && self.is_op(")") {
+                break;
+            }
+            let context = self.expression()?;
+            let target = if self.eat_kw("as") {
+                let target = self.star_target()?;
+                self.check_target(&target, false)?;
+                Some(target)
+            } else {
+                None
+            };
+            items.push((context, target));
+            if !self.eat_op(",") {
+                break;
+            }
+        }
+        if parenthesized {
+            self.expect_op(")")?;
+        }
+        let mut body = self.block()?;
+        let e = |kind: ExprKind| Expr { kind, line };
+        let st = |kind: StmtKind| Stmt { kind, line };
+        for (context, target) in items.into_iter().rev() {
+            let m = self.hidden_name();
+            let f = self.hidden_name();
+            let x = self.hidden_name();
+            let name = |n: &Rc<str>| e(ExprKind::Name(n.clone()));
+            let method = |object: Expr, method: &str, args: Vec<Expr>| {
+                e(ExprKind::Call(
+                    Box::new(e(ExprKind::Attribute(Box::new(object), Rc::from(method)))),
+                    args.into_iter().map(Arg::Positional).collect(),
+                ))
+            };
+            let none = || e(ExprKind::Const(Const::None));
+            let enter = e(ExprKind::Await(Box::new(method(name(&m), "__aenter__", Vec::new()))));
+            let mut out = alloc::vec![st(StmtKind::Assign(alloc::vec![name(&m)], context))];
+            match target {
+                Some(t) => out.push(st(StmtKind::Assign(alloc::vec![t], enter))),
+                None => out.push(st(StmtKind::Expr(enter))),
+            }
+            out.push(st(StmtKind::Assign(alloc::vec![name(&f)], e(ExprKind::Const(Const::False)))));
+            let exit_on_error = e(ExprKind::Await(Box::new(method(
+                name(&m),
+                "__aexit__",
+                alloc::vec![e(ExprKind::Attribute(Box::new(name(&x)), Rc::from("__class__"))), name(&x), none()],
+            ))));
+            let handler = ExceptHandler {
+                kind: Some(e(ExprKind::Name(Rc::from("BaseException")))),
+                name: Some(x.clone()),
+                body: alloc::vec![
+                    st(StmtKind::Assign(alloc::vec![name(&f)], e(ExprKind::Const(Const::True)))),
+                    st(StmtKind::If(
+                        e(ExprKind::Unary(UnaryOp::Not, Box::new(exit_on_error))),
+                        alloc::vec![st(StmtKind::Raise(None, None))],
+                        Vec::new(),
+                    )),
+                ],
+                line,
+            };
+            let inner = st(StmtKind::Try { body, handlers: alloc::vec![handler], orelse: Vec::new(), finalbody: Rc::new(Vec::new()) });
+            let exit_clean = e(ExprKind::Await(Box::new(method(name(&m), "__aexit__", alloc::vec![none(), none(), none()]))));
+            let finally = alloc::vec![st(StmtKind::If(
+                e(ExprKind::Unary(UnaryOp::Not, Box::new(name(&f)))),
+                alloc::vec![st(StmtKind::Expr(exit_clean))],
+                Vec::new(),
+            ))];
+            out.push(st(StmtKind::Try { body: alloc::vec![inner], handlers: Vec::new(), orelse: Vec::new(), finalbody: Rc::new(finally) }));
+            body = out;
+        }
+        Ok(body)
+    }
+
+    fn match_stmt(&mut self) -> PResult<StmtKind> {
+        self.advance(); // match
+        let subject = self.star_expressions()?;
+        self.expect_op(":")?;
+        if !matches!(self.peek(), Tok::Newline) {
+            return self.error("match attend un bloc de case");
+        }
+        self.advance();
+        if !matches!(self.peek(), Tok::Indent) {
+            return self.error("bloc indente attendu (IndentationError)");
+        }
+        self.advance();
+        let mut cases = Vec::new();
+        while !matches!(self.peek(), Tok::Dedent | Tok::Eof) {
+            if matches!(self.peek(), Tok::Newline) {
+                self.advance();
+                continue;
+            }
+            let line = self.line();
+            if !self.eat_kw("case") {
+                return self.error("case attendu");
+            }
+            let pattern = self.open_pattern()?;
+            let guard = if self.eat_kw("if") { Some(self.named_expression()?) } else { None };
+            let body = self.block()?;
+            cases.push(MatchCase { pattern, guard, body, line });
+        }
+        if matches!(self.peek(), Tok::Dedent) {
+            self.advance();
+        }
+        if cases.is_empty() {
+            return self.error("match sans case");
+        }
+        // An irrefutable case other than the last makes the rest
+        // unreachable: CPython refuses it.
+        for case in &cases[..cases.len() - 1] {
+            if case.guard.is_none() && irrefutable(&case.pattern) {
+                return Err(SyntaxError {
+                    message: String::from("wildcard makes remaining patterns unreachable"),
+                    line: case.line,
+                });
+            }
+        }
+        Ok(StmtKind::Match(subject, cases))
+    }
+
+    /// `case a, b:` is a sequence without brackets.
+    fn open_pattern(&mut self) -> PResult<Pattern> {
+        let first = self.as_pattern()?;
+        if !self.is_op(",") {
+            return Ok(first);
+        }
+        let mut items = alloc::vec![first];
+        while self.eat_op(",") {
+            if self.is_op(":") || self.is_kw("if") {
+                break;
+            }
+            items.push(self.as_pattern()?);
+        }
+        Ok(Pattern::Sequence(items))
+    }
+
+    fn as_pattern(&mut self) -> PResult<Pattern> {
+        self.enter()?;
+        let result = self.as_pattern_inner();
+        self.leave();
+        result
+    }
+
+    fn as_pattern_inner(&mut self) -> PResult<Pattern> {
+        let mut alternatives = alloc::vec![self.closed_pattern()?];
+        while self.eat_op("|") {
+            alternatives.push(self.closed_pattern()?);
+        }
+        let pattern = if alternatives.len() == 1 { alternatives.pop().unwrap_or(Pattern::Wildcard) } else { Pattern::Or(alternatives) };
+        if self.eat_kw("as") {
+            let name = self.name()?;
+            if &*name == "_" {
+                return self.error("cannot use '_' as a target");
+            }
+            return Ok(Pattern::As(Box::new(pattern), name));
+        }
+        Ok(pattern)
+    }
+
+    fn closed_pattern(&mut self) -> PResult<Pattern> {
+        let line = self.line();
+        match self.peek().clone() {
+            Tok::Op("*") => {
+                self.advance();
+                let name = self.name()?;
+                Ok(Pattern::Star(if &*name == "_" { None } else { Some(name) }))
+            }
+            Tok::Op("(") => {
+                self.advance();
+                if self.eat_op(")") {
+                    return Ok(Pattern::Sequence(Vec::new()));
+                }
+                let first = self.as_pattern()?;
+                if self.eat_op(")") {
+                    // A parenthesized pattern, unless it is `(*x)`.
+                    return Ok(match first {
+                        Pattern::Star(_) => Pattern::Sequence(alloc::vec![first]),
+                        other => other,
+                    });
+                }
+                let mut items = alloc::vec![first];
+                while self.eat_op(",") {
+                    if self.is_op(")") {
+                        break;
+                    }
+                    items.push(self.as_pattern()?);
+                }
+                self.expect_op(")")?;
+                Ok(Pattern::Sequence(items))
+            }
+            Tok::Op("[") => {
+                self.advance();
+                let mut items = Vec::new();
+                while !self.eat_op("]") {
+                    items.push(self.as_pattern()?);
+                    if !self.eat_op(",") {
+                        self.expect_op("]")?;
+                        break;
+                    }
+                }
+                Ok(Pattern::Sequence(items))
+            }
+            Tok::Op("{") => {
+                self.advance();
+                let mut items = Vec::new();
+                let mut rest = None;
+                while !self.eat_op("}") {
+                    if self.eat_op("**") {
+                        rest = Some(self.name()?);
+                        self.eat_op(",");
+                        self.expect_op("}")?;
+                        break;
+                    }
+                    let key = self.pattern_value()?;
+                    self.expect_op(":")?;
+                    let value = self.as_pattern()?;
+                    items.push((key, value));
+                    if !self.eat_op(",") {
+                        self.expect_op("}")?;
+                        break;
+                    }
+                }
+                Ok(Pattern::Mapping(items, rest))
+            }
+            Tok::Name(n) if &*n == "None" || &*n == "True" || &*n == "False" => {
+                self.advance();
+                Ok(Pattern::Singleton(match &*n {
+                    "None" => Const::None,
+                    "True" => Const::True,
+                    _ => Const::False,
+                }))
+            }
+            Tok::Name(n) if !KEYWORDS.contains(&&*n) => {
+                // A capture, a dotted value, or a class pattern.
+                if !matches!(self.peek_at(1), Tok::Op(".") | Tok::Op("(")) {
+                    self.advance();
+                    return Ok(if &*n == "_" { Pattern::Wildcard } else { Pattern::Capture(n) });
+                }
+                self.advance();
+                let mut expr = self.expr_at(ExprKind::Name(n), line);
+                while self.eat_op(".") {
+                    let attr = self.name()?;
+                    expr = self.expr_at(ExprKind::Attribute(Box::new(expr), attr), line);
+                }
+                if !self.eat_op("(") {
+                    return Ok(Pattern::Value(expr));
+                }
+                let mut args = Vec::new();
+                let mut kwargs: Vec<(Rc<str>, Pattern)> = Vec::new();
+                while !self.eat_op(")") {
+                    if matches!(self.peek(), Tok::Name(_)) && matches!(self.peek_at(1), Tok::Op("=")) {
+                        let key = self.name()?;
+                        self.advance();
+                        if kwargs.iter().any(|(k, _)| *k == key) {
+                            return self.error(&alloc::format!("attribute name repeated in class pattern: {}", key));
+                        }
+                        kwargs.push((key, self.as_pattern()?));
+                    } else {
+                        if !kwargs.is_empty() {
+                            return self.error("positional patterns follow keyword patterns");
+                        }
+                        args.push(self.as_pattern()?);
+                    }
+                    if !self.eat_op(",") {
+                        self.expect_op(")")?;
+                        break;
+                    }
+                }
+                Ok(Pattern::Class(expr, args, kwargs))
+            }
+            _ => Ok(Pattern::Value(self.pattern_value()?)),
+        }
+    }
+
+    /// A literal of a pattern: a number (signed, or a complex `a + bj`),
+    /// strings, or a dotted name.
+    fn pattern_value(&mut self) -> PResult<Expr> {
+        let line = self.line();
+        match self.peek().clone() {
+            Tok::Str(_) | Tok::Bytes(_) => self.strings(),
+            Tok::FString(_) => self.error("patterns may only match literals and attribute lookups"),
+            Tok::Name(n) if !KEYWORDS.contains(&&*n) => {
+                self.advance();
+                let mut expr = self.expr_at(ExprKind::Name(n), line);
+                while self.eat_op(".") {
+                    let attr = self.name()?;
+                    expr = self.expr_at(ExprKind::Attribute(Box::new(expr), attr), line);
+                }
+                Ok(expr)
+            }
+            Tok::Name(n) if &*n == "None" || &*n == "True" || &*n == "False" => self.atom(),
+            Tok::Op("-") | Tok::Int(_) | Tok::Float(_) | Tok::Imag(_) => {
+                let value = self.factor()?;
+                if self.is_op("+") || self.is_op("-") {
+                    let op = if self.eat_op("+") { BinOp::Add } else {
+                        self.advance();
+                        BinOp::Sub
+                    };
+                    let imaginary = self.factor()?;
+                    return Ok(self.expr_at(ExprKind::BinOp(op, Box::new(value), Box::new(imaginary)), line));
+                }
+                Ok(value)
+            }
+            _ => self.error("motif invalide"),
+        }
     }
 
     fn block(&mut self) -> PResult<Vec<Stmt>> {
@@ -556,7 +968,7 @@ impl Parser {
         if handlers.is_empty() && finalbody.is_empty() {
             return self.error("\"except\" ou \"finally\" attendu");
         }
-        Ok(StmtKind::Try { body, handlers, orelse, finalbody })
+        Ok(StmtKind::Try { body, handlers, orelse, finalbody: Rc::new(finalbody) })
     }
 
     fn with_stmt(&mut self) -> PResult<StmtKind> {
@@ -623,7 +1035,10 @@ impl Parser {
             self.advance();
         }
         if self.is_kw("def") {
-            self.def_stmt(decorators)
+            self.def_stmt(decorators, false)
+        } else if self.is_kw("async") && self.kw_at(1, "def") {
+            self.advance();
+            self.def_stmt(decorators, true)
         } else if self.is_kw("class") {
             self.class_stmt(decorators)
         } else {
@@ -631,7 +1046,7 @@ impl Parser {
         }
     }
 
-    fn def_stmt(&mut self, decorators: Vec<Expr>) -> PResult<StmtKind> {
+    fn def_stmt(&mut self, decorators: Vec<Expr>, is_async: bool) -> PResult<StmtKind> {
         let line = self.line();
         self.advance(); // def
         let name = self.name()?;
@@ -645,9 +1060,11 @@ impl Parser {
             self.expression()?;
         }
         self.functions += 1;
+        self.asyncs.push(is_async);
         let body = self.block();
+        self.asyncs.pop();
         self.functions -= 1;
-        Ok(StmtKind::FunctionDef(Rc::new(FunctionDef { name, params: Rc::new(params), body: body?, decorators, line })))
+        Ok(StmtKind::FunctionDef(Rc::new(FunctionDef { name, params: Rc::new(params), body: body?, decorators, line, is_async })))
     }
 
     fn class_stmt(&mut self, decorators: Vec<Expr>) -> PResult<StmtKind> {
@@ -667,7 +1084,9 @@ impl Parser {
         }
         // A class body is not a function: `return` stays forbidden there.
         let saved = core::mem::replace(&mut self.functions, 0);
+        self.asyncs.push(false);
         let body = self.block();
+        self.asyncs.pop();
         self.functions = saved;
         Ok(StmtKind::ClassDef(Rc::new(ClassDef { name, bases, keywords, body: body?, decorators, line })))
     }
@@ -810,7 +1229,9 @@ impl Parser {
             let params = self.parameters(":", false)?;
             self.expect_op(":")?;
             self.functions += 1;
+            self.asyncs.push(false);
             let body = self.expression();
+            self.asyncs.pop();
             self.functions -= 1;
             return Ok(self.expr_at(ExprKind::Lambda(Rc::new(params), Box::new(body?)), line));
         }
@@ -972,10 +1393,21 @@ impl Parser {
 
     fn power(&mut self) -> PResult<Expr> {
         let line = self.line();
-        if self.is_kw("await") {
-            return self.error("async/await ne sont pas pris en charge");
-        }
-        let base = self.primary()?;
+        let base = if self.is_kw("await") {
+            if self.asyncs.is_empty() {
+                return self.error("'await' outside function");
+            }
+            if !self.asyncs.last().copied().unwrap_or(false) {
+                return self.error("'await' outside async function");
+            }
+            self.advance();
+            self.enter()?;
+            let operand = self.primary();
+            self.leave();
+            self.expr_at(ExprKind::Await(Box::new(operand?)), line)
+        } else {
+            self.primary()?
+        };
         if self.eat_op("**") {
             self.enter()?;
             let exponent = self.factor();
@@ -1025,7 +1457,7 @@ impl Parser {
                 let line = self.line();
                 let value = self.named_expression()?;
                 // `f(x for x in y)`: a generator as the only argument.
-                if self.is_kw("for") {
+                if self.comprehension_ahead() {
                     let generators = self.comprehension_clauses()?;
                     args.push(Arg::Positional(self.expr_at(ExprKind::Generator(Box::new(value), generators), line)));
                 } else {
@@ -1073,9 +1505,18 @@ impl Parser {
         Ok(self.expr_at(ExprKind::Slice(lower, upper, step), line))
     }
 
+    /// `for` or `async for`: a comprehension clause starts here.
+    fn comprehension_ahead(&self) -> bool {
+        self.is_kw("for") || (self.is_kw("async") && self.kw_at(1, "for"))
+    }
+
     fn comprehension_clauses(&mut self) -> PResult<Vec<Comprehension>> {
         let mut out = Vec::new();
-        while self.is_kw("for") {
+        while self.comprehension_ahead() {
+            let is_async = self.eat_kw("async");
+            if is_async && !self.asyncs.last().copied().unwrap_or(false) {
+                return self.error("asynchronous comprehension outside of an asynchronous function");
+            }
             self.advance();
             let target = self.target_list()?;
             self.expect_kw("in")?;
@@ -1085,10 +1526,7 @@ impl Parser {
                 self.advance();
                 ifs.push(self.disjunction()?);
             }
-            out.push(Comprehension { target, iter, ifs });
-        }
-        if self.is_kw("async") {
-            return self.error("async/await ne sont pas pris en charge");
+            out.push(Comprehension { target, iter, ifs, is_async });
         }
         Ok(out)
     }
@@ -1124,6 +1562,10 @@ impl Parser {
                 self.advance();
                 Ok(self.expr_at(ExprKind::Const(Const::Float(f)), line))
             }
+            Tok::Imag(f) => {
+                self.advance();
+                Ok(self.expr_at(ExprKind::Const(Const::Imag(f)), line))
+            }
             Tok::Str(_) | Tok::FString(_) | Tok::Bytes(_) => self.strings(),
             Tok::Op("...") => {
                 self.advance();
@@ -1140,7 +1582,7 @@ impl Parser {
                     return Ok(value);
                 }
                 let first = self.star_expression()?;
-                if self.is_kw("for") {
+                if self.comprehension_ahead() {
                     let generators = self.comprehension_clauses()?;
                     self.expect_op(")")?;
                     return Ok(self.expr_at(ExprKind::Generator(Box::new(first), generators), line));
@@ -1167,7 +1609,7 @@ impl Parser {
                     return Ok(self.expr_at(ExprKind::List(Vec::new()), line));
                 }
                 let first = self.star_expression()?;
-                if self.is_kw("for") {
+                if self.comprehension_ahead() {
                     let generators = self.comprehension_clauses()?;
                     self.expect_op("]")?;
                     return Ok(self.expr_at(ExprKind::ListComp(Box::new(first), generators), line));
@@ -1204,14 +1646,14 @@ impl Parser {
         let first = self.star_expression()?;
         if self.eat_op(":") {
             let value = self.expression()?;
-            if self.is_kw("for") {
+            if self.comprehension_ahead() {
                 let generators = self.comprehension_clauses()?;
                 self.expect_op("}")?;
                 return Ok(self.expr_at(ExprKind::DictComp(Box::new(first), Box::new(value), generators), line));
             }
             return self.dict_rest(alloc::vec![(Some(first), value)], line);
         }
-        if self.is_kw("for") {
+        if self.comprehension_ahead() {
             let generators = self.comprehension_clauses()?;
             self.expect_op("}")?;
             return Ok(self.expr_at(ExprKind::SetComp(Box::new(first), generators), line));
@@ -1328,7 +1770,14 @@ fn parse_expression_source(source: &str, line: u32, in_function: bool) -> PResul
     let wrapped = alloc::format!("({})", source.trim());
     let tokens = lex::tokenize(&wrapped).map_err(|e| SyntaxError { message: e.message, line })?;
     let tokens: Vec<Token> = tokens.into_iter().map(|t| Token { tok: t.tok, line }).collect();
-    let mut parser = Parser { tokens, pos: 0, depth: 0, functions: usize::from(in_function) };
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        depth: 0,
+        functions: usize::from(in_function),
+        asyncs: if in_function { alloc::vec![true] } else { Vec::new() },
+        hidden: 0,
+    };
     let expr = parser.star_expressions()?;
     while matches!(parser.peek(), Tok::Newline) {
         parser.advance();
@@ -1340,9 +1789,20 @@ fn parse_expression_source(source: &str, line: u32, in_function: bool) -> PResul
 }
 
 /// Parses a module.
+/// Does this pattern match anything (a capture or `_`, maybe in an
+/// or-pattern)?
+fn irrefutable(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Wildcard | Pattern::Capture(_) => true,
+        Pattern::As(inner, _) => irrefutable(inner),
+        Pattern::Or(alternatives) => alternatives.iter().any(irrefutable),
+        _ => false,
+    }
+}
+
 pub fn parse(source: &str) -> Result<Vec<Stmt>, SyntaxError> {
     let tokens = lex::tokenize(source).map_err(|e| SyntaxError { message: e.message, line: e.line })?;
-    let mut parser = Parser { tokens, pos: 0, depth: 0, functions: 0 };
+    let mut parser = Parser { tokens, pos: 0, depth: 0, functions: 0, asyncs: Vec::new(), hidden: 0 };
     parser.file()
 }
 

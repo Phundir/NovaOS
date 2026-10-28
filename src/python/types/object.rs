@@ -274,7 +274,18 @@ pub fn new_object(vm: &mut Vm, _class: &Rc<Class>, a: &[Value], kw: &[(Rc<str>, 
 // ------------------------------------------------------------
 
 /// `type(x)` or `type(name, bases, namespace)`.
-pub fn new_type(vm: &mut Vm, _class: &Rc<Class>, a: &[Value], kw: &[(Rc<str>, Value)]) -> PyResult<Value> {
+pub fn new_type(vm: &mut Vm, class: &Rc<Class>, a: &[Value], kw: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let made = new_type_inner(vm, class, a, kw)?;
+    // `M(name, bases, ns)` and `type.__new__(M, ...)`: a class of M.
+    if let Value::Class(c) = &made {
+        if a.len() == 3 && class.id != vm.types.type_.id {
+            *c.metaclass.borrow_mut() = Some(class.clone());
+        }
+    }
+    Ok(made)
+}
+
+fn new_type_inner(vm: &mut Vm, _class: &Rc<Class>, a: &[Value], kw: &[(Rc<str>, Value)]) -> PyResult<Value> {
     match a {
         [value] if kw.is_empty() => Ok(Value::Class(vm.class_of(value))),
         [name, bases, namespace] => {
@@ -309,6 +320,32 @@ pub fn new_type(vm: &mut Vm, _class: &Rc<Class>, a: &[Value], kw: &[(Rc<str>, Va
         }
         _ => vm.type_error("type() takes 1 or 3 arguments"),
     }
+}
+
+/// `type.__new__(mcls, name, bases, namespace)`.
+fn type_dunder_new(vm: &mut Vm, a: &[Value], kw: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let Some(Value::Class(mcls)) = a.first() else {
+        return vm.type_error("type.__new__(X): X is not a type object");
+    };
+    let mcls = mcls.clone();
+    new_type(vm, &mcls, &a[1..], kw)
+}
+
+/// `type.__call__(cls, *args)`: an instance, by `__new__` and `__init__`.
+fn type_dunder_call(vm: &mut Vm, a: &[Value], kw: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let Some(Value::Class(class)) = a.first() else {
+        return vm.type_error("descriptor '__call__' requires a 'type' object");
+    };
+    let class = class.clone();
+    vm.construct(&class, &a[1..], kw)
+}
+
+fn type_dunder_init(_: &mut Vm, _: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    Ok(Value::None)
+}
+
+fn type_prepare(_: &mut Vm, _: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    Ok(Value::dict(super::super::dict::Dict::new()))
 }
 
 fn type_mro(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
@@ -519,6 +556,32 @@ fn gen_close(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value
     }
 }
 
+fn agen_anext(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let marker = vm.async_marker();
+    let raw = a.first().cloned().unwrap_or(Value::None);
+    vm.async_helper("_anext", &[raw, marker])
+}
+
+fn agen_asend(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let marker = vm.async_marker();
+    let raw = a.first().cloned().unwrap_or(Value::None);
+    let sent = a.get(1).cloned().unwrap_or(Value::None);
+    vm.async_helper("_anext", &[raw, marker, sent])
+}
+
+fn agen_athrow(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let marker = vm.async_marker();
+    let raw = a.first().cloned().unwrap_or(Value::None);
+    let error = a.get(1).cloned().unwrap_or(Value::None);
+    vm.async_helper("_athrow", &[raw, marker, error])
+}
+
+fn agen_aclose(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let marker = vm.async_marker();
+    let raw = a.first().cloned().unwrap_or(Value::None);
+    vm.async_helper("_aclose", &[raw, marker])
+}
+
 fn self_iter(_: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
     Ok(a.first().cloned().unwrap_or(Value::None))
 }
@@ -556,7 +619,7 @@ fn decode(vm: &mut Vm, bytes: &[u8]) -> PyResult<String> {
     match core::str::from_utf8(bytes) {
         Ok(s) => Ok(s.replace("\r\n", "\n")),
         Err(e) => {
-            let class = vm.types.unicode_error.clone();
+            let class = vm.types.unicode_decode_error.clone();
             let message = alloc::format!("'utf-8' codec can't decode byte 0x{:02x} in position {}: invalid start byte", bytes[e.valid_up_to()], e.valid_up_to());
             Err(vm.error(&class, &message))
         }
@@ -821,7 +884,7 @@ pub fn new_super(vm: &mut Vm, _class: &Rc<Class>, a: &[Value], _kw: &[(Rc<str>, 
     match a {
         [Value::Class(start), object] => {
             let ok = match object {
-                Value::Class(c) => c.is_subclass(start),
+                Value::Class(c) => c.is_subclass(start) || vm.class_of(object).is_subclass(start),
                 other => vm.class_of(other).is_subclass(start),
             };
             if !ok {
@@ -993,6 +1056,10 @@ pub fn install(vm: &mut Vm) {
 
     let type_ = vm.types.type_.clone();
     method(&type_, "mro", type_mro);
+    method(&type_, "__call__", type_dunder_call);
+    method(&type_, "__init__", type_dunder_init);
+    type_.dict.borrow_mut().set_str("__new__", super::native("__new__", type_dunder_new));
+    type_.dict.borrow_mut().set_str("__prepare__", Value::ClassMethod(Rc::new(super::native("__prepare__", type_prepare))));
     let union = vm.types.union_type.clone();
     union.dict.borrow_mut().set_str("__module__", Value::str("types"));
     method(&union, "__repr__", union_repr);
@@ -1012,6 +1079,21 @@ pub fn install(vm: &mut Vm) {
     ];
     for (name, f) in entries {
         method(&generator, name, *f);
+    }
+    let coroutine = vm.types.coroutine.clone();
+    let entries: &[(&'static str, NativeFn)] = &[
+        ("send", gen_send), ("throw", gen_throw), ("close", gen_close), ("__await__", self_iter),
+    ];
+    for (name, f) in entries {
+        method(&coroutine, name, *f);
+    }
+    let async_generator = vm.types.async_generator.clone();
+    let entries: &[(&'static str, NativeFn)] = &[
+        ("__aiter__", self_iter), ("__anext__", agen_anext), ("asend", agen_asend), ("athrow", agen_athrow),
+        ("aclose", agen_aclose), ("_send", gen_send), ("_throw", gen_throw),
+    ];
+    for (name, f) in entries {
+        method(&async_generator, name, *f);
     }
     let iterator = vm.types.iterator.clone();
     method(&iterator, "__next__", iter_next_method);

@@ -17,6 +17,7 @@ use super::code::{Code, Op};
 use super::int::Int;
 use super::symtable::{self, Place, ScopeKind, Table};
 use super::value::Value;
+use crate::web::js::num::Num;
 
 pub struct CompileError {
     pub message: String,
@@ -63,6 +64,11 @@ impl<'a> Compiler<'a> {
     fn unit(&mut self) -> &mut Unit {
         let last = self.units.len() - 1;
         &mut self.units[last]
+    }
+
+    /// Is the unit being compiled an `async def`?
+    fn in_coroutine(&self) -> bool {
+        self.table.scopes[self.units[self.units.len() - 1].scope].coroutine
     }
 
     fn scope_kind(&self) -> ScopeKind {
@@ -265,6 +271,7 @@ impl<'a> Compiler<'a> {
             varargs: false,
             varkw: false,
             generator: info.generator,
+            coroutine: info.coroutine,
             uses_namespace: matches!(info.kind, ScopeKind::Module | ScopeKind::Class),
             first_line: line,
             doc: None,
@@ -520,6 +527,7 @@ impl<'a> Compiler<'a> {
                     self.delete_target(target)?;
                 }
             }
+            StmtKind::Match(subject, cases) => self.match_stmt(subject, cases)?,
             StmtKind::Assert(test, message) => {
                 self.expr(test)?;
                 let ok = self.emit(Op::PopJumpIfTrue(0));
@@ -586,6 +594,278 @@ impl<'a> Compiler<'a> {
                 self.emit(Op::Dup);
                 self.emit(Op::Call(3));
                 self.emit(Op::Pop);
+            }
+        }
+        Ok(())
+    }
+
+    // --------------------------------------------------------
+    //  match (PEP 634)
+    // --------------------------------------------------------
+
+    /// A hidden variable of the current unit (`$p3`): the subject and
+    /// the parts of it that patterns look at.
+    fn new_temp(&mut self) -> Rc<str> {
+        let unit = self.unit();
+        let n = unit.code.varnames.len() + unit.code.names.len();
+        Rc::from(alloc::format!("$p{}", n).as_str())
+    }
+
+    fn store_temp(&mut self, name: &str) {
+        match self.scope_kind() {
+            ScopeKind::Module | ScopeKind::Class => {
+                let i = self.name_index(name);
+                self.emit(Op::StoreName(i));
+            }
+            _ => {
+                let i = self.varname_index(name);
+                self.emit(Op::StoreFast(i));
+            }
+        }
+    }
+
+    fn load_temp(&mut self, name: &str) {
+        match self.scope_kind() {
+            ScopeKind::Module | ScopeKind::Class => {
+                let i = self.name_index(name);
+                self.emit(Op::LoadName(i));
+            }
+            _ => {
+                let i = self.varname_index(name);
+                self.emit(Op::LoadFast(i));
+            }
+        }
+    }
+
+    fn match_stmt(&mut self, subject: &Expr, cases: &[MatchCase]) -> CResult<()> {
+        self.expr(subject)?;
+        let subject_temp = self.new_temp();
+        self.store_temp(&subject_temp);
+        let mut ends = Vec::new();
+        for case in cases {
+            self.line = case.line;
+            let mut fails = Vec::new();
+            let mut binds = Vec::new();
+            self.pattern(&case.pattern, &subject_temp, &mut fails, &mut binds)?;
+            // The names are bound once the whole pattern matched.
+            for (name, temp) in binds.iter() {
+                self.load_temp(temp);
+                self.store_name(name);
+            }
+            if let Some(guard) = &case.guard {
+                self.expr(guard)?;
+                fails.push(self.emit(Op::PopJumpIfFalse(0)));
+            }
+            self.body(&case.body)?;
+            ends.push(self.emit(Op::Jump(0)));
+            for fail in fails {
+                self.patch_here(fail);
+            }
+        }
+        for end in ends {
+            self.patch_here(end);
+        }
+        Ok(())
+    }
+
+    /// Tests the value in `source` against `pattern`; each failure is a
+    /// jump recorded in `fails`, and each capture a (name, temporary) in
+    /// `binds`. Nothing stays on the stack.
+    fn pattern(&mut self, pattern: &Pattern, source: &Rc<str>, fails: &mut Vec<usize>, binds: &mut Vec<(Rc<str>, Rc<str>)>) -> CResult<()> {
+        match pattern {
+            Pattern::Wildcard | Pattern::Star(None) => {}
+            Pattern::Capture(name) | Pattern::Star(Some(name)) => {
+                if binds.iter().any(|(n, _)| n == name) {
+                    return err(&alloc::format!("multiple assignments to name '{}' in pattern", name), self.line);
+                }
+                binds.push((name.clone(), source.clone()));
+            }
+            Pattern::Value(expr) => {
+                self.load_temp(source);
+                self.expr(expr)?;
+                self.emit(Op::Compare(CmpOp::Eq));
+                fails.push(self.emit(Op::PopJumpIfFalse(0)));
+            }
+            Pattern::Singleton(constant) => {
+                self.load_temp(source);
+                self.load_const(match constant {
+                    Const::True => Value::Bool(true),
+                    Const::False => Value::Bool(false),
+                    _ => Value::None,
+                });
+                self.emit(Op::Is(false));
+                fails.push(self.emit(Op::PopJumpIfFalse(0)));
+            }
+            Pattern::As(inner, name) => {
+                self.pattern(inner, source, fails, binds)?;
+                if binds.iter().any(|(n, _)| n == name) {
+                    return err(&alloc::format!("multiple assignments to name '{}' in pattern", name), self.line);
+                }
+                binds.push((name.clone(), source.clone()));
+            }
+            Pattern::Sequence(items) => {
+                let stars = items.iter().filter(|p| matches!(p, Pattern::Star(_))).count();
+                if stars > 1 {
+                    return err("multiple starred names in sequence pattern", self.line);
+                }
+                self.load_temp(source);
+                self.emit(Op::MatchKind(0));
+                fails.push(self.emit(Op::PopJumpIfFalse(0)));
+                self.load_temp(source);
+                self.emit(Op::GetLen);
+                let fixed = items.len() - stars;
+                self.load_const(Value::Int(Int::from_i64(fixed as i64)));
+                self.emit(Op::Compare(if stars == 0 { CmpOp::Eq } else { CmpOp::GtE }));
+                fails.push(self.emit(Op::PopJumpIfFalse(0)));
+                if items.is_empty() {
+                    return Ok(());
+                }
+                self.load_temp(source);
+                match items.iter().position(|p| matches!(p, Pattern::Star(_))) {
+                    Some(at) => self.emit(Op::UnpackEx(at as u16, (items.len() - at - 1) as u16)),
+                    None => self.emit(Op::UnpackSequence(items.len() as u32)),
+                };
+                let mut temps = Vec::new();
+                for item in items {
+                    if matches!(item, Pattern::Wildcard | Pattern::Star(None)) {
+                        self.emit(Op::Pop);
+                        temps.push(None);
+                    } else {
+                        let temp = self.new_temp();
+                        self.store_temp(&temp);
+                        temps.push(Some(temp));
+                    }
+                }
+                for (item, temp) in items.iter().zip(temps) {
+                    if let Some(temp) = temp {
+                        self.pattern(item, &temp, fails, binds)?;
+                    }
+                }
+            }
+            Pattern::Mapping(items, rest) => {
+                self.load_temp(source);
+                self.emit(Op::MatchKind(1));
+                fails.push(self.emit(Op::PopJumpIfFalse(0)));
+                if items.is_empty() && rest.is_none() {
+                    return Ok(());
+                }
+                self.load_temp(source);
+                for (key, _) in items {
+                    self.expr(key)?;
+                }
+                self.emit(Op::BuildTuple(items.len() as u32));
+                self.emit(Op::MatchKeys);
+                let found = self.new_temp();
+                self.store_temp(&found);
+                self.load_temp(&found);
+                self.load_const(Value::None);
+                self.emit(Op::Is(false));
+                fails.push(self.emit(Op::PopJumpIfTrue(0)));
+                if !items.is_empty() {
+                    self.load_temp(&found);
+                    self.emit(Op::UnpackSequence(items.len() as u32));
+                    let mut temps = Vec::new();
+                    for _ in items {
+                        let temp = self.new_temp();
+                        self.store_temp(&temp);
+                        temps.push(temp);
+                    }
+                    for ((_, value), temp) in items.iter().zip(temps) {
+                        self.pattern(value, &temp, fails, binds)?;
+                    }
+                }
+                if let Some(rest) = rest {
+                    self.load_temp(source);
+                    for (key, _) in items {
+                        self.expr(key)?;
+                    }
+                    self.emit(Op::BuildTuple(items.len() as u32));
+                    self.emit(Op::CopyDictWithout);
+                    let temp = self.new_temp();
+                    self.store_temp(&temp);
+                    binds.push((rest.clone(), temp));
+                }
+            }
+            Pattern::Class(class, args, kwargs) => {
+                self.load_temp(source);
+                self.expr(class)?;
+                let names: Vec<Value> = kwargs.iter().map(|(n, _)| Value::Str(n.clone())).collect();
+                self.load_const(Value::tuple(names));
+                self.emit(Op::MatchClass(args.len() as u32));
+                let found = self.new_temp();
+                self.store_temp(&found);
+                self.load_temp(&found);
+                self.load_const(Value::None);
+                self.emit(Op::Is(false));
+                fails.push(self.emit(Op::PopJumpIfTrue(0)));
+                let count = args.len() + kwargs.len();
+                if count > 0 {
+                    self.load_temp(&found);
+                    self.emit(Op::UnpackSequence(count as u32));
+                    let mut temps = Vec::new();
+                    for _ in 0..count {
+                        let temp = self.new_temp();
+                        self.store_temp(&temp);
+                        temps.push(temp);
+                    }
+                    let subpatterns: Vec<&Pattern> = args.iter().chain(kwargs.iter().map(|(_, p)| p)).collect();
+                    for (sub, temp) in subpatterns.into_iter().zip(temps) {
+                        self.pattern(sub, &temp, fails, binds)?;
+                    }
+                }
+            }
+            Pattern::Or(alternatives) => {
+                let mut names = Vec::new();
+                alternatives[0].names(&mut names);
+                let shared: Vec<Rc<str>> = names.iter().map(|_| self.new_temp()).collect();
+                // Reserve the shared temporaries before the alternatives
+                // name their own.
+                for temp in shared.iter() {
+                    match self.scope_kind() {
+                        ScopeKind::Module | ScopeKind::Class => {
+                            self.name_index(temp);
+                        }
+                        _ => {
+                            self.varname_index(temp);
+                        }
+                    }
+                }
+                let mut successes = Vec::new();
+                for alternative in alternatives {
+                    let mut own_names = Vec::new();
+                    alternative.names(&mut own_names);
+                    let mut sorted_a = own_names.clone();
+                    let mut sorted_b = names.clone();
+                    sorted_a.sort();
+                    sorted_b.sort();
+                    if sorted_a != sorted_b {
+                        return err("alternative patterns bind different names", self.line);
+                    }
+                    let mut own_fails = Vec::new();
+                    let mut own_binds = Vec::new();
+                    self.pattern(alternative, source, &mut own_fails, &mut own_binds)?;
+                    for (name, temp) in names.iter().zip(shared.iter()) {
+                        if let Some((_, from)) = own_binds.iter().find(|(n, _)| n == name) {
+                            let from = from.clone();
+                            self.load_temp(&from);
+                            self.store_temp(temp);
+                        }
+                    }
+                    successes.push(self.emit(Op::Jump(0)));
+                    for fail in own_fails {
+                        self.patch_here(fail);
+                    }
+                }
+                fails.push(self.emit(Op::Jump(0)));
+                for success in successes {
+                    self.patch_here(success);
+                }
+                for (name, temp) in names.into_iter().zip(shared) {
+                    if binds.iter().any(|(n, _)| *n == name) {
+                        return err(&alloc::format!("multiple assignments to name '{}' in pattern", name), self.line);
+                    }
+                    binds.push((name, temp));
+                }
             }
         }
         Ok(())
@@ -671,8 +951,8 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn try_finally(&mut self, body: &[Stmt], handlers: &[ExceptHandler], orelse: &[Stmt], finalbody: &[Stmt]) -> CResult<()> {
-        let finalbody = Rc::new(finalbody.to_vec());
+    fn try_finally(&mut self, body: &[Stmt], handlers: &[ExceptHandler], orelse: &[Stmt], finalbody: &Rc<Vec<Stmt>>) -> CResult<()> {
+        let finalbody = finalbody.clone();
         let setup = self.emit(Op::SetupFinally(0));
         self.unit().blocks.push(Block::FinallyTry(finalbody.clone()));
         if handlers.is_empty() {
@@ -953,6 +1233,7 @@ impl<'a> Compiler<'a> {
                     Const::Ellipsis => Value::Ellipsis,
                     Const::Int(i) => Value::Int(i.clone()),
                     Const::Float(f) => Value::Float(*f),
+                    Const::Imag(f) => Value::Complex(Num::ZERO, *f),
                     Const::Str(s) => Value::Str(s.clone()),
                     Const::Bytes(b) => Value::Bytes(b.clone()),
                 };
@@ -1105,11 +1386,23 @@ impl<'a> Compiler<'a> {
                     Some(v) => self.expr(v)?,
                     None => self.load_const(Value::None),
                 }
+                if self.in_coroutine() {
+                    self.emit(Op::AsyncGenWrap);
+                }
                 self.emit(Op::Yield);
             }
             ExprKind::YieldFrom(value) => {
+                if self.in_coroutine() {
+                    return err("'yield from' inside async function", expr.line);
+                }
                 self.expr(value)?;
                 self.emit(Op::GetYieldFromIter);
+                self.load_const(Value::None);
+                self.emit(Op::YieldFrom);
+            }
+            ExprKind::Await(value) => {
+                self.expr(value)?;
+                self.emit(Op::GetAwaitable);
                 self.load_const(Value::None);
                 self.emit(Op::YieldFrom);
             }
@@ -1180,7 +1473,7 @@ impl<'a> Compiler<'a> {
             let n = items.len() as u32;
             let constant = |e: &Expr| match &e.kind {
                 ExprKind::Const(_) => true,
-                ExprKind::Unary(UnaryOp::Neg | UnaryOp::Pos, inner) => matches!(inner.kind, ExprKind::Const(Const::Int(_) | Const::Float(_))),
+                ExprKind::Unary(UnaryOp::Neg | UnaryOp::Pos, inner) => matches!(inner.kind, ExprKind::Const(Const::Int(_) | Const::Float(_) | Const::Imag(_))),
                 _ => false,
             };
             let all_constant = items.iter().all(constant);
@@ -1331,11 +1624,60 @@ impl<'a> Compiler<'a> {
         }
         self.emit(Op::Return);
         let code = self.finish_unit();
+        let asynchronous = code.coroutine;
         self.make_closure(code, 0);
         self.expr(&generators[0].iter)?;
-        self.emit(Op::GetIter);
+        if generators[0].is_async {
+            let i = self.name_index("__aiter__");
+            self.emit(Op::LoadAttr(i));
+            self.emit(Op::Call(0));
+        } else {
+            self.emit(Op::GetIter);
+        }
         self.emit(Op::Call(1));
+        // A list, set or dict comprehension that awaits is a coroutine:
+        // its result is awaited here (a generator expression stays an
+        // asynchronous generator).
+        if asynchronous && kind != 3 {
+            self.emit(Op::GetAwaitable);
+            self.load_const(Value::None);
+            self.emit(Op::YieldFrom);
+        }
         Ok(())
+    }
+
+    /// The loop of an `async for` clause: `__anext__` awaited until
+    /// `StopAsyncIteration`. Returns the jump to patch at the loop's end
+    /// and the start of the loop.
+    fn async_clause_head(&mut self) -> (usize, usize) {
+        let top = self.here();
+        let setup = self.emit(Op::SetupFinally(0));
+        self.emit(Op::Dup);
+        let i = self.name_index("__anext__");
+        self.emit(Op::LoadAttr(i));
+        self.emit(Op::Call(0));
+        self.emit(Op::GetAwaitable);
+        self.load_const(Value::None);
+        self.emit(Op::YieldFrom);
+        self.emit(Op::PopBlock);
+        (setup, top)
+    }
+
+    /// The handler of `async_clause_head`: ends the loop on
+    /// `StopAsyncIteration`, re-raises anything else.
+    fn async_clause_tail(&mut self, setup: usize) {
+        self.patch_here(setup);
+        self.emit(Op::Dup);
+        let i = self.name_index("StopAsyncIteration");
+        self.emit(Op::LoadGlobal(i));
+        let other = self.emit(Op::JumpIfNotExcMatch(0));
+        self.emit(Op::Pop);
+        self.emit(Op::PopExcept);
+        self.emit(Op::Pop);
+        let end = self.emit(Op::Jump(0));
+        self.patch_here(other);
+        self.emit(Op::Reraise);
+        self.patch_here(end);
     }
 
     fn comprehension_clause(&mut self, kind: u8, element: &Expr, value: Option<&Expr>, generators: &[Comprehension], index: usize) -> CResult<()> {
@@ -1345,10 +1687,20 @@ impl<'a> Compiler<'a> {
             self.emit(Op::LoadFast(i));
         } else {
             self.expr(&clause.iter)?;
-            self.emit(Op::GetIter);
+            if clause.is_async {
+                let i = self.name_index("__aiter__");
+                self.emit(Op::LoadAttr(i));
+                self.emit(Op::Call(0));
+            } else {
+                self.emit(Op::GetIter);
+            }
         }
-        let top = self.here();
-        let exit = self.emit(Op::ForIter(0));
+        let (exit, top) = if clause.is_async {
+            self.async_clause_head()
+        } else {
+            let top = self.here();
+            (self.emit(Op::ForIter(0)), top)
+        };
         self.store_target(&clause.target)?;
         let mut skips = Vec::new();
         for condition in &clause.ifs {
@@ -1378,6 +1730,9 @@ impl<'a> Compiler<'a> {
                 }
                 _ => {
                     self.expr(element)?;
+                    if self.in_coroutine() {
+                        self.emit(Op::AsyncGenWrap);
+                    }
                     self.emit(Op::Yield);
                     self.emit(Op::Pop);
                 }
@@ -1387,7 +1742,11 @@ impl<'a> Compiler<'a> {
             self.patch(s, top);
         }
         self.emit(Op::Jump(top as u32));
-        self.patch_here(exit);
+        if clause.is_async {
+            self.async_clause_tail(exit);
+        } else {
+            self.patch_here(exit);
+        }
         Ok(())
     }
 }

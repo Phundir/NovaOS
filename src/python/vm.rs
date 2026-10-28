@@ -73,6 +73,9 @@ pub enum OnReturn {
     Instance(Value),
     /// A class body: the namespace becomes a class.
     ClassBody(Rc<RefCell<Dict>>, Rc<str>, Vec<Rc<Class>>, Vec<(Rc<str>, Value)>),
+    /// A class body with a metaclass other than `type`: the metaclass is
+    /// called with the name, the bases and the namespace.
+    MetaClassBody(Rc<RefCell<Dict>>, Rc<str>, Value, Vec<(Rc<str>, Value)>, Rc<Class>),
 }
 
 pub struct Frame {
@@ -131,6 +134,8 @@ pub struct Vm {
     pub open_files: Vec<Rc<RefCell<File>>>,
     /// Patterns compiled by `re`.
     pub regexes: Vec<super::modules::re::Compiled>,
+    /// The object an asynchronous generator's `yield` is wrapped with.
+    pub async_marker: Option<Value>,
 }
 
 impl Vm {
@@ -157,6 +162,7 @@ impl Vm {
             sources: Vec::new(),
             open_files: Vec::new(),
             regexes: Vec::new(),
+            async_marker: None,
         };
         super::types::install(&mut vm);
         let builtins = super::builtins::module(&mut vm);
@@ -485,8 +491,13 @@ impl Vm {
         match callable {
             Value::Function(function) => {
                 let frame = self.new_frame(function, args, kwargs)?;
-                if function.code.generator {
-                    let generator = Generator { frame: Some(frame), running: false, name: function.name.borrow().clone() };
+                if function.code.generator || function.code.coroutine {
+                    let kind = match (function.code.coroutine, function.code.generator) {
+                        (false, _) => 0,
+                        (true, false) => 1,
+                        (true, true) => 2,
+                    };
+                    let generator = Generator { frame: Some(frame), running: false, name: function.name.borrow().clone(), kind };
                     return Ok(Prepared::Done(Value::generator(generator)));
                 }
                 Ok(Prepared::Frame(frame))
@@ -512,7 +523,18 @@ impl Vm {
                 let function = function.clone();
                 self.prepare_call(&function, &full, kwargs)
             }
-            Value::Class(class) => self.instantiate(class, args, kwargs),
+            Value::Class(class) => {
+                // A metaclass with its own `__call__` decides.
+                let metaclass = class.metaclass.borrow().clone();
+                if let Some(meta) = metaclass {
+                    if let Some(call @ Value::Function(_)) = meta.lookup("__call__") {
+                        let mut full = alloc::vec![callable.clone()];
+                        full.extend_from_slice(args);
+                        return self.prepare_call(&call, &full, kwargs);
+                    }
+                }
+                self.instantiate(class, args, kwargs)
+            }
             Value::Instance(instance) => {
                 let class = instance.class();
                 match class.lookup("__call__") {
@@ -555,19 +577,58 @@ impl Vm {
                 full.extend_from_slice(args);
                 let made = self.call(&new, &full, kwargs)?;
                 // `__init__` runs only on an instance of the class.
-                if !matches!(&made, Value::Instance(i) if i.class().is_subclass(class)) {
+                let of_class = match &made {
+                    Value::Instance(i) => i.class().is_subclass(class),
+                    Value::Class(_) => self.class_of(&made).is_subclass(class),
+                    _ => false,
+                };
+                if !of_class {
                     return Ok(Prepared::Done(made));
                 }
                 made
+            }
+            // A metaclass: its instances are classes.
+            None if class.is_subclass(&self.types.type_) && class.id != self.types.type_.id => {
+                super::types::object::new_type(self, class, args, kwargs)?
             }
             None => super::types::object::allocate(self, class, args, kwargs)?,
         };
         self.init(made, args, kwargs)
     }
 
+    /// `type.__call__`: makes an instance without asking the metaclass
+    /// again.
+    pub fn construct(&mut self, class: &Rc<Class>, args: &[Value], kwargs: &[(Rc<str>, Value)]) -> PyResult<Value> {
+        match self.instantiate(class, args, kwargs)? {
+            Prepared::Done(value) => Ok(value),
+            Prepared::Frame(frame) => {
+                self.enter_native()?;
+                let base = self.frames.len();
+                self.push_frame(frame)?;
+                let result = self.run_from(base);
+                self.leave_native();
+                match result? {
+                    Exit::Return(v) => Ok(v),
+                    Exit::Yield(_) => self.type_error("yield inattendu"),
+                }
+            }
+        }
+    }
+
     fn init(&mut self, value: Value, args: &[Value], kwargs: &[(Rc<str>, Value)]) -> PyResult<Prepared> {
         let class = match &value {
             Value::Instance(i) => i.class(),
+            // A class made by a metaclass: the metaclass's `__init__`.
+            Value::Class(c) => {
+                let meta = c.metaclass.borrow().clone();
+                let init = meta.and_then(|m| m.lookup("__init__")).filter(|i| matches!(i, Value::Function(_)));
+                if let Some(init) = init {
+                    let mut full = alloc::vec![value.clone()];
+                    full.extend_from_slice(args);
+                    self.call(&init, &full, kwargs)?;
+                }
+                return Ok(Prepared::Done(value));
+            }
             _ => return Ok(Prepared::Done(value)),
         };
         match class.lookup("__init__") {
@@ -625,6 +686,58 @@ impl Vm {
             generator.borrow_mut().running = false;
             return self.type_error("can't send non-None value to a just-started generator");
         }
+        // A generator suspended in `yield from` (or `await`) hands a
+        // thrown exception to what it delegates to, as CPython does: the
+        // cancellation of an asyncio task reaches the innermost await.
+        let mut frame = frame;
+        let mut thrown = thrown;
+        let mut push_sent = started;
+        if started {
+            if let Some(PyErr::Exc(exc)) = &thrown {
+                if matches!(frame.code.ops.get(frame.ip), Some(Op::YieldFrom)) {
+                    let exc = exc.clone();
+                    let receiver = frame.stack.last().cloned().unwrap_or(Value::None);
+                    let exit_class = self.types.generator_exit.clone();
+                    let is_exit = matches!(&exc, Value::Instance(i) if i.class().is_subclass(&exit_class));
+                    if is_exit {
+                        if let Ok(close) = self.get_attr(&receiver, "close") {
+                            if let Err(e) = self.call(&close, &[], &[]) {
+                                thrown = Some(e);
+                            }
+                        }
+                    } else {
+                        let outcome = match &receiver {
+                            Value::Generator(g) => Some(self.resume(g, Value::None, Some(PyErr::Exc(exc.clone())))),
+                            other => match self.get_attr(other, "throw") {
+                                Ok(method) => Some(self.call(&method, &[exc.clone()], &[])),
+                                Err(_) => None,
+                            },
+                        };
+                        match outcome {
+                            Some(Ok(value)) => {
+                                // The delegate yielded: still suspended here.
+                                generator.borrow_mut().frame = Some(frame);
+                                generator.borrow_mut().running = false;
+                                return Ok(value);
+                            }
+                            Some(Err(e)) if self.is_instance_of(&e, &self.types.stop_iteration.clone()) => {
+                                let value = match &e {
+                                    PyErr::Exc(Value::Instance(i)) => i.dict.borrow().get_str("value").unwrap_or(Value::None),
+                                    _ => Value::None,
+                                };
+                                frame.stack.pop();
+                                frame.stack.push(value);
+                                frame.ip += 1;
+                                thrown = None;
+                                push_sent = false;
+                            }
+                            Some(Err(e)) => thrown = Some(e),
+                            None => {}
+                        }
+                    }
+                }
+            }
+        }
         self.enter_native()?;
         let base = self.frames.len();
         if let Err(e) = self.push_frame(frame) {
@@ -642,7 +755,7 @@ impl Vm {
             }
             Some(halt) => Err(halt),
             None => {
-                if started {
+                if push_sent {
                     if let Some(top) = self.frames.last_mut() {
                         top.stack.push(sent);
                     }
@@ -774,6 +887,13 @@ impl Vm {
                 instance
             }
             OnReturn::ClassBody(namespace, name, bases, keywords) => super::types::make_class(self, name, bases, namespace, value, keywords)?,
+            OnReturn::MetaClassBody(namespace, name, bases, keywords, meta) => {
+                let made = self.call(&Value::Class(meta), &[Value::Str(name), bases, Value::Dict(namespace)], &keywords)?;
+                if let (Value::Cell(cell), Value::Class(_)) = (&value, &made) {
+                    *cell.borrow_mut() = Some(made.clone());
+                }
+                made
+            }
         };
         if self.frames.len() == base {
             // The base frame is gone: give its value out, and leave a
@@ -1457,6 +1577,54 @@ impl Vm {
                 let Value::Function(body) = body else {
                     return self.type_error("corps de classe attendu");
                 };
+                // The metaclass: the one asked for, or the most derived of
+                // the bases'.
+                let explicit = keywords.iter().find(|(k, _)| &**k == "metaclass").map(|(_, v)| v.clone());
+                let keywords: Vec<(Rc<str>, Value)> = keywords.into_iter().filter(|(k, _)| &**k != "metaclass").collect();
+                let mut meta = match &explicit {
+                    Some(Value::Class(m)) => Some(m.clone()),
+                    _ => None,
+                };
+                for base in base_classes.iter() {
+                    let base_meta = base.metaclass.borrow().clone();
+                    if let Some(bm) = base_meta {
+                        match &meta {
+                            None => meta = Some(bm),
+                            Some(m) if bm.is_subclass(m) => meta = Some(bm),
+                            Some(m) if m.is_subclass(&bm) || m.id == self.types.type_.id => {
+                                if m.id == self.types.type_.id {
+                                    meta = Some(bm);
+                                }
+                            }
+                            Some(_) => {
+                                return self.type_error("metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases");
+                            }
+                        }
+                    }
+                }
+                let meta = meta.filter(|m| m.id != self.types.type_.id);
+                if let Some(meta) = meta {
+                    let bases_tuple = Value::tuple(base_classes.iter().map(|c| Value::Class(c.clone())).collect());
+                    let namespace = match meta.lookup("__prepare__") {
+                        Some(_) => {
+                            let prepare = self.get_attr(&Value::Class(meta.clone()), "__prepare__")?;
+                            match self.call(&prepare, &[Value::Str(name.clone()), bases_tuple.clone()], &keywords)? {
+                                Value::Dict(d) => d,
+                                Value::Instance(i) => match &*i.inner.borrow() {
+                                    Value::Dict(d) => d.clone(),
+                                    _ => return self.type_error("__prepare__() must return a mapping"),
+                                },
+                                _ => return self.type_error("__prepare__() must return a mapping"),
+                            }
+                        }
+                        None => shared_dict(Dict::new()),
+                    };
+                    let mut frame = self.new_frame(&body, &[], &[])?;
+                    frame.namespace = Some(namespace.clone());
+                    frame.on_return = OnReturn::MetaClassBody(namespace, name, bases_tuple, keywords, meta);
+                    self.push_frame(frame)?;
+                    return Ok(None);
+                }
                 let namespace = shared_dict(Dict::new());
                 let mut frame = self.new_frame(&body, &[], &[])?;
                 frame.namespace = Some(namespace.clone());
@@ -1505,6 +1673,45 @@ impl Vm {
             Op::LoadAssertionError => {
                 let class = self.types.assertion_error.clone();
                 self.push(Value::Class(class));
+            }
+            Op::MatchKind(kind) => {
+                let value = self.pop();
+                let result = self.match_kind(&value, kind)?;
+                self.push(Value::Bool(result));
+            }
+            Op::GetLen => {
+                let value = self.pop();
+                let n = self.len(&value)?;
+                self.push(Value::Int(super::int::Int::from_i64(n as i64)));
+            }
+            Op::MatchClass(positional) => {
+                let names = self.pop();
+                let class = self.pop();
+                let subject = self.pop();
+                let result = self.match_class(&subject, &class, positional as usize, &names)?;
+                self.push(result);
+            }
+            Op::MatchKeys => {
+                let keys = self.pop();
+                let subject = self.pop();
+                let result = self.match_keys(&subject, &keys)?;
+                self.push(result);
+            }
+            Op::CopyDictWithout => {
+                let keys = self.pop();
+                let subject = self.pop();
+                let result = self.copy_dict_without(&subject, &keys)?;
+                self.push(result);
+            }
+            Op::GetAwaitable => {
+                let value = self.pop();
+                let awaitable = self.awaitable(value)?;
+                self.push(awaitable);
+            }
+            Op::AsyncGenWrap => {
+                let value = self.pop();
+                let marker = self.async_marker();
+                self.push(Value::tuple(alloc::vec![marker, value]));
             }
             Op::SetupAnnotations => {
                 if let Some(ns) = self.top().namespace.clone() {

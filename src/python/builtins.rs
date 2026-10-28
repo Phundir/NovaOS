@@ -157,6 +157,7 @@ fn abs(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
         Value::Int(i) => Ok(Value::Int(i.abs())),
         Value::Bool(b) => Ok(Value::int(*b as i64)),
         Value::Float(f) => Ok(Value::Float(f.abs())),
+        Value::Complex(r, i) => Ok(Value::Float(super::types::complex::hypot(*r, *i))),
         Value::Instance(_) => {
             if let Some(r) = vm.call_special(&x, "__abs__", &[])? {
                 return Ok(r);

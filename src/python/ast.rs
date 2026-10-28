@@ -56,6 +56,8 @@ pub enum Const {
     Ellipsis,
     Int(Int),
     Float(Num),
+    /// An imaginary literal.
+    Imag(Num),
     Str(Rc<str>),
     Bytes(Rc<[u8]>),
 }
@@ -82,6 +84,8 @@ pub struct Comprehension {
     pub target: Expr,
     pub iter: Expr,
     pub ifs: Vec<Expr>,
+    /// `async for`.
+    pub is_async: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +141,8 @@ pub enum ExprKind {
     Named(Rc<str>, Box<Expr>),
     Yield(Option<Box<Expr>>),
     YieldFrom(Box<Expr>),
+    /// `await value`
+    Await(Box<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +160,8 @@ pub struct FunctionDef {
     pub body: Vec<Stmt>,
     pub decorators: Vec<Expr>,
     pub line: u32,
+    /// `async def`.
+    pub is_async: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -190,7 +198,7 @@ pub enum StmtKind {
     Return(Option<Expr>),
     FunctionDef(Rc<FunctionDef>),
     ClassDef(Rc<ClassDef>),
-    Try { body: Vec<Stmt>, handlers: Vec<ExceptHandler>, orelse: Vec<Stmt>, finalbody: Vec<Stmt> },
+    Try { body: Vec<Stmt>, handlers: Vec<ExceptHandler>, orelse: Vec<Stmt>, finalbody: Rc<Vec<Stmt>> },
     Raise(Option<Expr>, Option<Expr>),
     With(Vec<(Expr, Option<Expr>)>, Vec<Stmt>),
     /// `import a.b as c`: the dotted name, the alias.
@@ -202,6 +210,70 @@ pub enum StmtKind {
     Nonlocal(Vec<Rc<str>>),
     Delete(Vec<Expr>),
     Assert(Expr, Option<Expr>),
+    /// `match subject:` and its cases.
+    Match(Expr, Vec<MatchCase>),
+}
+
+/// A pattern of `case` (PEP 634).
+#[derive(Debug, Clone)]
+pub enum Pattern {
+    /// `_`
+    Wildcard,
+    /// `name`
+    Capture(Rc<str>),
+    /// A literal or a dotted name, compared with `==`.
+    Value(Expr),
+    /// `None`, `True`, `False`, compared with `is`.
+    Singleton(Const),
+    /// `[a, *rest, b]` or `(a, b)`.
+    Sequence(Vec<Pattern>),
+    /// `*name` (or `*_`) inside a sequence.
+    Star(Option<Rc<str>>),
+    /// `{key: pattern, **rest}`.
+    Mapping(Vec<(Expr, Pattern)>, Option<Rc<str>>),
+    /// `Cls(p, q, attr=r)`.
+    Class(Expr, Vec<Pattern>, Vec<(Rc<str>, Pattern)>),
+    Or(Vec<Pattern>),
+    As(Box<Pattern>, Rc<str>),
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchCase {
+    pub pattern: Pattern,
+    pub guard: Option<Expr>,
+    pub body: Vec<Stmt>,
+    pub line: u32,
+}
+
+impl Pattern {
+    /// The names a pattern binds, in order.
+    pub fn names(&self, out: &mut Vec<Rc<str>>) {
+        match self {
+            Pattern::Capture(n) => out.push(n.clone()),
+            Pattern::Star(Some(n)) => out.push(n.clone()),
+            Pattern::Sequence(items) => items.iter().for_each(|p| p.names(out)),
+            Pattern::Mapping(items, rest) => {
+                items.iter().for_each(|(_, p)| p.names(out));
+                if let Some(r) = rest {
+                    out.push(r.clone());
+                }
+            }
+            Pattern::Class(_, args, kwargs) => {
+                args.iter().for_each(|p| p.names(out));
+                kwargs.iter().for_each(|(_, p)| p.names(out));
+            }
+            Pattern::Or(alternatives) => {
+                if let Some(first) = alternatives.first() {
+                    first.names(out);
+                }
+            }
+            Pattern::As(inner, n) => {
+                inner.names(out);
+                out.push(n.clone());
+            }
+            _ => {}
+        }
+    }
 }
 
 /// A parsed module.

@@ -134,6 +134,25 @@ pub enum Op {
     LoadAssertionError,
     /// Class bodies: `__annotations__ = {}`.
     SetupAnnotations,
+    /// `match`: is TOS a sequence (0) or a mapping (1)? Pops it, pushes
+    /// a bool.
+    MatchKind(u8),
+    /// Pops a value, pushes its length.
+    GetLen,
+    /// Stack: subject, class, tuple of keyword names. Pushes the tuple
+    /// of the attributes a class pattern with this many positional
+    /// sub-patterns reads, or None when it does not match.
+    MatchClass(u32),
+    /// Stack: subject, tuple of keys. Pushes the tuple of their values,
+    /// or None when one is missing.
+    MatchKeys,
+    /// Stack: subject, tuple of keys. Pushes a dict of the other items.
+    CopyDictWithout,
+    /// `await`: replaces TOS by the iterator to delegate to.
+    GetAwaitable,
+    /// In an asynchronous generator, marks the value of a `yield` so the
+    /// `__anext__` driving it can tell it from an awaited suspension.
+    AsyncGenWrap,
 }
 
 /// A compiled function body (or module, or class body).
@@ -161,6 +180,9 @@ pub struct Code {
     pub varargs: bool,
     pub varkw: bool,
     pub generator: bool,
+    /// `async def`: calling it makes a coroutine (an asynchronous
+    /// generator if `generator` too).
+    pub coroutine: bool,
     /// Module and class bodies use a namespace dict for their names.
     pub uses_namespace: bool,
     pub first_line: u32,

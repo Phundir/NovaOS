@@ -39,12 +39,7 @@ pub fn new_tuple(vm: &mut Vm, _class: &Rc<Class>, a: &[Value], kw: &[(Rc<str>, V
 pub fn new_bytes(vm: &mut Vm, _class: &Rc<Class>, a: &[Value], _kw: &[(Rc<str>, Value)]) -> PyResult<Value> {
     match a.first() {
         None => Ok(Value::Bytes(Rc::from(Vec::new()))),
-        Some(Value::Str(s)) => {
-            if a.get(1).is_none() {
-                return vm.type_error("string argument without an encoding");
-            }
-            Ok(Value::Bytes(Rc::from(s.as_bytes())))
-        }
+        Some(Value::Str(_)) => Ok(Value::Bytes(Rc::from(super::bytes::build(vm, a, _kw)?))),
         Some(Value::Int(Int::Small(n))) => {
             if *n < 0 {
                 return vm.value_error("negative count");
@@ -52,18 +47,7 @@ pub fn new_bytes(vm: &mut Vm, _class: &Rc<Class>, a: &[Value], _kw: &[(Rc<str>, 
             Ok(Value::Bytes(Rc::from(alloc::vec![0u8; *n as usize])))
         }
         Some(Value::Bytes(b)) => Ok(Value::Bytes(b.clone())),
-        Some(other) => {
-            let items = vm.collect(other)?;
-            let mut out = Vec::with_capacity(items.len());
-            for item in items {
-                let n = args::int(vm, &item)?;
-                if !(0..=255).contains(&n) {
-                    return vm.value_error("bytes must be in range(0, 256)");
-                }
-                out.push(n as u8);
-            }
-            Ok(Value::Bytes(Rc::from(out)))
-        }
+        Some(_) => Ok(Value::Bytes(Rc::from(super::bytes::build(vm, a, _kw)?))),
     }
 }
 
@@ -453,35 +437,6 @@ fn count(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
     Ok(Value::int(n))
 }
 
-// ------------------------------------------------------------
-//  bytes
-// ------------------------------------------------------------
-
-fn this_bytes(vm: &mut Vm, a: &[Value]) -> PyResult<Rc<[u8]>> {
-    match a.first() {
-        Some(Value::Bytes(b)) => Ok(b.clone()),
-        _ => vm.type_error("descriptor requires a 'bytes' object"),
-    }
-}
-
-fn decode(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
-    let b = this_bytes(vm, a)?;
-    match core::str::from_utf8(&b) {
-        Ok(s) => Ok(Value::str(s)),
-        Err(e) => {
-            let class = vm.types.unicode_error.clone();
-            let message = alloc::format!("'utf-8' codec can't decode byte 0x{:02x} in position {}: invalid start byte", b[e.valid_up_to()], e.valid_up_to());
-            Err(vm.error(&class, &message))
-        }
-    }
-}
-
-fn hex(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
-    let b = this_bytes(vm, a)?;
-    let text: String = b.iter().map(|x| alloc::format!("{:02x}", x)).collect();
-    Ok(Value::str(&text))
-}
-
 pub fn install(vm: &mut Vm) {
     let list = vm.types.list.clone();
     let entries: &[(&'static str, NativeFn)] = &[
@@ -497,7 +452,4 @@ pub fn install(vm: &mut Vm) {
     let range = vm.types.range.clone();
     method(&range, "index", index);
     method(&range, "count", count);
-    let bytes = vm.types.bytes.clone();
-    method(&bytes, "decode", decode);
-    method(&bytes, "hex", hex);
 }

@@ -629,4 +629,6 @@ pub fn install(vm: &mut Vm) {
     for (name, f) in entries {
         method(&float, name, *f);
     }
+    let complex = vm.types.complex.clone();
+    method(&complex, "conjugate", super::complex::conjugate);
 }

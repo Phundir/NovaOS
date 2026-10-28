@@ -27,7 +27,10 @@ use super::{FileError, Mode};
 
 /// The modules written in Python, compiled on first import.
 const SOURCES: &[(&str, &str)] = &[
+    ("_asyncgen", include_str!("lib/_asyncgen.py")),
     ("abc", include_str!("lib/abc.py")),
+    ("asyncio", include_str!("lib/asyncio.py")),
+    ("cmath", include_str!("lib/cmath.py")),
     ("bisect", include_str!("lib/bisect.py")),
     ("collections", include_str!("lib/collections.py")),
     ("contextlib", include_str!("lib/contextlib.py")),

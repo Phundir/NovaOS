@@ -1,0 +1,10 @@
+['Base', 'Child'] base child True Registry True <Child tag=child>
+True Registry
+init 1
+True 1
+prepare Point
+['x', 'y', 'norm']
+['alpha', 'B'] alpha
+3 dyn Registry Dyn
+Meta<Q> Meta<Q>
+TypeError: metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases

@@ -1,0 +1,32 @@
+['A', 'B', 'C']
+['a start', 'b start', 'c start', 'b end', 'c end', 'a end']
+tick 3
+tick 2
+tick 1
+fin
+tick 2
+tick 2
+tick 1
+tick 1
+[0, 1, 4, 9] [0, 1, 2] {'a': 1, 'b': 2}
+[1, 2, 5]
+[0, 1, 4, 9, 16]
+enter
+dans Ctx
+exit ValueError
+apres
+timeout
+put 0
+put 1
+put 2
+got 0
+got 1
+got 2
+attend
+libre
+annule True
+['x', KeyError('k')]
+42
+coroutine
+tick 1
+stop fin

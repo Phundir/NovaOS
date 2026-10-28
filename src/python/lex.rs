@@ -45,6 +45,8 @@ pub enum Tok {
     Name(Rc<str>),
     Int(Int),
     Float(Num),
+    /// An imaginary literal: `2j`.
+    Imag(Num),
     Str(String),
     Bytes(Vec<u8>),
     FString(Vec<FPart>),
@@ -341,10 +343,12 @@ impl<'a> Lexer<'a> {
                 self.pos = save;
             }
         }
-        if matches!(self.peek(), Some(b'j' | b'J')) {
-            return self.error("les nombres complexes ne sont pas pris en charge");
-        }
         let text: String = self.text[start..self.pos].chars().filter(|c| *c != '_').collect();
+        if matches!(self.peek(), Some(b'j' | b'J')) {
+            self.pos += 1;
+            self.push(Tok::Imag(Num::parse(&text)));
+            return Ok(());
+        }
         if is_float {
             self.push(Tok::Float(Num::parse(&text)));
         } else {

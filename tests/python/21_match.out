@@ -1,0 +1,26 @@
+origine
+axe y a 5
+axe x a 3
+diagonale 2
+ailleurs
+pas un point
+bye
+vertical north
+go east
+drop ['a', 'b', 'c']
+other drop []
+other x ['y', 'z']
+vide
+none
+true
+petit
+negatif -3
+nombre
+chaine abc
+dict x=1 reste={'y': 2}
+type carre
+paire 1 2
+liste 1 2
+autre
+capture 5
+5

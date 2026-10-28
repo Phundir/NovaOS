@@ -84,8 +84,10 @@ impl Vm {
             Value::Bool(_) => t.bool.clone(),
             Value::Int(_) => t.int.clone(),
             Value::Float(_) => t.float.clone(),
+            Value::Complex(..) => t.complex.clone(),
             Value::Str(_) => t.str.clone(),
             Value::Bytes(_) => t.bytes.clone(),
+            Value::ByteArray(_) => t.bytearray.clone(),
             Value::List(_) => t.list.clone(),
             Value::Tuple(_) => t.tuple.clone(),
             Value::Dict(_) => t.dict.clone(),
@@ -101,10 +103,14 @@ impl Vm {
             Value::Function(_) => t.function.clone(),
             Value::Builtin(_) => t.builtin_function.clone(),
             Value::Method(_) => t.method.clone(),
-            Value::Class(_) => t.type_.clone(),
+            Value::Class(c) => c.metaclass.borrow().clone().unwrap_or_else(|| t.type_.clone()),
             Value::Instance(i) => i.class(),
             Value::Iter(_) => t.iterator.clone(),
-            Value::Generator(_) => t.generator.clone(),
+            Value::Generator(g) => match g.borrow().kind {
+                0 => t.generator.clone(),
+                1 => t.coroutine.clone(),
+                _ => t.async_generator.clone(),
+            },
             Value::Module(_) => t.module.clone(),
             Value::Property(_) => t.property.clone(),
             Value::StaticMethod(_) => t.staticmethod.clone(),
@@ -222,7 +228,7 @@ impl Vm {
                         return Ok(Value::tuple(bases));
                     }
                     "__dict__" => return Ok(Value::Dict(shared(class.dict.borrow().clone()))),
-                    "__class__" => return Ok(Value::Class(self.types.type_.clone())),
+                    "__class__" => return Ok(Value::Class(self.class_of(object))),
                     _ => {}
                 }
                 match class.lookup(name) {
@@ -237,6 +243,20 @@ impl Vm {
                     }
                     Some(other) => Ok(other),
                     None => {
+                        // What the metaclass defines: its methods bound to
+                        // the class, its properties computed on it.
+                        let metaclass = class.metaclass.borrow().clone();
+                        if let Some(meta) = metaclass {
+                            if let Some(found) = meta.lookup(name) {
+                                return match found {
+                                    Value::Property(p) => self.call(&p[0], core::slice::from_ref(object), &[]),
+                                    Value::Function(_) => Ok(Value::Method(Rc::new((object.clone(), found)))),
+                                    Value::ClassMethod(inner) => Ok(Value::Method(Rc::new((Value::Class(meta.clone()), (*inner).clone())))),
+                                    Value::StaticMethod(inner) => Ok((*inner).clone()),
+                                    other => self.bind(other, object, &meta),
+                                };
+                            }
+                        }
                         // Methods of `type` itself (`mro`, `__subclasses__`).
                         if let Some(found) = self.types.type_.lookup(name) {
                             return self.bind(found, object, class);
@@ -281,6 +301,9 @@ impl Vm {
             Value::Super(s) => {
                 let (start, receiver) = (&s.0, &s.1);
                 let owner = match receiver {
+                    // super() in a metaclass method: the receiver is a
+                    // class whose type derives from the start class.
+                    Value::Class(c) if !c.is_subclass(start) && self.class_of(receiver).is_subclass(start) => self.class_of(receiver),
                     Value::Class(c) => c.clone(),
                     other => self.class_of(other),
                 };
@@ -478,8 +501,10 @@ impl Vm {
             Value::Bool(b) => *b,
             Value::Int(i) => !i.is_zero(),
             Value::Float(f) => !f.is_zero(),
+            Value::Complex(r, i) => !r.is_zero() || !i.is_zero(),
             Value::Str(s) => !s.is_empty(),
             Value::Bytes(b) => !b.is_empty(),
+            Value::ByteArray(b) => !b.borrow().is_empty(),
             Value::List(l) => !l.borrow().is_empty(),
             Value::Tuple(t) => !t.is_empty(),
             Value::Dict(d) => !d.borrow().is_empty(),
@@ -513,6 +538,7 @@ impl Vm {
         Ok(match value {
             Value::Str(s) => s.chars().count(),
             Value::Bytes(b) => b.len(),
+            Value::ByteArray(b) => b.borrow().len(),
             Value::List(l) => l.borrow().len(),
             Value::Tuple(t) => t.len(),
             Value::Dict(d) => d.borrow().len(),
@@ -629,6 +655,10 @@ impl Vm {
                 return self.int_op(op, &x, &y).map(Some);
             }
         }
+        // Complex numbers with any number.
+        if matches!(a, Value::Complex(..)) || matches!(b, Value::Complex(..)) {
+            return super::types::complex::binary(self, op, a, b);
+        }
         // Floats with ints.
         if matches!(a, Value::Float(_)) || matches!(b, Value::Float(_)) {
             if let (Some(x), Some(y)) = (as_float(a), as_float(b)) {
@@ -641,6 +671,30 @@ impl Vm {
                 s.push_str(x);
                 s.push_str(y);
                 return self.checked_str(s).map(Some);
+            }
+            (BinOp::Add, Value::ByteArray(x), other) if super::types::bytes::bytes_of(other).is_some() => {
+                let more = super::types::bytes::bytes_of(other).unwrap_or_default();
+                if inplace {
+                    x.borrow_mut().extend(more);
+                    return Ok(Some(a.clone()));
+                }
+                let mut v = x.borrow().clone();
+                v.extend(more);
+                return Ok(Some(super::types::bytes::new_bytearray_value(v)));
+            }
+            (BinOp::Add, Value::Bytes(x), Value::ByteArray(y)) => {
+                let mut v = x.to_vec();
+                v.extend(y.borrow().iter());
+                return Ok(Some(Value::Bytes(Rc::from(v))));
+            }
+            (BinOp::Mul, Value::ByteArray(x), n) | (BinOp::Mul, n, Value::ByteArray(x)) if as_int(n).is_some() && !matches!(n, Value::Float(_)) => {
+                let count = as_int(n).and_then(|i| i.to_i64()).unwrap_or(0).max(0) as usize;
+                let v = x.borrow().repeat(count);
+                if inplace {
+                    *x.borrow_mut() = v;
+                    return Ok(Some(a.clone()));
+                }
+                return Ok(Some(super::types::bytes::new_bytearray_value(v)));
             }
             (BinOp::Add, Value::Bytes(x), Value::Bytes(y)) => {
                 let mut v = x.to_vec();
@@ -873,6 +927,8 @@ impl Vm {
             (UnaryOp::Neg, Value::Int(i)) => return Ok(Value::Int(i.neg())),
             (UnaryOp::Neg, Value::Bool(b)) => return Ok(Value::int(-(*b as i64))),
             (UnaryOp::Neg, Value::Float(f)) => return Ok(Value::Float(f.neg())),
+            (UnaryOp::Neg, Value::Complex(r, i)) => return Ok(Value::Complex(r.neg(), i.neg())),
+            (UnaryOp::Pos, Value::Complex(..)) => return Ok(a.clone()),
             (UnaryOp::Pos, Value::Int(_) | Value::Float(_)) => return Ok(a.clone()),
             (UnaryOp::Pos, Value::Bool(b)) => return Ok(Value::int(*b as i64)),
             (UnaryOp::Invert, Value::Int(i)) => return Ok(Value::Int(i.invert())),
@@ -907,6 +963,27 @@ impl Vm {
     // --------------------------------------------------------
 
     pub fn compare(&mut self, op: CmpOp, a: &Value, b: &Value) -> PyResult<Value> {
+        // Complex numbers: equality only.
+        if matches!(a, Value::Complex(..)) || matches!(b, Value::Complex(..)) {
+            use super::types::complex::as_complex;
+            if let (Some(x), Some(y)) = (as_complex(a), as_complex(b)) {
+                let equal = x.0.equals(y.0) && x.1.equals(y.1);
+                match op {
+                    CmpOp::Eq => return Ok(Value::Bool(equal)),
+                    CmpOp::NotEq => return Ok(Value::Bool(!equal)),
+                    _ => {
+                        let (_, _, symbol) = compare_dunders(op);
+                        let message = alloc::format!(
+                            "'{}' not supported between instances of '{}' and '{}'",
+                            symbol,
+                            self.type_name(a),
+                            self.type_name(b)
+                        );
+                        return self.type_error(&message);
+                    }
+                }
+            }
+        }
         if let Some(ordering) = self.builtin_compare(a, b, op)? {
             let r = match op {
                 CmpOp::Eq => ordering == Some(Ordering::Equal),
@@ -967,6 +1044,11 @@ impl Vm {
             }
             (Value::Str(x), Value::Str(y)) => Some(x.as_ref().cmp(y.as_ref())),
             (Value::Bytes(x), Value::Bytes(y)) => Some(x.as_ref().cmp(y.as_ref())),
+            (Value::Bytes(_) | Value::ByteArray(_), Value::Bytes(_) | Value::ByteArray(_)) => {
+                let x = super::types::bytes::bytes_of(a).unwrap_or_default();
+                let y = super::types::bytes::bytes_of(b).unwrap_or_default();
+                Some(x.cmp(&y))
+            }
             (Value::List(x), Value::List(y)) => {
                 let (x, y) = (x.borrow().clone(), y.borrow().clone());
                 return self.sequence_compare(&x, &y, op);
@@ -1073,7 +1155,19 @@ impl Vm {
                     self.type_error(&message)
                 }
             },
+            Value::ByteArray(b) => {
+                let snapshot = Value::Bytes(Rc::from(b.borrow().as_slice()));
+                let item = match item {
+                    Value::ByteArray(x) => Value::Bytes(Rc::from(x.borrow().as_slice())),
+                    other => other.clone(),
+                };
+                self.contains(&snapshot, &item)
+            }
             Value::Bytes(b) => match item {
+                Value::ByteArray(needle) => {
+                    let needle = needle.borrow();
+                    Ok(needle.is_empty() || b.windows(needle.len()).any(|w| w == needle.as_slice()))
+                }
                 Value::Bytes(needle) => Ok(needle.is_empty() || b.windows(needle.len()).any(|w| w == needle.as_ref())),
                 Value::Int(Int::Small(n)) => Ok(b.contains(&(*n as u8))),
                 _ => self.type_error("a bytes-like object is required"),
@@ -1181,6 +1275,7 @@ impl Vm {
             Value::Bool(b) => *b as i64,
             Value::Int(i) => i.hash(),
             Value::Float(f) => super::types::float_hash(*f, value),
+            Value::Complex(r, i) => super::types::complex::hash(*r, *i, value),
             Value::Str(s) => str_hash(s),
             Value::Bytes(b) => super::dict::bytes_hash(b),
             Value::Tuple(items) => {
@@ -1210,7 +1305,7 @@ impl Vm {
                 }
                 h as i64
             }
-            Value::List(_) | Value::Dict(_) | Value::Set(_) => {
+            Value::List(_) | Value::Dict(_) | Value::Set(_) | Value::ByteArray(_) => {
                 let name = self.type_name(value);
                 let message = alloc::format!("unhashable type: '{}'", name);
                 return self.type_error(&message);
@@ -1391,13 +1486,17 @@ impl Vm {
 
     pub fn get_iter(&mut self, value: &Value) -> PyResult<Value> {
         let iter = match value {
-            Value::List(_) | Value::Tuple(_) | Value::Bytes(_) => Iter::Seq { seq: value.clone(), index: 0 },
+            Value::List(_) | Value::Tuple(_) | Value::Bytes(_) | Value::ByteArray(_) => Iter::Seq { seq: value.clone(), index: 0 },
             Value::Str(s) => Iter::Str { text: s.clone(), byte: 0 },
             Value::Range(r) => Iter::Range { next: r.start, stop: r.stop, step: r.step },
             Value::Dict(d) => Iter::Keys { dict: value.clone(), index: 0, kind: 0, size: d.borrow().len() },
             Value::View(v) => Iter::Keys { dict: Value::Dict(v.dict.clone()), index: 0, kind: v.kind, size: v.dict.borrow().len() },
             Value::Set(s) => Iter::Seq { seq: Value::tuple(s.borrow().keys()), index: 0 },
             Value::FrozenSet(s) => Iter::Seq { seq: Value::tuple(s.keys()), index: 0 },
+            Value::Generator(g) if g.borrow().kind != 0 => {
+                let name = self.type_name(value);
+                return self.type_error(&alloc::format!("'{}' object is not iterable", name));
+            }
             Value::Iter(_) | Value::Generator(_) => return Ok(value.clone()),
             Value::Class(class) => {
                 if let Some(r) = self.class_hook(class, "__class_iter__", &[])? {

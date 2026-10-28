@@ -9,6 +9,8 @@
 //! bytes), `map.rs` (dict, set), `num.rs` (int, float, bool), `object.rs`
 //! (object, type, exceptions, generators, files and the descriptors).
 
+pub mod bytes;
+pub mod complex;
 pub mod map;
 pub mod num;
 pub mod object;
@@ -40,14 +42,15 @@ macro_rules! types {
 }
 
 types!(
-    object, type_, none_type, not_implemented_type, ellipsis_type, bool, int, float, str, bytes, list, tuple, dict,
-    set, frozenset, dict_keys, dict_values, dict_items, union_type, range, slice, function, builtin_function, method, iterator, generator, module, property,
+    object, type_, none_type, not_implemented_type, ellipsis_type, bool, int, float, complex, str, bytes, bytearray, list, tuple, dict,
+    set, frozenset, dict_keys, dict_values, dict_items, union_type, range, slice, function, builtin_function, method, iterator, generator, coroutine, async_generator, module, property,
     staticmethod, classmethod, super_, file, base_exception, exception, system_exit, keyboard_interrupt,
     generator_exit, stop_iteration, arithmetic_error, zero_division_error, overflow_error, assertion_error,
     attribute_error, lookup_error, index_error, key_error, name_error, unbound_local_error, type_error,
     value_error, runtime_error, not_implemented_error, recursion_error, memory_error, import_error,
     module_not_found_error, os_error, file_not_found_error, file_exists_error, permission_error,
     is_a_directory_error, not_a_directory_error, eof_error, syntax_error, unicode_error, warning,
+    stop_async_iteration, timeout_error, unicode_decode_error, unicode_encode_error,
 );
 
 /// A class with its MRO computed.
@@ -89,6 +92,7 @@ impl Types {
         let runtime_error = e("RuntimeError", &exception);
         let value_error = e("ValueError", &exception);
         let warning = e("Warning", &exception);
+        let unicode_error = e("UnicodeError", &value_error);
         Types {
             type_,
             none_type: class("NoneType", o(), Base::Other),
@@ -97,6 +101,8 @@ impl Types {
             bool,
             int,
             float: class("float", o(), Base::Float),
+            complex: class("complex", o(), Base::Other),
+            bytearray: class("bytearray", o(), Base::Other),
             str: class("str", o(), Base::Str),
             bytes: class("bytes", o(), Base::Bytes),
             list: class("list", o(), Base::List),
@@ -115,6 +121,8 @@ impl Types {
             method: class("method", o(), Base::Other),
             iterator: class("iterator", o(), Base::Other),
             generator: class("generator", o(), Base::Other),
+            coroutine: class("coroutine", o(), Base::Other),
+            async_generator: class("async_generator", o(), Base::Other),
             module: class("module", o(), Base::Other),
             property: class("property", o(), Base::Other),
             staticmethod: class("staticmethod", o(), Base::Other),
@@ -125,6 +133,8 @@ impl Types {
             keyboard_interrupt: e("KeyboardInterrupt", &base_exception),
             generator_exit: e("GeneratorExit", &base_exception),
             stop_iteration: e("StopIteration", &exception),
+            stop_async_iteration: e("StopAsyncIteration", &exception),
+            timeout_error: e("TimeoutError", &os_error),
             zero_division_error: e("ZeroDivisionError", &arithmetic_error),
             overflow_error: e("OverflowError", &arithmetic_error),
             assertion_error: e("AssertionError", &exception),
@@ -144,7 +154,9 @@ impl Types {
             not_a_directory_error: e("NotADirectoryError", &os_error),
             eof_error: e("EOFError", &exception),
             syntax_error: e("SyntaxError", &exception),
-            unicode_error: e("UnicodeError", &value_error),
+            unicode_decode_error: e("UnicodeDecodeError", &unicode_error),
+            unicode_encode_error: e("UnicodeEncodeError", &unicode_error),
+            unicode_error,
             base_exception,
             exception,
             arithmetic_error,
@@ -162,7 +174,7 @@ impl Types {
     /// Every built-in class with its Python name, for the builtins module.
     pub fn named(&self) -> Vec<Rc<Class>> {
         alloc::vec![
-            self.object.clone(), self.type_.clone(), self.bool.clone(), self.int.clone(), self.float.clone(),
+            self.object.clone(), self.type_.clone(), self.bool.clone(), self.int.clone(), self.float.clone(), self.complex.clone(), self.bytearray.clone(),
             self.str.clone(), self.bytes.clone(), self.list.clone(), self.tuple.clone(), self.dict.clone(),
             self.set.clone(), self.frozenset.clone(), self.range.clone(), self.slice.clone(), self.property.clone(),
             self.staticmethod.clone(), self.classmethod.clone(), self.super_.clone(), self.base_exception.clone(),
@@ -177,6 +189,8 @@ impl Types {
             self.file_not_found_error.clone(), self.file_exists_error.clone(), self.permission_error.clone(),
             self.is_a_directory_error.clone(), self.not_a_directory_error.clone(), self.eof_error.clone(),
             self.syntax_error.clone(), self.unicode_error.clone(), self.warning.clone(),
+            self.stop_async_iteration.clone(), self.timeout_error.clone(), self.unicode_decode_error.clone(),
+            self.unicode_encode_error.clone(),
         ]
     }
 }
@@ -197,13 +211,14 @@ pub fn install(vm: &mut Vm) {
     map::install(vm);
     num::install(vm);
     object::install(vm);
+    bytes::install(vm);
 }
 
 /// Is `class` exactly one of the built-in types (not a user subclass)?
 pub fn is_builtin(vm: &Vm, class: &Rc<Class>) -> bool {
     let t = &vm.types;
     [
-        &t.int, &t.bool, &t.float, &t.str, &t.bytes, &t.list, &t.tuple, &t.dict, &t.set, &t.frozenset, &t.range,
+        &t.int, &t.bool, &t.float, &t.complex, &t.bytearray, &t.str, &t.bytes, &t.list, &t.tuple, &t.dict, &t.set, &t.frozenset, &t.range,
         &t.slice, &t.object, &t.type_, &t.property, &t.staticmethod, &t.classmethod, &t.super_,
     ]
     .iter()
@@ -238,6 +253,12 @@ pub fn constructor(vm: &Vm, class: &Rc<Class>) -> Option<Constructor> {
     if id == t.object.id {
         return Some(object::new_object);
     }
+    if id == t.complex.id {
+        return Some(complex::new_complex);
+    }
+    if id == t.bytearray.id {
+        return Some(bytes::new_bytearray);
+    }
     Some(match class.base {
         Base::Int => num::new_int,
         Base::Bool => num::new_bool,
@@ -263,17 +284,18 @@ pub fn make_class(
     keywords: Vec<(Rc<str>, Value)>,
 ) -> PyResult<Value> {
     let bases = if bases.is_empty() { alloc::vec![vm.types.object.clone()] } else { bases };
-    for keyword in &keywords {
-        // `metaclass=ABCMeta` is accepted (and has no effect); others
-        // are passed to `__init_subclass__`, which is not supported.
-        if &*keyword.0 != "metaclass" {
-            let message = alloc::format!("{}() argument '{}' non pris en charge", name, keyword.0);
-            return vm.type_error(&message);
-        }
-    }
+    // `metaclass=` was dealt with by the caller; the other keywords go to
+    // `__init_subclass__`.
+    let keywords: Vec<(Rc<str>, Value)> = keywords.into_iter().filter(|(k, _)| &**k != "metaclass").collect();
     let base = bases.iter().map(|b| b.base).find(|b| *b != Base::Object).unwrap_or(Base::Object);
     let base = if base == Base::Bool { Base::Int } else { base };
+    // The class of a class: inherited from the bases.
+    let inherited = bases.iter().filter_map(|b| b.metaclass.borrow().clone()).fold(None, |best: Option<Rc<Class>>, m| match best {
+        Some(b) if b.is_subclass(&m) => Some(b),
+        _ => Some(m),
+    });
     let class = Class::new(&name, bases, base);
+    *class.metaclass.borrow_mut() = inherited;
     *class.dict.borrow_mut() = namespace.borrow().clone();
     // A class that defines `__eq__` without `__hash__` is unhashable.
     let has_eq = class.dict.borrow().get_str("__eq__").is_some();
@@ -318,7 +340,7 @@ pub fn make_class(
             Value::ClassMethod(inner) => (*inner).clone(),
             other => other,
         };
-        vm.call(&function, &[Value::Class(class.clone())], &[])?;
+        vm.call(&function, &[Value::Class(class.clone())], &keywords)?;
     }
     Ok(Value::Class(class))
 }
@@ -331,6 +353,8 @@ pub fn special_attr(vm: &mut Vm, object: &Value, name: &str) -> PyResult<Option<
         (Value::Int(_) | Value::Bool(_), "denominator") => Some(Value::int(1)),
         (Value::Float(_), "real") => Some(object.clone()),
         (Value::Float(_), "imag") => Some(Value::Float(Num::ZERO)),
+        (Value::Complex(r, _), "real") => Some(Value::Float(*r)),
+        (Value::Complex(_, i), "imag") => Some(Value::Float(*i)),
         (Value::Range(r), "start") => Some(Value::int(r.start)),
         (Value::Range(r), "stop") => Some(Value::int(r.stop)),
         (Value::Range(r), "step") => Some(Value::int(r.step)),
@@ -538,6 +562,13 @@ pub fn slice_indices(vm: &mut Vm, slice: &[Value; 3], len: usize) -> PyResult<(i
 
 pub fn get_item(vm: &mut Vm, object: &Value, index: &Value) -> PyResult<Value> {
     match object {
+        Value::ByteArray(b) => {
+            let snapshot = Value::Bytes(Rc::from(b.borrow().as_slice()));
+            match seq::get_item(vm, &snapshot, index)? {
+                Value::Bytes(x) => Ok(bytes::new_bytearray_value(x.to_vec())),
+                other => Ok(other),
+            }
+        }
         Value::List(_) | Value::Tuple(_) | Value::Str(_) | Value::Bytes(_) | Value::Range(_) => seq::get_item(vm, object, index),
         Value::Dict(d) => match vm.dict_get(d, index)? {
             Some(v) => Ok(v),
@@ -585,6 +616,38 @@ pub fn get_item(vm: &mut Vm, object: &Value, index: &Value) -> PyResult<Value> {
 
 pub fn set_item(vm: &mut Vm, object: &Value, index: &Value, value: Value) -> PyResult<()> {
     match object {
+        Value::ByteArray(b) => {
+            let len = b.borrow().len();
+            if let Value::Slice(s) = index {
+                let (start, _, step, count) = slice_indices(vm, s, len)?;
+                let replacement = bytes::build(vm, core::slice::from_ref(&value), &[])?;
+                if step == 1 {
+                    let start = start as usize;
+                    b.borrow_mut().splice(start..start + count, replacement);
+                    return Ok(());
+                }
+                if replacement.len() != count {
+                    return vm.value_error(&alloc::format!(
+                        "attempt to assign bytes of size {} to extended slice of size {}",
+                        replacement.len(),
+                        count
+                    ));
+                }
+                let mut position = start;
+                for byte in replacement {
+                    b.borrow_mut()[position as usize] = byte;
+                    position += step;
+                }
+                return Ok(());
+            }
+            let at = index_of(vm, index, len, "bytearray")?;
+            let n = super::args::int(vm, &value)?;
+            if !(0..=255).contains(&n) {
+                return vm.value_error("byte must be in range(0, 256)");
+            }
+            b.borrow_mut()[at] = n as u8;
+            Ok(())
+        }
         Value::List(_) => seq::set_list_item(vm, object, index, value),
         Value::Dict(d) => {
             vm.dict_insert(d, index.clone(), value)?;
@@ -611,6 +674,21 @@ pub fn set_item(vm: &mut Vm, object: &Value, index: &Value, value: Value) -> PyR
 
 pub fn del_item(vm: &mut Vm, object: &Value, index: &Value) -> PyResult<()> {
     match object {
+        Value::ByteArray(b) => {
+            let len = b.borrow().len();
+            if let Value::Slice(s) = index {
+                let (start, _, step, count) = slice_indices(vm, s, len)?;
+                let mut positions: Vec<usize> = (0..count).map(|k| (start + k as i64 * step) as usize).collect();
+                positions.sort_unstable();
+                for position in positions.into_iter().rev() {
+                    b.borrow_mut().remove(position);
+                }
+                return Ok(());
+            }
+            let at = index_of(vm, index, len, "bytearray")?;
+            b.borrow_mut().remove(at);
+            Ok(())
+        }
         Value::List(_) => seq::del_list_item(vm, object, index),
         Value::Dict(d) => match vm.dict_remove(d, index)? {
             Some(_) => Ok(()),
@@ -649,6 +727,7 @@ pub fn iter_next(vm: &mut Vm, state: &Rc<RefCell<Iter>>) -> PyResult<Option<Valu
                 Value::List(l) => l.borrow().get(index).cloned(),
                 Value::Tuple(t) => t.get(index).cloned(),
                 Value::Bytes(b) => b.get(index).map(|b| Value::int(*b as i64)),
+                Value::ByteArray(b) => b.borrow().get(index).map(|b| Value::int(*b as i64)),
                 Value::Instance(_) => match vm.get_item(&seq, &Value::int(index as i64)) {
                     Ok(v) => Some(v),
                     Err(e) if vm.is_instance_of(&e, &vm.types.index_error.clone()) || vm.is_instance_of(&e, &vm.types.stop_iteration.clone()) => None,

@@ -1,0 +1,11 @@
+1j (-0-1j) -0j (-0+1j) (1+2j) (1e+16+2.5j) (inf+nanj)
+complex division by zero
+0.0 to a negative or complex power
+2000007 3458764513821540931 3
+1.00+2.00j (1+2j)         3j (2+0j) (1+2j) (3.5+0j) (2+0j) (-2+1j) (-3+4j) (1.272019649514069+0.7861513777574233j) (0.7692389013639721+0.6389612763136348j)
+(-0.2+0.4j) 5.0 (1-2j) 2.0 3.0
+'<' not supported between instances of 'complex' and 'complex'
+int() argument must be a string, a bytes-like object or a real number, not 'complex'
+True True a True complex (-1500-2j) (5.5+1j)
+(6-8j) (-6+8j) (6-8j) False True 5.0
+1j (1.6741492280355401+0.8959774761298381j) (-1+1.2246467991473532e-16j) 3.141592653589793 (1.4142135623730951, 0.7853981633974483) 1.5707963267948966j (1.7551651237807455+0.958851077208406j)
