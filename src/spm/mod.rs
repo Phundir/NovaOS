@@ -33,6 +33,9 @@
 //! | `manager` | 8.2 -- the seven commands of 10.3 |
 //! | `repo`    | 8.3 -- repository index, transport, checking on receipt |
 //! | `fetch`   | 15.0.4 -- `file:`, `http://`, `https://`, to memory or disk |
+//! | `registry`| 15.2 -- signed JSON manifests, channels, checked downloads |
+//! | `versions`| 15.3-15.5 -- versions apart, atomic pointer, launch, cleanup |
+//! | `service` | 15.6 -- `spm.dsa`: requests of the applications, cleanup |
 //! | `update`  | 8.4 -- 11.1 types, `updater.dsa` service |
 //! | `rollback`| 8.5 -- slots, boot validation, snapshots |
 //!
@@ -48,11 +51,15 @@ pub mod db;
 pub mod fetch;
 pub mod manager;
 pub mod package;
+pub mod registry;
 pub mod repo;
 pub mod rollback;
 pub mod script;
 pub mod selftest;
+pub mod selftest_atomic;
+pub mod service;
 pub mod update;
+pub mod versions;
 
 use crate::fs::perm::{Credentials, Mode};
 
@@ -165,6 +172,10 @@ pub fn start(now: u64) {
         crate::process::BinaryType::Dsa,
         update::task,
     );
+
+    // 15.5-15.6 -- the one writer of the applications: requests of the
+    // applications, purge at boot, deferred deletions.
+    crate::scheduler::spawn("spm.dsa", crate::process::BinaryType::Dsa, service::task);
 }
 
 pub fn dump_state() {

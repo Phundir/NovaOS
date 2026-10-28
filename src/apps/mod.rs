@@ -29,6 +29,7 @@ pub mod explorer;
 pub mod network_settings;
 pub mod notepad;
 pub mod clock_settings;
+pub mod update_settings;
 pub mod parametres;
 pub mod player;
 pub mod playback;
@@ -321,6 +322,12 @@ pub static NATIVE_APPS: &[NativeApp] = &[
         crate::process::BinaryType::Ss,
         clock_settings::task,
     ),
+    (
+        update_settings::FILE_NAME,
+        update_settings::APP_ID,
+        crate::process::BinaryType::Ss,
+        update_settings::task,
+    ),
 ];
 
 /// Registers the settings tabs of the native `.ss`. Called once, at boot.
@@ -332,6 +339,7 @@ pub fn register_settings() {
     sound_settings::register();
     network_settings::register();
     clock_settings::register();
+    update_settings::register();
     explorer::settings::register();
 }
 
@@ -361,6 +369,7 @@ pub fn install_native(now: u64) -> usize {
         browser::install(now),
         network_settings::install(now),
         clock_settings::install(now),
+        update_settings::install(now),
     ] {
         if installed {
             written += 1;
@@ -498,7 +507,17 @@ pub fn launch(file_name: &str) -> Option<crate::process::Pid> {
         crate::serial_println!("[apps] lancement du Web Browser - PID {}", pid);
         return Some(pid);
     }
-    let (_, app_id, kind, entry) = native_for(file_name)?;
+    let Some((_, app_id, kind, entry)) = native_for(file_name) else {
+        // Phase 15: an application installed by SPM -- the active version
+        // of a versioned root, or the binary of a flat one.
+        return match crate::spm::versions::launch_by_name(file_name)? {
+            Ok(pid) => Some(pid),
+            Err(reason) => {
+                crate::serial_println!("[apps] \"{}\" : lancement refuse - {}", file_name, reason);
+                None
+            }
+        };
+    };
     // The browser interprets the scripts of pages: its recursion goes as
     // deep as theirs, and it gets a stack to match.
     let pid = if file_name == browser::FILE_NAME {

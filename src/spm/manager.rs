@@ -77,6 +77,8 @@ pub enum SpmError {
     WriteFailed(String),
     /// Repository error.
     Repo(repo::RepoError),
+    /// Registry error (phase 15): manifest, signature, transfer, checksum.
+    Registry(String),
     /// Command line not understood.
     BadCommand,
     /// The filesystem is not mounted.
@@ -105,6 +107,7 @@ impl SpmError {
             ),
             SpmError::WriteFailed(path) => alloc::format!("ecriture impossible : {}", path),
             SpmError::Repo(error) => alloc::format!("depot : {}", error.message()),
+            SpmError::Registry(message) => alloc::format!("registre : {}", message),
             SpmError::BadCommand => String::from("commande spm non reconnue (spec 10.3)"),
             SpmError::NotReady => String::from("systeme de fichiers non monte"),
         }
@@ -229,7 +232,7 @@ fn require_consent(header: &PackageHeader, level: WarningLevel) -> Result<(), Sp
 /// shipping a tree. Failing that, it follows from the scope and the
 /// format, as `tree::create_sandbox` already does for a loaded binary:
 /// two ways of filing the same thing would be one too many.
-fn install_prefix(
+pub fn install_prefix(
     header: &PackageHeader,
     manifest: &package::Manifest,
     scope: &Scope,
@@ -241,24 +244,26 @@ fn install_prefix(
 }
 
 /// Name of the binary file laid down in the prefix.
-fn binary_name(header: &PackageHeader, manifest: &package::Manifest) -> String {
+pub fn binary_name(header: &PackageHeader, manifest: &package::Manifest) -> String {
     if !manifest.binary.is_empty() {
         return manifest.binary.clone();
     }
     alloc::format!("{}.{}", header.app_id, header.format.extension())
 }
 
-/// Installs a package already in memory.
-///
-/// `origin` names the provenance -- a repository, or `local`. It is
-/// recorded in the database because `spm update` must know where to go
-/// looking for what comes next.
-pub fn install_bytes(
-    bytes: &[u8],
-    scope: Scope,
-    origin: &str,
-    now: u64,
-) -> Result<Installed, SpmError> {
+/// A package that passed steps 2 to 6: parsed, verified, consented to,
+/// its dependencies present. Nothing is written yet.
+pub struct Accepted {
+    pub header: PackageHeader,
+    pub manifest: package::Manifest,
+    pub verdict: Verdict,
+    pub level: WarningLevel,
+}
+
+/// Steps 2 to 6 of an installation: every refusal happens here, before
+/// the first write (shared by the in-place installation of phase 8 and
+/// the versioned one of phase 15, `spm::versions`).
+pub fn accept(bytes: &[u8], scope: &Scope) -> Result<Accepted, SpmError> {
     if !crate::fs::is_ready() {
         return Err(SpmError::NotReady);
     }
@@ -284,18 +289,23 @@ pub fn install_bytes(
     // personal application may depend on a library installed for
     // everybody, the reverse would make no sense.
     for dependency in &manifest.depends {
-        let found = db::find(&scope, dependency).is_some()
+        let found = db::find(scope, dependency).is_some()
             || db::find(&Scope::Global, dependency).is_some();
         if !found {
             return Err(SpmError::MissingDependency(dependency.clone()));
         }
     }
 
-    if db::find(&scope, &header.app_id).is_some() && !header.has_flag(package::flags::UPGRADE) {
-        return Err(SpmError::AlreadyInstalled(header.app_id.clone()));
-    }
+    Ok(Accepted { header, manifest, verdict, level })
+}
 
-    let prefix = install_prefix(&header, &manifest, &scope);
+/// Steps 7 to 9 and the trust store of step 10: the scripts and the files,
+/// laid down in `prefix`. Returns the files created, in order, and the
+/// status. On a refusal of the pre-installation script, what it created
+/// is undone.
+pub fn lay_down(accepted: &Accepted, bytes: &[u8], prefix: &str, now: u64) -> Result<(Vec<String>, Status), SpmError> {
+    let header = &accepted.header;
+    let manifest = &accepted.manifest;
     let who = Credentials::kernel();
     let mut files: Vec<String> = Vec::new();
 
@@ -303,16 +313,16 @@ pub fn install_bytes(
     // script: that one is confined to the prefix, and a non-existent
     // prefix would make its first instruction fail for a reason unrelated
     // to what it asks.
-    if crate::fs::stat(&prefix, who).is_err() {
-        crate::fs::create_directory(&prefix, who, Mode::system_dir(), now)
-            .map_err(|_| SpmError::WriteFailed(prefix.clone()))?;
-        files.push(prefix.clone());
+    if crate::fs::stat(prefix, who).is_err() {
+        crate::fs::create_directory(prefix, who, Mode::system_dir(), now)
+            .map_err(|_| SpmError::WriteFailed(String::from(prefix)))?;
+        files.push(String::from(prefix));
     }
 
-    let roots = alloc::vec![prefix.clone()];
+    let roots = alloc::vec![String::from(prefix)];
 
     // --- 7: pre-installation script ---
-    let pre = core::str::from_utf8(package::pre_script(&header, bytes)).unwrap_or("");
+    let pre = core::str::from_utf8(package::pre_script(header, bytes)).unwrap_or("");
     if !pre.trim().is_empty() {
         let outcome = script::execute(pre, &roots, now);
         files.extend(outcome.created.iter().cloned());
@@ -325,9 +335,9 @@ pub fn install_bytes(
     }
 
     // --- 8: binary and resources ---
-    let binary = package::binary(&header, bytes);
+    let binary = package::binary(header, bytes);
     if !binary.is_empty() {
-        let path = alloc::format!("{}/{}", prefix, binary_name(&header, &manifest));
+        let path = alloc::format!("{}/{}", prefix, binary_name(header, manifest));
         let mode = if header.format == BinaryFormat::Ras {
             Mode::private_file()
         } else {
@@ -338,10 +348,10 @@ pub fn install_bytes(
         files.push(path);
     }
 
-    if let Some(resources) = package::read_resources(&header, bytes) {
+    if let Some(resources) = package::read_resources(header, bytes) {
         for resource in &resources {
             let path = alloc::format!("{}/{}", prefix, resource.name);
-            let content = package::resource_bytes(&header, bytes, resource);
+            let content = package::resource_bytes(header, bytes, resource);
             crate::fs::write_file(&path, content, who, Mode::system_file(), now)
                 .map_err(|_| SpmError::WriteFailed(path.clone()))?;
             files.push(path);
@@ -354,7 +364,7 @@ pub fn install_bytes(
     let manifest_path = alloc::format!("{}/manifeste.cfg", prefix);
     if crate::fs::write_file(
         &manifest_path,
-        package::manifest_bytes(&header, bytes),
+        package::manifest_bytes(header, bytes),
         who,
         Mode::system_file(),
         now,
@@ -369,7 +379,7 @@ pub fn install_bytes(
     // Its failure does not cancel: the files are laid down and working.
     // The package is marked "partial", which `spm update` will read back.
     let mut status = Status::Installed;
-    let post = core::str::from_utf8(package::post_script(&header, bytes)).unwrap_or("");
+    let post = core::str::from_utf8(package::post_script(header, bytes)).unwrap_or("");
     if !post.trim().is_empty() {
         let outcome = script::execute(post, &roots, now);
         files.extend(outcome.created.iter().cloned());
@@ -384,17 +394,42 @@ pub fn install_bytes(
         }
     }
 
-    // --- 10: registration ---
+    // --- 10 (trust store) ---
     //
     // A verified SYSTEM package sees its digest enter the store: without
     // that, the binary it has just laid down would be refused at load,
     // even though the package carrying it was recognised. It is the same
     // gesture `install_native_modules` makes for the `.mod`.
-    if verdict == Verdict::System {
+    if accepted.verdict == Verdict::System {
         let digest = crate::binfmt::sha256::digest(binary);
         crate::binfmt::signature::register_system_digest(digest);
     }
 
+    Ok((files, status))
+}
+
+/// Installs a package already in memory, in place (phase 8).
+///
+/// `origin` names the provenance -- a repository, or `local`. It is
+/// recorded in the database because `spm update` must know where to go
+/// looking for what comes next.
+pub fn install_bytes(
+    bytes: &[u8],
+    scope: Scope,
+    origin: &str,
+    now: u64,
+) -> Result<Installed, SpmError> {
+    let accepted = accept(bytes, &scope)?;
+    let header = &accepted.header;
+
+    if db::find(&scope, &header.app_id).is_some() && !header.has_flag(package::flags::UPGRADE) {
+        return Err(SpmError::AlreadyInstalled(header.app_id.clone()));
+    }
+
+    let prefix = install_prefix(header, &accepted.manifest, &scope);
+    let (files, status) = lay_down(&accepted, bytes, &prefix, now)?;
+
+    // --- 10: registration ---
     let entry = Entry {
         app_id: header.app_id.clone(),
         version: header.package_version,
@@ -411,7 +446,7 @@ pub fn install_bytes(
         .map_err(|_| SpmError::WriteFailed(scope.files_dir()))?;
 
     // --- 11: notification (10.2) ---
-    notify_installed(&header, &prefix);
+    notify_installed(header, &prefix);
 
     crate::serial_println!(
         "[spm] {} v{} installe dans {} - portee {}, {} fichier(s), {}",
@@ -428,8 +463,8 @@ pub fn install_bytes(
         version: header.package_version,
         prefix,
         scope,
-        warning: level,
-        verdict,
+        warning: accepted.level,
+        verdict: accepted.verdict,
         files,
         status,
     })
@@ -438,7 +473,7 @@ pub fn install_bytes(
 /// Undoes what an aborted installation had laid down.
 ///
 /// Backwards: a directory is only deleted once its content is gone.
-fn cleanup(files: &[String], now: u64) {
+pub fn cleanup(files: &[String], now: u64) {
     let who = Credentials::kernel();
     for path in files.iter().rev() {
         let _ = crate::fs::delete(path, who, now);
@@ -461,7 +496,7 @@ pub fn install_from_repo(app_id: &str, scope: Scope, now: u64) -> Result<Install
 }
 
 /// Notification at the end of an installation, per the 10.2 code.
-fn notify_installed(header: &PackageHeader, prefix: &str) {
+pub fn notify_installed(header: &PackageHeader, prefix: &str) {
     use crate::gui::notify::Level;
 
     let code = header.update_code;
@@ -526,6 +561,22 @@ pub fn remove(app_id: &str, scope: Scope, now: u64) -> Result<Removed, SpmError>
     let files = db::files_of(&scope, app_id);
     let mut removed = 0;
     let mut kept = 0;
+
+    // A versioned application (phase 15): the root holds the versions and
+    // the pointers, all the package's -- removed whole. A version still
+    // running keeps its files mapped by node; their blocks go with the
+    // last process.
+    if super::versions::is_versioned(&entry.prefix) {
+        removed = super::versions::remove_tree(&entry.prefix, now);
+        db::remove(&scope, app_id, now).map_err(|_| SpmError::WriteFailed(scope.database()))?;
+        db::forget_files(&scope, app_id, now);
+        crate::serial_println!("[spm] {} desinstalle - {} entree(s) supprimee(s), toutes versions", app_id, removed);
+        return Ok(Removed {
+            app_id: String::from(app_id),
+            removed_files: removed,
+            kept_files: 0,
+        });
+    }
 
     // Backwards: the files first, the directories next, because a
     // directory is only deleted once empty. A file the user added
@@ -670,6 +721,14 @@ pub enum Output {
     Results(Vec<Found>),
     RepoAdded(String),
     RepoExists(String),
+    /// Phase 15: a version installed from a registry and made active.
+    Versioned(super::versions::Installed),
+    /// Phase 15: the active version is already the channel's.
+    UpToDate(String),
+    /// Phase 15: `spm rollback` returned to this version.
+    RolledBack(String),
+    RegistryAdded(String),
+    ChannelSet(String),
 }
 
 /// Parses and runs a line of 10.3.
@@ -723,7 +782,58 @@ pub fn execute(line: &str, now: u64) -> Result<Output, SpmError> {
                 let path = normalize_local(target);
                 install_file(&path, scope, now).map(Output::Installed)
             } else {
+                // `--canal beta`: the channel this application follows
+                // from now on (15.1, point 7).
+                if let Some(index) = arguments.iter().position(|word| *word == "--canal") {
+                    let channel = arguments.get(index + 1).ok_or(SpmError::BadCommand)?;
+                    if !super::registry::set_channel(target, channel, now) {
+                        return Err(SpmError::BadCommand);
+                    }
+                }
+                let downgrade = arguments.iter().any(|word| *word == "--retrograder");
+                // Phase 15 first: a registry of manifests, the version
+                // installed apart and switched to atomically. The index
+                // repositories of phase 8 when no registry knows the name.
+                if !super::registry::load().is_empty() {
+                    match super::versions::update_from_registry(target, scope.clone(), downgrade, now) {
+                        Ok(super::versions::Outcome::Installed(done)) => return Ok(Output::Versioned(done)),
+                        Ok(super::versions::Outcome::UpToDate(version)) => return Ok(Output::UpToDate(version)),
+                        Err(SpmError::NotFound(_)) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
                 install_from_repo(target, scope, now).map(Output::Installed)
+            }
+        }
+        "rollback" => {
+            let target = positional.first().ok_or(SpmError::BadCommand)?;
+            let entry = db::find(&scope, target).ok_or_else(|| SpmError::NotFound(String::from(*target)))?;
+            super::versions::rollback(&entry.prefix, now).map(Output::RolledBack)
+        }
+        "canal" => {
+            // spm canal {app|defaut} {release|beta|test}
+            let (Some(app), Some(channel)) = (positional.first(), positional.get(1)) else {
+                return Err(SpmError::BadCommand);
+            };
+            if super::registry::set_channel(app, channel, now) {
+                Ok(Output::ChannelSet(alloc::format!("{} suit {}", app, channel)))
+            } else {
+                Err(SpmError::BadCommand)
+            }
+        }
+        "registry" => {
+            // spm registry add <nom> <url> <cle ed25519 hex>
+            if positional.first() != Some(&"add") {
+                return Err(SpmError::BadCommand);
+            }
+            let (Some(name), Some(url), Some(key)) = (positional.get(1), positional.get(2), positional.get(3)) else {
+                return Err(SpmError::BadCommand);
+            };
+            let key = crate::binfmt::signature::parse_key(key).ok_or(SpmError::BadCommand)?;
+            match super::registry::add(name, url, key, now) {
+                Ok(true) => Ok(Output::RegistryAdded(String::from(*name))),
+                Ok(false) => Ok(Output::RepoExists(String::from(*name))),
+                Err(()) => Err(SpmError::WriteFailed(String::from(super::registry::CONFIG_PATH))),
             }
         }
         "remove" => {
@@ -731,6 +841,13 @@ pub fn execute(line: &str, now: u64) -> Result<Output, SpmError> {
             remove(target, scope, now).map(Output::Removed)
         }
         "update" => {
+            // `spm update {app}`: that application, from its registry, now.
+            if let Some(app) = positional.first() {
+                return match super::versions::update_from_registry(app, scope, false, now)? {
+                    super::versions::Outcome::Installed(done) => Ok(Output::Versioned(done)),
+                    super::versions::Outcome::UpToDate(version) => Ok(Output::UpToDate(version)),
+                };
+            }
             if arguments.iter().any(|word| *word == "--os") {
                 // 11.2 -- manual check of the system updates.
                 let found = super::update::check_now(now);

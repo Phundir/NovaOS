@@ -253,6 +253,16 @@ pub fn config(now: u64) -> Config {
     config
 }
 
+/// Turns the automatic checks on or off (the "Mises a jour" tab), the
+/// interval kept.
+pub fn set_automatic(on: bool, now: u64) -> Result<(), crate::fs::FsError> {
+    let mut settings = config(now);
+    settings.automatic = on;
+    let who = Credentials::kernel();
+    let _ = crate::fs::delete(CONFIG_PATH, who, now);
+    crate::fs::write_file(CONFIG_PATH, settings.to_cfg().as_bytes(), who, Mode::system_file(), now).map(|_| ())
+}
+
 // ============================================================
 //  Detection and download
 // ============================================================
@@ -500,6 +510,8 @@ pub fn task() -> ! {
                 notify(&update);
                 super::rollback::stage_update(&update, now);
             }
+            // 15.6.3 -- the applications of the registries, same lap.
+            check_applications(now);
         }
 
         // The interval is read back on every lap: changing it in the file
@@ -507,6 +519,51 @@ pub fn task() -> ! {
         let sleep_ms = settings.interval_hours.saturating_mul(3_600_000);
         sleep_long(sleep_ms);
     }
+}
+
+/// 15.6.3 -- The versioned applications whose channel offers another
+/// version. A silent update (code 2 of 10.2) is installed at once; the
+/// others are announced, with the level their code asks for, and wait for
+/// the user (`spm update {app}`) or the application (`spm.update`).
+pub fn check_applications(now: u64) -> usize {
+    use super::db::{self, Scope};
+    use super::package::UpdateCode;
+    let mut found = 0;
+    for entry in db::load(&Scope::Global) {
+        if !super::versions::is_versioned(&entry.prefix) {
+            continue;
+        }
+        let Ok((_, manifest, channel)) = super::registry::resolve(&entry.app_id) else {
+            continue;
+        };
+        if channel.numbers <= entry.version {
+            continue;
+        }
+        found += 1;
+        if channel.code == UpdateCode::Silent {
+            match super::versions::update_from_registry(&entry.app_id, Scope::Global, false, now) {
+                Ok(_) => crate::serial_println!("[updater] {} {} installee en silence (code 2)", entry.app_id, channel.version),
+                Err(error) => crate::serial_println!("[updater] {} : {}", entry.app_id, error.message()),
+            }
+            continue;
+        }
+        use crate::gui::notify::Level;
+        let level = match channel.code {
+            UpdateCode::Mandatory => Level::Haute,
+            UpdateCode::Standard => Level::Normale,
+            _ => Level::Basse,
+        };
+        let title = alloc::format!("Mise a jour de {}", manifest.app_name);
+        let body = alloc::format!(
+            "Version {} disponible (canal {}). {}",
+            channel.version,
+            channel.name,
+            channel.code.behaviour()
+        );
+        let _ = crate::gui::with(|comp| crate::gui::compositor::post_notification(comp, level, &title, &body));
+        crate::serial_println!("[updater] {} {} proposee - code {} ({})", entry.app_id, channel.version, channel.code.code(), channel.code.as_str());
+    }
+    found
 }
 
 /// Sleeps a long time, in slices.

@@ -747,6 +747,28 @@ fn task_phase10_selftest() -> ! {
     i18n::dump_state();
     security::dump_state();
     compat::dump_state();
+
+    // --- phase 15: atomic updates of applications ---
+    //
+    // Chained after phase 10 for the reason phases 8 to 10 already
+    // follow: it installs, launches and deletes on the volume, and the
+    // phase 9 and 10 self-tests measure frames around their own work.
+    spawn_selftest("phase15-autotest", task_phase15_selftest);
+    selftest_done()
+}
+
+/// Self-test of phase 15, in a task: it launches the versions it
+/// installs, and asks the update service as an application would.
+fn task_phase15_selftest() -> ! {
+    let (passed, failed) = spm::selftest_atomic::run();
+    if failed == 0 {
+        serial_println!(
+            "[test] phase 15 validee - {} verifications des mises a jour atomiques (spec 10.5)",
+            passed
+        );
+    } else {
+        serial_println!("[test] phase 15 ECHEC - {} cas incorrects sur {}", failed, passed + failed);
+    }
     selftest_done()
 }
 
