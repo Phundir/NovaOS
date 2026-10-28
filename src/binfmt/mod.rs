@@ -1049,6 +1049,50 @@ fn signature_selftest() -> (usize, usize) {
         }
     }
 
+    // --- 15.0.3: what the Ed25519 certificate adds ---
+    // A version 1 certificate (a hash of public data) is refused by name,
+    // even with every other field intact.
+    let cert_start = parse(&gs).map(|h| h.cert_offset as usize).unwrap_or(0);
+    if cert_start > 0 && cert_start + header::CERT_SIZE <= gs.len() {
+        let mut obsolete = gs.clone();
+        obsolete[cert_start + header::cert_offsets::VERSION..cert_start + header::cert_offsets::VERSION + 2]
+            .copy_from_slice(&1u16.to_le_bytes());
+        if expect_verdict(".gs au certificat v1", &obsolete, Verdict::Rejected(Reason::ObsoleteCertificate)) {
+            passed += 1;
+        } else {
+            failed += 1;
+        }
+
+        // The dates are signed: pushing the end of validity back breaks
+        // the signature rather than extending the trust.
+        let mut extended = gs.clone();
+        let until = cert_start + header::cert_offsets::VALID_UNTIL;
+        extended[until..until + 8].copy_from_slice(&99_999u64.to_le_bytes());
+        if expect_verdict(".gs a la validite repoussee", &extended, Verdict::Rejected(Reason::BindingMismatch)) {
+            passed += 1;
+        } else {
+            failed += 1;
+        }
+
+        // A certificate properly signed but expired, when the clock says so.
+        if signature::today().is_some() {
+            let mut expired = gs.clone();
+            expired[until..until + 8].copy_from_slice(&100u64.to_le_bytes());
+            let from = cert_start + header::cert_offsets::VALID_FROM;
+            expired[from..from + 8].copy_from_slice(&0u64.to_le_bytes());
+            if let Ok(h) = parse(&expired) {
+                let digest = signature::authenticity_digest(&h, &expired);
+                let seed = signature::demo_authority_seed();
+                signature::sign_certificate(&mut expired[cert_start..cert_start + header::CERT_SIZE], &digest, &seed);
+            }
+            if expect_verdict(".gs au certificat expire", &expired, Verdict::Rejected(Reason::CertificateExpired)) {
+                passed += 1;
+            } else {
+                failed += 1;
+            }
+        }
+    }
+
     // --- 3.3.4: SELF ---
     let cus = sample::executable_cus();
     if expect_verdict(".cus auto-signe", &cus, Verdict::SelfSigned) {

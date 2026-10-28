@@ -76,19 +76,17 @@ fn align_up(value: usize, align: usize) -> usize {
 //  Demonstration authority
 // ============================================================
 
-/// Name of the fictitious authority signing the ENTERPRISE samples.
-const DEMO_AUTHORITY: &[u8] = b"nova.authority.demonstration";
-
-/// Digest of that authority's key -- its root of trust.
+/// The demonstration authority's public key (Ed25519). Its seed is drawn
+/// at boot and never leaves memory (`signature::demo_authority_seed`).
 pub fn demo_authority_key() -> [u8; 32] {
-    sha256::digest(DEMO_AUTHORITY)
+    signature::demo_authority_key()
 }
 
 /// Registers the demonstration authority as an ENTERPRISE root.
 ///
-/// In a real system, this entry would come from a store shipped with the
-/// OS and updated by `updater.dsa`. Here it is laid down by the self-test,
-/// for want of a filesystem.
+/// In a real system the roots come from `/sys/config/autorites.cfg`
+/// (`signature::load_authorities`); this one is laid down by the
+/// self-tests, which hold its seed.
 pub fn register_demo_authority() -> bool {
     signature::register_enterprise_root(demo_authority_key())
 }
@@ -368,16 +366,20 @@ pub fn build(spec: &BuildSpec) -> Vec<u8> {
     buffer
 }
 
-/// Writes the certificate block and its binding to the binary.
+/// Writes the certificate block and signs it for the binary.
 ///
-/// The binding is computed **after** the rest of the file is frozen: it
-/// depends on the authenticity digest, which covers the header and the
+/// The signature is computed **after** the rest of the file is frozen: it
+/// covers the authenticity digest, which covers the header and the
 /// payload.
 fn write_certificate(buffer: &mut [u8], offset: usize, spec: &BuildSpec) {
-    let authority_key = if spec.unknown_authority {
-        sha256::digest(b"autorite.inconnue.du.magasin")
+    // An authority unknown to the store: a real key pair, whose public
+    // key nobody registered -- the signature is valid, the trust absent.
+    let seed = if spec.unknown_authority {
+        let mut seed = signature::demo_authority_seed();
+        seed[0] ^= 0xA5;
+        seed
     } else {
-        demo_authority_key()
+        signature::demo_authority_seed()
     };
 
     buffer[offset..offset + 4].copy_from_slice(&CERT_MAGIC);
@@ -397,12 +399,10 @@ fn write_certificate(buffer: &mut [u8], offset: usize, spec: &BuildSpec) {
     put_cert_name(buffer, offset + cert_offsets::SUBJECT, spec.author);
     put_cert_name(buffer, offset + cert_offsets::LEGAL_ID, "FR-000-000-000");
 
-    // Days since 2000-01-01. Demonstration values: the temporal check
-    // assumes a real-time clock, the SYS_TIME_* domain of phase 5.6.3.
+    // Days since 2000-01-01: 2024-08 to 2032-11, compared with the
+    // hardware clock when it is known.
     put_u64(buffer, offset + cert_offsets::VALID_FROM, 9000);
     put_u64(buffer, offset + cert_offsets::VALID_UNTIL, 12000);
-    buffer[offset + cert_offsets::AUTHORITY_KEY..offset + cert_offsets::AUTHORITY_KEY + 32]
-        .copy_from_slice(&authority_key);
 
     // The authenticity digest is computed on the file as it stands now:
     // the certificate block is not part of it.
@@ -410,9 +410,7 @@ fn write_certificate(buffer: &mut [u8], offset: usize, spec: &BuildSpec) {
         return;
     };
     let digest = signature::authenticity_digest(&header, buffer);
-    let binding = signature::expected_binding(&authority_key, &digest);
-    buffer[offset + cert_offsets::BINDING..offset + cert_offsets::BINDING + 32]
-        .copy_from_slice(&binding);
+    signature::sign_certificate(&mut buffer[offset..offset + CERT_SIZE], &digest, &seed);
 }
 
 fn put_cert_name(buffer: &mut [u8], offset: usize, text: &str) {

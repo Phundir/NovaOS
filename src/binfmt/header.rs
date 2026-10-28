@@ -493,24 +493,34 @@ pub const CERT_SIZE: usize = 256;
 pub const CERT_MAGIC: [u8; 4] = [0x4E, 0x43, 0x52, 0x54];
 
 /// Version of the certificate format.
-pub const CERT_VERSION: u16 = 1;
+///
+/// Version 2 (phase 15) replaced the binding -- a SHA-256 of public data,
+/// forgeable by anyone who read the format -- by an Ed25519 signature of
+/// the authority. A version 1 certificate is refused by name
+/// (`Reason::ObsoleteCertificate`), never accepted as ENTERPRISE.
+pub const CERT_VERSION: u16 = 2;
 
-/// Offsets of the fields of the certificate block.
+/// Offsets of the fields of the certificate block (version 2).
 ///
 /// ```text
 ///   0x00   4   magic "NCRT"
-///   0x04   2   format version
+///   0x04   2   format version (2)
 ///   0x06   2   signature type covered
 ///   0x08  32   issuing authority (readable name)
 ///   0x28  32   certified legal entity
 ///   0x48  32   legal identifier (company register, country)
 ///   0x68   8   start of validity (days since 2000-01-01)
 ///   0x70   8   end of validity
-///   0x78  32   digest of the authority key -- root of trust
-///   0x98  32   binding to the binary: SHA-256(authority key || digest)
-///   0xB8  72   reserved
+///   0x78  32   Ed25519 public key of the authority -- the root of trust
+///   0x98  64   Ed25519 signature by that key of
+///              "NOVA-BIN\0" || bytes 0x00..0x98 || authenticity digest
+///   0xD8  40   reserved
 ///   0x100      end
 /// ```
+///
+/// The signed message covers every field above it -- names, validity,
+/// the key itself -- and the binary: a certificate copied onto another
+/// binary, or with its dates pushed back, no longer verifies.
 pub mod cert_offsets {
     pub const MAGIC: usize = 0x00;
     pub const VERSION: usize = 0x04;
@@ -521,7 +531,9 @@ pub mod cert_offsets {
     pub const VALID_FROM: usize = 0x68;
     pub const VALID_UNTIL: usize = 0x70;
     pub const AUTHORITY_KEY: usize = 0x78;
-    pub const BINDING: usize = 0x98;
+    pub const SIGNATURE: usize = 0x98;
+    /// End of the signed fields.
+    pub const SIGNED_END: usize = 0x98;
 }
 
 // ============================================================

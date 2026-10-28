@@ -718,15 +718,16 @@ fn emit_spec<'a>(
 
 /// Demonstration authority, for an ENTERPRISE binary.
 ///
-/// It comes from the phase 3 root store, which the self-test knows about.
-/// The phase 3 reservation still holds: the binding is a hash whose input
-/// is public, so it attests integrity and not provenance. Nothing
-/// produced here may be presented as "verified".
+/// Its key is drawn at each boot (`signature::demo_authority_seed`): a
+/// binary signed with it verifies during this boot, where the self-tests
+/// registered it, and nowhere else. A real ENTERPRISE binary is signed by
+/// its authority's own key (`tools/nova-sign.py`), registered in
+/// `/sys/config/autorites.cfg`.
 fn demo_authority() -> emit::Authority<'static> {
     emit::Authority {
         name: "Nova Certification",
         legal_id: "FR-000-000-000",
-        key: binfmt::sample::demo_authority_key(),
+        seed: binfmt::signature::demo_authority_seed(),
         valid_from: 9000,
         valid_until: 12000,
     }
@@ -1108,8 +1109,8 @@ fn package(command: &Command, now: u64) -> Result<PackageReport, DevError> {
         extra: Vec::new(),
     };
 
-    let authority_key =
-        (signature == SignatureType::Enterprise).then(binfmt::sample::demo_authority_key);
+    let authority_seed =
+        (signature == SignatureType::Enterprise).then(binfmt::signature::demo_authority_seed);
     let file = spm_package::build(&spm_package::BuildSpec {
         // A first installation is not an update: 10.2 has no code for
         // "new", and `Standard` is the only one that asks for a
@@ -1131,7 +1132,7 @@ fn package(command: &Command, now: u64) -> Result<PackageReport, DevError> {
         resources: &[],
         pre_script: "",
         post_script: "",
-        authority_key,
+        authority_seed,
     });
 
     // The verdict is the one `spm install` will pronounce: giving it here

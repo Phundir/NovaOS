@@ -191,9 +191,10 @@ pub struct EmitSpec<'a> {
 pub struct Authority<'a> {
     pub name: &'a str,
     pub legal_id: &'a str,
-    pub key: [u8; 32],
-    /// Days since 2000-01-01. Not checked, for want of a real-time clock
-    /// (limit opened by phase 3, step 5.6.3).
+    /// The authority's Ed25519 secret seed: the certificate is signed
+    /// with it, its public key written beside the signature.
+    pub seed: [u8; 32],
+    /// Days since 2000-01-01, checked against the hardware clock at load.
     pub valid_from: u64,
     pub valid_until: u64,
 }
@@ -360,9 +361,9 @@ pub fn emit(object: &Object, spec: &EmitSpec) -> Result<Vec<u8>, EmitError> {
     Ok(file)
 }
 
-/// Writes the certificate block and its binding to the binary.
+/// Writes the certificate block and signs it for the binary.
 ///
-/// The binding covers the authenticity digest, which covers the header
+/// The signature covers the authenticity digest, which covers the header
 /// and the payload: it is therefore computed last, on an already frozen
 /// file. Same order as in phase 3, same reason.
 fn write_certificate(file: &mut [u8], offset: usize, spec: &EmitSpec, authority: &Authority) {
@@ -386,16 +387,13 @@ fn write_certificate(file: &mut [u8], offset: usize, spec: &EmitSpec, authority:
         offset + cert_offsets::VALID_UNTIL,
         authority.valid_until,
     );
-    file[offset + cert_offsets::AUTHORITY_KEY..offset + cert_offsets::AUTHORITY_KEY + 32]
-        .copy_from_slice(&authority.key);
 
     let Ok(header) = crate::binfmt::parse(file) else {
         return;
     };
     let digest = signature::authenticity_digest(&header, file);
-    let binding = signature::expected_binding(&authority.key, &digest);
-    file[offset + cert_offsets::BINDING..offset + cert_offsets::BINDING + 32]
-        .copy_from_slice(&binding);
+    let size = crate::binfmt::header::CERT_SIZE;
+    signature::sign_certificate(&mut file[offset..offset + size], &digest, &authority.seed);
 }
 
 // ============================================================

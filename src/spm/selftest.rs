@@ -109,7 +109,7 @@ fn sample(
         resources: &resources,
         pre_script: pre,
         post_script: post,
-        authority_key: None,
+        authority_seed: None,
     })
 }
 
@@ -353,8 +353,12 @@ fn test_format(report: &mut Report) {
         package::verify(&official_header, &official) == Verdict::System,
     );
 
-    // ENTERPRISE: unknown authority, then known.
-    let authority = sha256::digest(b"autorite de test spm");
+    // ENTERPRISE: unknown authority, then known. A real key pair, drawn
+    // for this boot: its public key enters the store only after the
+    // first check.
+    let mut seed = [0u8; 32];
+    crate::random::fill(&mut seed);
+    let authority = crate::crypto::ed25519::public_key(&seed);
     let manifest = manifest_for(TEST_ID, &[]);
     let certified = package::build(&package::BuildSpec {
         update_code: UpdateCode::Silent,
@@ -369,7 +373,7 @@ fn test_format(report: &mut Report) {
         resources: &[],
         pre_script: "",
         post_script: "",
-        authority_key: Some(authority),
+        authority_seed: Some(seed),
     });
     let certified_header = package::parse(&certified).expect("en-tete lisible");
     report.check(
@@ -383,12 +387,12 @@ fn test_format(report: &mut Report) {
         package::verify(&certified_header, &certified) == Verdict::Enterprise,
     );
 
-    // The binding is attached to *this* package: copying it onto another
-    // must not produce a valid binding.
+    // The signature is attached to *this* package: copying it onto
+    // another must not verify.
     let mut moved = ordinary(TEST_ID, [3, 0, 0, 0], &[]);
     moved[0x07] = SignatureType::Enterprise as u8;
-    moved[0xE0..0xE0 + 32].copy_from_slice(&authority);
-    moved[0xC0..0xC0 + 32].copy_from_slice(&certified_header.binding);
+    moved[0x100..0x120].copy_from_slice(&authority);
+    moved[0xC0..0x100].copy_from_slice(&certified_header.signature_bytes);
     let payload = package::payload_digest(&moved);
     moved[0xA0..0xA0 + 32].copy_from_slice(&payload);
     if let Ok(moved_header) = package::parse(&moved) {
@@ -398,6 +402,24 @@ fn test_format(report: &mut Report) {
         );
     } else {
         report.check("8.1 liaison de certificat non transferable", false);
+    }
+
+    // 15.0.3: a version 1 ENTERPRISE package (binding by hash) is refused
+    // by name, a version 1 SELF one still reads.
+    let mut old = ordinary(TEST_ID, [1, 0, 0, 0], &[]);
+    old[0x04..0x06].copy_from_slice(&1u16.to_le_bytes());
+    let parsed_old = package::parse(&old);
+    report.check("15.0.3 paquet v1 encore lu", parsed_old.is_ok());
+    old[0x07] = SignatureType::Enterprise as u8;
+    let payload = package::payload_digest(&old);
+    old[0xA0..0xA0 + 32].copy_from_slice(&payload);
+    if let Ok(old_header) = package::parse(&old) {
+        report.check(
+            "15.0.3 paquet ENTERPRISE v1 refuse",
+            package::verify(&old_header, &old) == Verdict::Rejected(Reason::ObsoleteCertificate),
+        );
+    } else {
+        report.check("15.0.3 paquet ENTERPRISE v1 refuse", false);
     }
 }
 

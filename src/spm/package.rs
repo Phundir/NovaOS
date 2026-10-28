@@ -37,10 +37,17 @@
 //!   0x60 32  display name
 //!   0x80 32  publisher
 //!   0xA0 32  SHA-256 digest of the payload
-//!   0xC0 32  certificate binding (ENTERPRISE)
-//!   0xE0 32  digest of the issuing authority key (ENTERPRISE)
-//!   0x100    end of the header, start of the payload
+//!   0xC0 64  Ed25519 signature of the authority (ENTERPRISE)
+//!   0x100 32 Ed25519 public key of the authority (ENTERPRISE)
+//!   0x120 32 reserved
+//!   0x140    end of the header, start of the payload
 //! ```
+//!
+//! That is version 2 (phase 15). Version 1 had a 256-byte header ending
+//! with a 32-byte "binding" at 0xC0 and the digest of the authority key
+//! at 0xE0: a SHA-256 of public data, which anyone could recompute. It is
+//! still read -- a SELF or SYSTEM package of version 1 installs as before
+//! -- but an ENTERPRISE one is refused by name (`ObsoleteCertificate`).
 //!
 //! ## Two digests, two questions
 //!
@@ -60,26 +67,33 @@
 //! A binary of 3 carries its certificate in a separate block, because it
 //! also lodges readable legal information there. A package does not need
 //! that: what it carries is **already** a binary, which carries its own.
-//! Two fields are therefore enough here -- the authority key and the
-//! binding -- and the same reservation as in phase 3 applies: with no
-//! asymmetric primitive, this chain detects an alteration, it
-//! authenticates nobody.
+//! Two fields are therefore enough here -- the authority's public key and
+//! its Ed25519 signature of `"NOVA-SPM\0" || authenticity digest`
+//! (`binfmt::signature`, same store of roots as the binaries).
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::binfmt::header::{BinaryFormat, SignatureType};
 use crate::binfmt::sha256::{self, DIGEST_SIZE};
-use crate::binfmt::signature::{Reason, Verdict, combination_allowed, expected_binding};
+use crate::binfmt::signature::{self, Reason, Verdict, combination_allowed};
 
-/// Fixed size of the header. Any other value makes the package be rejected.
-pub const HEADER_SIZE: usize = 256;
+/// Size of the header of the version produced (2).
+pub const HEADER_SIZE: usize = 0x140;
+
+/// Size of the header of a version 1 package, still read.
+pub const HEADER_SIZE_V1: usize = 0x100;
+
+/// Size of the header of the package `data`, from its version field.
+pub fn header_size(data: &[u8]) -> usize {
+    if read_u16(data, 0x04) >= 2 { HEADER_SIZE } else { HEADER_SIZE_V1 }
+}
 
 /// Magic of a package.
 pub const MAGIC: [u8; 4] = [0x53, 0x50, 0x4D, 0x00]; // "SPM\0"
 
-/// Format version produced and accepted by this kernel.
-pub const FORMAT_VERSION: u16 = 1;
+/// Format version produced by this kernel (1 is still read).
+pub const FORMAT_VERSION: u16 = 2;
 
 /// Length of the text fields of the header.
 pub const NAME_LEN: usize = 32;
@@ -318,8 +332,10 @@ pub struct PackageHeader {
     pub display_name: String,
     pub publisher: String,
     pub payload_hash: [u8; DIGEST_SIZE],
-    pub binding: [u8; DIGEST_SIZE],
-    pub authority_key: [u8; DIGEST_SIZE],
+    /// Ed25519 signature of the authority (version 2), zero otherwise.
+    pub signature_bytes: [u8; 64],
+    /// Ed25519 public key of the authority (version 2), zero otherwise.
+    pub authority_key: [u8; 32],
 }
 
 impl PackageHeader {
@@ -424,13 +440,13 @@ fn read_digest(bytes: &[u8], offset: usize) -> [u8; DIGEST_SIZE] {
 
 /// An empty section (null length) is allowed and bounds nothing: a
 /// package with no post-installation script is the ordinary case.
-fn section_ok(offset: u32, length: u32, total: usize) -> bool {
+fn section_ok(offset: u32, length: u32, total: usize, header: usize) -> bool {
     if length == 0 {
         return true;
     }
     let start = offset as usize;
     let end = start.saturating_add(length as usize);
-    start >= HEADER_SIZE && end <= total && end > start
+    start >= header && end <= total && end > start
 }
 
 /// Two non-empty sections must not overlap.
@@ -450,15 +466,19 @@ fn overlaps(a: (u32, u32), b: (u32, u32)) -> bool {
 
 /// Parses a package without installing anything.
 pub fn parse(data: &[u8]) -> Result<PackageHeader, PackageError> {
-    if data.len() < HEADER_SIZE {
+    if data.len() < HEADER_SIZE_V1 {
         return Err(PackageError::TooShort);
     }
     if data[0..4] != MAGIC {
         return Err(PackageError::BadMagic);
     }
     let version = read_u16(data, 0x04);
-    if version != FORMAT_VERSION {
+    if version == 0 || version > FORMAT_VERSION {
         return Err(PackageError::BadVersion);
+    }
+    let header_len = header_size(data);
+    if data.len() < header_len {
+        return Err(PackageError::TooShort);
     }
 
     let update_code =
@@ -493,8 +513,14 @@ pub fn parse(data: &[u8]) -> Result<PackageHeader, PackageError> {
         display_name: read_name(data, 0x60, NAME_LEN),
         publisher: read_name(data, 0x80, NAME_LEN),
         payload_hash: read_digest(data, 0xA0),
-        binding: read_digest(data, 0xC0),
-        authority_key: read_digest(data, 0xE0),
+        signature_bytes: if version >= 2 {
+            let mut signature = [0u8; 64];
+            signature.copy_from_slice(&data[0xC0..0x100]);
+            signature
+        } else {
+            [0u8; 64]
+        },
+        authority_key: if version >= 2 { read_digest(data, 0x100) } else { [0u8; 32] },
     };
 
     let sections = [
@@ -505,7 +531,7 @@ pub fn parse(data: &[u8]) -> Result<PackageHeader, PackageError> {
         (header.post_offset, header.post_len),
     ];
     for (offset, length) in sections {
-        if !section_ok(offset, length, data.len()) {
+        if !section_ok(offset, length, data.len(), header_len) {
             return Err(PackageError::SectionOutOfBounds);
         }
     }
@@ -614,10 +640,11 @@ pub fn resource_bytes<'a>(
 
 /// Payload digest: everything following the header.
 pub fn payload_digest(data: &[u8]) -> [u8; DIGEST_SIZE] {
-    if data.len() <= HEADER_SIZE {
+    let header = header_size(data);
+    if data.len() <= header {
         return sha256::digest(&[]);
     }
-    sha256::digest(&data[HEADER_SIZE..])
+    sha256::digest(&data[header..])
 }
 
 /// Authenticity digest: header with derived fields neutralised, then
@@ -627,26 +654,29 @@ pub fn payload_digest(data: &[u8]) -> [u8; DIGEST_SIZE] {
 ///
 /// * the payload digest (0xA0), for the obvious reason that a digest
 ///   cannot contain itself;
-/// * the **certificate binding** (0xC0), for exactly the same reason,
-///   less obvious because it goes through a detour. The binding is
-///   `SHA-256(key || authenticity digest)`: it therefore depends on the
-///   digest, which would cover the header, which contains the binding.
-///   The builder writes the binding **after** computing the digest;
-///   without neutralisation, the verifier would recompute on a header
-///   where the binding is now filled in, and would never obtain the same
-///   value. No ENTERPRISE package would be acceptable.
+/// * the **signature** (0xC0, 64 bytes; the binding in version 1), for
+///   exactly the same reason, less obvious because it goes through a
+///   detour: the signature covers this digest, which would cover the
+///   header, which contains the signature.
 ///
-/// The authority key (0xE0), on the other hand, stays covered: it is an
-/// input of the computation, not a result. Covering it is what stops one
-/// authority being substituted for another while keeping the binding.
+/// The authority key (0x100) stays covered: it is an input of the
+/// signature, not a result. Covering it is what stops one authority being
+/// substituted for another while keeping the signature.
 pub fn authenticity_digest(data: &[u8]) -> [u8; DIGEST_SIZE] {
+    let header = header_size(data).min(data.len());
     let mut hasher = sha256::Sha256::new();
-    hasher.update(&data[..0xA0]);
-    // Payload digest and binding, contiguous: 64 bytes.
-    hasher.update_zeros(DIGEST_SIZE * 2);
-    hasher.update(&data[0xE0..HEADER_SIZE.min(data.len())]);
-    if data.len() > HEADER_SIZE {
-        hasher.update(&data[HEADER_SIZE..]);
+    hasher.update(&data[..0xA0.min(header)]);
+    if header >= HEADER_SIZE {
+        // Payload digest and signature, contiguous: 96 bytes.
+        hasher.update_zeros(DIGEST_SIZE + 64);
+        hasher.update(&data[0x100..header]);
+    } else {
+        // Version 1: payload digest and binding, 64 bytes.
+        hasher.update_zeros(DIGEST_SIZE * 2);
+        hasher.update(&data[0xE0.min(header)..header]);
+    }
+    if data.len() > header {
+        hasher.update(&data[header..]);
     }
     hasher.finish()
 }
@@ -680,19 +710,17 @@ pub fn verify(header: &PackageHeader, data: &[u8]) -> Verdict {
             }
         }
         SignatureType::Enterprise => {
-            if header.authority_key == [0u8; DIGEST_SIZE] {
+            if header.version < 2 {
+                return Verdict::Rejected(Reason::ObsoleteCertificate);
+            }
+            if header.authority_key == [0u8; 32] {
                 return Verdict::Rejected(Reason::MalformedCertificate);
             }
-            if !crate::binfmt::signature::is_trusted_authority(&header.authority_key) {
-                return Verdict::Rejected(Reason::UntrustedAuthority);
+            let message = signature::enterprise_message(signature::domain::PACKAGE, &[&digest]);
+            match signature::check_enterprise(&header.authority_key, &message, &header.signature_bytes) {
+                Ok(()) => Verdict::Enterprise,
+                Err(reason) => Verdict::Rejected(reason),
             }
-            if !sha256::equal(
-                &header.binding,
-                &expected_binding(&header.authority_key, &digest),
-            ) {
-                return Verdict::Rejected(Reason::BindingMismatch);
-            }
-            Verdict::Enterprise
         }
         SignatureType::SelfSigned => Verdict::SelfSigned,
         SignatureType::None => Verdict::Unsigned,
@@ -806,12 +834,12 @@ pub struct BuildSpec<'a> {
     pub resources: &'a [(&'a str, &'a [u8])],
     pub pre_script: &'a str,
     pub post_script: &'a str,
-    /// Key of the issuing authority, for an ENTERPRISE package. The
-    /// binding is computed, never supplied: leaving it as a parameter
-    /// would allow building the inconsistent package `verify` must
-    /// reject, and it is up to the test to corrupt the byte, not to the
-    /// builder to offer to do it.
-    pub authority_key: Option<[u8; DIGEST_SIZE]>,
+    /// Ed25519 seed of the issuing authority, for an ENTERPRISE package.
+    /// The signature is computed, never supplied: leaving it as a
+    /// parameter would allow building the inconsistent package `verify`
+    /// must reject, and it is up to the test to corrupt the byte, not to
+    /// the builder to offer to do it.
+    pub authority_seed: Option<[u8; 32]>,
 }
 
 fn put_name(buffer: &mut [u8], offset: usize, text: &str) {
@@ -892,16 +920,18 @@ pub fn build(spec: &BuildSpec) -> Vec<u8> {
     put_name(&mut file, 0x80, spec.publisher);
 
     // The payload digest first: it depends only on what follows the
-    // header. The binding next, because it covers the header -- digest
+    // header. The signature next, because it covers the header -- digest
     // included -- and must therefore be computed afterwards.
     let payload = payload_digest(&file);
     file[0xA0..0xA0 + DIGEST_SIZE].copy_from_slice(&payload);
 
-    if let Some(key) = spec.authority_key {
-        file[0xE0..0xE0 + DIGEST_SIZE].copy_from_slice(&key);
+    if let Some(seed) = spec.authority_seed {
+        let key = crate::crypto::ed25519::public_key(&seed);
+        file[0x100..0x120].copy_from_slice(&key);
         let digest = authenticity_digest(&file);
-        let binding = expected_binding(&key, &digest);
-        file[0xC0..0xC0 + DIGEST_SIZE].copy_from_slice(&binding);
+        let message = signature::enterprise_message(signature::domain::PACKAGE, &[&digest]);
+        let signed = crate::crypto::ed25519::sign(&seed, &message);
+        file[0xC0..0x100].copy_from_slice(&signed);
     }
 
     file

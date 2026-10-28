@@ -17,8 +17,9 @@
 //! 1. the container: magic, class, **interface version equal** to the
 //!    core's (no negotiation), sizes inside the file;
 //! 2. the **signature**: the payload's digest, then the level -- SYSTEM
-//!    (the authenticity digest is in the kernel's table), ENTERPRISE (a
-//!    known authority, a binding to this very module), SELF only if an
+//!    (the authenticity digest is in the kernel's table), ENTERPRISE (an
+//!    Ed25519 signature of this very module by a known authority,
+//!    container version 2), SELF only if an
 //!    administrator authorized this exact digest in
 //!    `/sys/config/modules-autorises` (with a warning at every boot);
 //! 3. the **ELF**: a shared object for x86-64, no library needed, no
@@ -83,8 +84,9 @@ pub struct Container {
     pub level: Level,
     payload: core::ops::Range<usize>,
     payload_hash: [u8; 32],
+    version: u16,
     authority: [u8; 32],
-    binding: [u8; 32],
+    signature: [u8; 64],
 }
 
 fn u16_at(data: &[u8], at: usize) -> u16 {
@@ -118,7 +120,8 @@ pub fn parse(data: &[u8]) -> Result<Container, Refusal> {
     if data.len() < HEADER || &data[0..4] != b"KMD\0" {
         return Err("ce n'est pas un module .kmd");
     }
-    if u16_at(data, 4) != 1 {
+    let version = u16_at(data, 4);
+    if version == 0 || version > 2 {
         return Err("version de conteneur inconnue");
     }
     if u16_at(data, 6) != 1 {
@@ -144,8 +147,13 @@ pub fn parse(data: &[u8]) -> Result<Container, Refusal> {
         level,
         payload: offset as usize..end as usize,
         payload_hash: array32(&data[32..64]),
+        version,
         authority: array32(&data[144..176]),
-        binding: array32(&data[176..208]),
+        signature: {
+            let mut signature = [0u8; 64];
+            signature.copy_from_slice(&data[176..240]);
+            signature
+        },
     })
 }
 
@@ -198,14 +206,18 @@ pub fn verify(data: &[u8], container: &Container) -> Result<Level, Refusal> {
             }
         }
         Level::Enterprise => {
-            if !crate::binfmt::signature::is_trusted_authority(&container.authority) {
-                return Err("ENTERPRISE : autorite inconnue");
+            // Version 1 bound the module by a hash of public data; only
+            // the Ed25519 signature of version 2 (phase 15) proves who.
+            if container.version < 2 {
+                return Err("ENTERPRISE : conteneur v1 sans signature asymetrique");
             }
-            let expected = crate::binfmt::signature::expected_binding(&container.authority, &digest);
-            if !sha256::equal(&expected, &container.binding) {
-                return Err("ENTERPRISE : certificat d'un autre module");
+            use crate::binfmt::signature::{self, Reason};
+            let message = signature::enterprise_message(signature::domain::MODULE, &[&container.authority, &digest]);
+            match signature::check_enterprise(&container.authority, &message, &container.signature) {
+                Ok(()) => Ok(Level::Enterprise),
+                Err(Reason::UntrustedAuthority) => Err("ENTERPRISE : autorite inconnue"),
+                Err(_) => Err("ENTERPRISE : signature d'un autre module"),
             }
-            Ok(Level::Enterprise)
         }
         Level::SelfSigned => {
             if authorized_digests().iter().any(|d| sha256::equal(d, &digest)) {

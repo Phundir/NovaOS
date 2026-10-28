@@ -23,6 +23,8 @@
 //! | `aes` | FIPS 197, SP 800-38D | `TLS_AES_*_GCM` records |
 //! | `chacha` | RFC 8439 | `TLS_CHACHA20_POLY1305`, the generator |
 //! | `x25519` | RFC 7748 | key share |
+//! | `field25519` | -- | GF(2^255 - 19), shared by X25519 and Ed25519 |
+//! | `ed25519` | RFC 8032 | ENTERPRISE certificates, registry manifests |
 //! | `bignum` | -- | Montgomery arithmetic |
 //! | `ecc` | FIPS 186-4 | ECDSA P-256/P-384, P-256 key share |
 //! | `rsa` | RFC 8017 | PKCS #1 v1.5 and PSS verification |
@@ -31,6 +33,8 @@ pub mod aes;
 pub mod bignum;
 pub mod chacha;
 pub mod ecc;
+pub mod ed25519;
+pub mod field25519;
 pub mod hmac;
 pub mod rsa;
 pub mod selftest;

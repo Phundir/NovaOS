@@ -128,6 +128,18 @@ Bouton Accessibilité toujours visible.
 | ENTERPRISE | Entreprises / studios | Certificat tiers avec infos légales |
 | SELF | Devs indépendants | Auto-signé — avertissement à l'installation |
 
+**Signature ENTERPRISE (extension du 28 octobre 2026, phase 15).** Le
+certificat porte la **clé publique Ed25519** (RFC 8032) de l'autorité et
+sa **signature**, qui couvre les champs du certificat (noms, identifiant
+légal, dates de validité, clé) et l'empreinte d'authenticité du binaire.
+Une autorité est de confiance quand sa clé publique figure dans
+`/sys/config/autorites.cfg` (une ligne `nom clé-hexadécimale`, modifiable
+par un administrateur). Les dates de validité sont comparées à l'horloge
+quand elle est connue. Chaque objet signé l'est sous une étiquette de
+domaine (`NOVA-BIN`, `NOVA-SPM`, `NOVA-KMD`, `NOVA-REG`) : une signature
+faite pour l'un ne vaut pas pour un autre. Un certificat de version 1
+(liaison par simple hachage) est refusé.
+
 ### 3.3 Magic numbers
 
 ```
@@ -212,14 +224,15 @@ fabricant, §8.5) est un **module noyau** : extension `.kmd`, magic
 | 32-63 | SHA-256 de la charge utile |
 | 64-111 | nom (ASCII) |
 | 112-143 | éditeur (ASCII) |
-| 144-175 | ENTERPRISE : clé de l'autorité |
-| 176-207 | ENTERPRISE : liaison `SHA-256(clé ‖ empreinte)` |
-| 208-255 | réservé ; la charge utile suit |
+| 144-175 | ENTERPRISE : clé publique Ed25519 de l'autorité |
+| 176-239 | ENTERPRISE : signature Ed25519 (conteneur version 2) |
+| 240-255 | réservé ; la charge utile suit |
 
 L'**empreinte d'authenticité** — celle que SYSTEM cherche dans la table du
-noyau et qu'ENTERPRISE lie à son autorité — est le SHA-256 des octets 0 à
-143 de l'en-tête suivis de la charge utile. Même réserve qu'au §3.2 : pas
-encore de signature asymétrique.
+noyau et qu'ENTERPRISE signe — est le SHA-256 des octets 0 à 143 de
+l'en-tête suivis de la charge utile. L'autorité signe
+`"NOVA-KMD\0" ‖ clé ‖ empreinte` (§3.2). Un conteneur ENTERPRISE de
+version 1 (liaison par hachage) est refusé.
 
 **Charge utile** : un objet partagé ELF 64 bits x86-64, indépendant de la
 position, sans bibliothèque (`DT_NEEDED` refusé), dont les seules
@@ -917,6 +930,10 @@ vidéo matériel.
 Un paquet est un fichier binaire unique embarquant : header SPM (magic, version,
 code MAJ, hash SHA-256, signature), manifest (métadonnées), binaire principal,
 ressources et scripts pre/post installation.
+
+Depuis la version 2 du format (phase 15), l'en-tête fait 320 octets et
+porte, pour un paquet ENTERPRISE, la clé publique Ed25519 de l'autorité et
+sa signature de `"NOVA-SPM\0" ‖ empreinte d'authenticité` (§3.2).
 
 ### 10.2 Codes de mise à jour
 

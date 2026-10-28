@@ -5,33 +5,38 @@
 //! | Level | Anchor | What verification proves |
 //! |---|---|---|
 //! | SYSTEM | Digest table frozen in the kernel | The binary is bit for bit the one shipped with the OS |
-//! | ENTERPRISE | Certificate attached to a known authority | The publisher is identified and its legal information is readable |
+//! | ENTERPRISE | Ed25519 key of a known authority | The certificate was issued by that authority, for this very binary, with these legal fields and dates |
 //! | SELF | The digest the binary carries itself | The binary has not been altered since it was produced |
 //!
-//! ## What this implementation does not do
+//! ## ENTERPRISE is a signature since phase 15
 //!
-//! There is **no asymmetric cryptography** here, and therefore no
-//! signature in the strict sense. SHA-256 is a hash function: it detects
-//! an alteration, it authenticates nobody.
+//! Until then the authority -> binary chain was a SHA-256 of public data:
+//! anyone able to read the format could forge a valid certificate, and
+//! DECISIONS forbade presenting ENTERPRISE as verified. The certificate
+//! (version 2) now carries the authority's **Ed25519 public key** and a
+//! **signature** by it (`crypto::ed25519`) of the certificate fields and
+//! the authenticity digest of the binary. The root store holds public
+//! keys; a key is trusted because it is in the store, a certificate
+//! because the key in the store signed it.
 //!
-//! Concretely:
+//! The same primitive signs the other things an authority vouches for,
+//! each under its own **domain tag** so that a signature made for one
+//! cannot be replayed as another (`enterprise_message`): binaries
+//! (`NOVA-BIN`), packages (`NOVA-SPM`), driver modules (`NOVA-KMD`) and
+//! registry manifests (`NOVA-REG`, phase 15).
 //!
-//!   * **SYSTEM is solid.** The anchor is the kernel image itself.
-//!     Modifying a `.dsa` shipped with the OS changes its digest, which
-//!     is no longer in the table: the binary is refused. Forging the
-//!     table assumes modifying the kernel, which is another problem
-//!     (verified boot, a later phase).
-//!   * **SELF is honest.** The spec expects nothing more of it than an
-//!     integrity check doubled with a warning at install time.
-//!   * **ENTERPRISE is incomplete.** The authority -> binary chain is
-//!     established by a hash whose input is public: anyone able to read
-//!     the format can forge a valid certificate. The structure, the root
-//!     store and the verification walk are in place; what is missing is
-//!     the Ed25519 primitive that would make the binding unforgeable.
-//!     Reservation recorded in the roadmap.
+//! What stays out of reach: revocation (no list is consulted) and a chain
+//! longer than one level (the authority signs the binary directly). The
+//! validity dates are compared with the hardware clock when it is known.
 //!
-//! Nothing here may be presented to the user as proof of authenticity
-//! until that primitive exists.
+//! ## The demonstration authority
+//!
+//! The self-tests need an authority whose secret they hold, to sign the
+//! samples they check. Its seed is drawn from the kernel's generator at
+//! first use, and lives in memory only: nothing outside this boot can sign
+//! with it, which a seed written in the source would have allowed --
+//! re-creating, with a real signature, exactly the forgeable authority
+//! this version removed.
 
 use alloc::string::String;
 
@@ -63,10 +68,10 @@ pub struct SystemEntry {
 /// this one, purely for the needs of the self-test.
 static SYSTEM_DIGESTS: &[SystemEntry] = &[];
 
-/// ENTERPRISE roots of trust: digests of the authority keys.
+/// ENTERPRISE roots of trust: the Ed25519 public keys of the authorities.
 ///
-/// Same remark as above -- empty by default, fed by the dynamic store for
-/// the self-test.
+/// Same remark as above -- empty by default; fed at boot by
+/// `/sys/config/autorites.cfg` (`load_authorities`) and by the self-tests.
 static ENTERPRISE_ROOTS: &[SystemEntry] = &[];
 
 // ------------------------------------------------------------
@@ -160,7 +165,7 @@ pub fn register_system_digest(digest: [u8; DIGEST_SIZE]) -> bool {
     inserted
 }
 
-/// Declares a key digest as an ENTERPRISE root of trust.
+/// Declares an Ed25519 public key as an ENTERPRISE root of trust.
 pub fn register_enterprise_root(digest: [u8; DIGEST_SIZE]) -> bool {
     let inserted = {
         let mut store = STORE.lock();
@@ -272,13 +277,15 @@ pub fn authenticity_digest(header: &BinaryHeader, data: &[u8]) -> [u8; DIGEST_SI
 /// Readable content of a certificate block.
 #[derive(Debug, Clone)]
 pub struct Certificate {
+    pub version: u16,
     pub authority: String,
     pub subject: String,
     pub legal_id: String,
     pub valid_from: u64,
     pub valid_until: u64,
-    pub authority_key: [u8; DIGEST_SIZE],
-    pub binding: [u8; DIGEST_SIZE],
+    /// Ed25519 public key of the authority.
+    pub authority_key: [u8; 32],
+    pub signature: [u8; 64],
 }
 
 fn read_cert_name(block: &[u8], offset: usize) -> String {
@@ -287,7 +294,8 @@ fn read_cert_name(block: &[u8], offset: usize) -> String {
     String::from(core::str::from_utf8(&raw[..len]).unwrap_or("?"))
 }
 
-/// Decodes the certificate block of a binary, if it carries one.
+/// Decodes the certificate block of a binary, if it carries one (any
+/// version: `verify` refuses the obsolete ones by name).
 pub fn read_certificate(header: &BinaryHeader, data: &[u8]) -> Option<Certificate> {
     if !header.has_certificate() {
         return None;
@@ -297,42 +305,146 @@ pub fn read_certificate(header: &BinaryHeader, data: &[u8]) -> Option<Certificat
         return None;
     }
     let block = &data[base..base + CERT_SIZE];
-
-    if block[..4] != CERT_MAGIC || read_u16(block, cert_offsets::VERSION) != CERT_VERSION {
+    let version = read_u16(block, cert_offsets::VERSION);
+    if block[..4] != CERT_MAGIC || version == 0 || version > CERT_VERSION {
         return None;
     }
 
-    let mut authority_key = [0u8; DIGEST_SIZE];
-    authority_key.copy_from_slice(
-        &block[cert_offsets::AUTHORITY_KEY..cert_offsets::AUTHORITY_KEY + DIGEST_SIZE],
-    );
-    let mut binding = [0u8; DIGEST_SIZE];
-    binding.copy_from_slice(&block[cert_offsets::BINDING..cert_offsets::BINDING + DIGEST_SIZE]);
+    let mut authority_key = [0u8; 32];
+    authority_key.copy_from_slice(&block[cert_offsets::AUTHORITY_KEY..cert_offsets::AUTHORITY_KEY + 32]);
+    let mut signature = [0u8; 64];
+    signature.copy_from_slice(&block[cert_offsets::SIGNATURE..cert_offsets::SIGNATURE + 64]);
 
     Some(Certificate {
+        version,
         authority: read_cert_name(block, cert_offsets::AUTHORITY),
         subject: read_cert_name(block, cert_offsets::SUBJECT),
         legal_id: read_cert_name(block, cert_offsets::LEGAL_ID),
         valid_from: read_u64(block, cert_offsets::VALID_FROM),
         valid_until: read_u64(block, cert_offsets::VALID_UNTIL),
         authority_key,
-        binding,
+        signature,
     })
 }
 
-/// Expected binding between an authority and a binary.
-///
-/// `SHA-256(authority key || authenticity digest)`. A certificate is
-/// therefore attached to one precise binary: copying it onto another
-/// application does not produce a valid binding.
-pub fn expected_binding(
-    authority_key: &[u8; DIGEST_SIZE],
-    digest: &[u8; DIGEST_SIZE],
-) -> [u8; DIGEST_SIZE] {
-    let mut hasher = sha256::Sha256::new();
-    hasher.update(authority_key);
-    hasher.update(digest);
-    hasher.finish()
+// ============================================================
+//  15.0.3 -- ENTERPRISE signatures (Ed25519)
+// ============================================================
+
+/// Domain tags: what kind of object a signature vouches for.
+pub mod domain {
+    pub const BINARY: &[u8] = b"NOVA-BIN\0";
+    pub const PACKAGE: &[u8] = b"NOVA-SPM\0";
+    pub const MODULE: &[u8] = b"NOVA-KMD\0";
+    pub const REGISTRY: &[u8] = b"NOVA-REG\0";
+}
+
+/// The message an authority signs: a domain tag, then the parts.
+pub fn enterprise_message(tag: &[u8], parts: &[&[u8]]) -> alloc::vec::Vec<u8> {
+    let mut message = alloc::vec::Vec::from(tag);
+    for part in parts {
+        message.extend_from_slice(part);
+    }
+    message
+}
+
+/// Checks an ENTERPRISE signature: the key must be a root of the store,
+/// and the signature its own on `message`.
+pub fn check_enterprise(key: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> Result<(), Reason> {
+    if !is_known_root(key) {
+        return Err(Reason::UntrustedAuthority);
+    }
+    if !crate::crypto::ed25519::verify(key, message, signature) {
+        return Err(Reason::BindingMismatch);
+    }
+    Ok(())
+}
+
+/// Days since 2000-01-01 by the hardware clock, or `None` when unknown --
+/// the unit of the validity fields.
+pub fn today() -> Option<u64> {
+    const EPOCH_2000: u64 = 946_684_800;
+    crate::rtc::now().filter(|now| *now > EPOCH_2000).map(|now| (now - EPOCH_2000) / 86_400)
+}
+
+/// The message of a binary's certificate: tag, signed fields, digest.
+pub fn certificate_message(block: &[u8], digest: &[u8; DIGEST_SIZE]) -> alloc::vec::Vec<u8> {
+    enterprise_message(domain::BINARY, &[&block[..cert_offsets::SIGNED_END], digest])
+}
+
+/// Signs the certificate block of a binary in place (version 2): sets the
+/// key and the signature from the authority's seed. The other fields must
+/// be written already, `digest` be the binary's authenticity digest.
+pub fn sign_certificate(block: &mut [u8], digest: &[u8; DIGEST_SIZE], seed: &[u8; 32]) {
+    let key = crate::crypto::ed25519::public_key(seed);
+    block[cert_offsets::VERSION..cert_offsets::VERSION + 2].copy_from_slice(&CERT_VERSION.to_le_bytes());
+    block[cert_offsets::AUTHORITY_KEY..cert_offsets::AUTHORITY_KEY + 32].copy_from_slice(&key);
+    let message = certificate_message(block, digest);
+    let signature = crate::crypto::ed25519::sign(seed, &message);
+    block[cert_offsets::SIGNATURE..cert_offsets::SIGNATURE + 64].copy_from_slice(&signature);
+}
+
+/// The demonstration authority's seed: drawn once per boot from the
+/// kernel's generator, kept in memory only (see the module comment).
+pub fn demo_authority_seed() -> [u8; 32] {
+    static SEED: crate::vga::SpinLock<Option<[u8; 32]>> = crate::vga::SpinLock::new(None);
+    let mut seed = SEED.lock();
+    if let Some(seed) = *seed {
+        return seed;
+    }
+    let mut fresh = [0u8; 32];
+    crate::random::fill(&mut fresh);
+    *seed = Some(fresh);
+    fresh
+}
+
+/// The demonstration authority's public key.
+pub fn demo_authority_key() -> [u8; 32] {
+    static KEY: crate::vga::SpinLock<Option<[u8; 32]>> = crate::vga::SpinLock::new(None);
+    if let Some(key) = *KEY.lock() {
+        return key;
+    }
+    let key = crate::crypto::ed25519::public_key(&demo_authority_seed());
+    *KEY.lock() = Some(key);
+    key
+}
+
+/// File of the authorities an administrator trusts: `name key-hex` per
+/// line, `#` for comments (spec 17: `/sys/config/`, writable by admins).
+pub const AUTHORITIES_PATH: &str = "/sys/config/autorites.cfg";
+
+/// Loads `AUTHORITIES_PATH` into the root store. Returns the number of
+/// keys registered. A malformed line is reported and skipped.
+pub fn load_authorities() -> usize {
+    let Ok(bytes) = crate::fs::read_file(AUTHORITIES_PATH, crate::fs::perm::Credentials::kernel()) else {
+        return 0;
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let mut loaded = 0;
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        let hex = line.rsplit(char::is_whitespace).next().unwrap_or("");
+        match parse_key(hex) {
+            Some(key) => {
+                if register_enterprise_root(key) {
+                    loaded += 1;
+                }
+            }
+            None => crate::serial_println!("[sign] {} : ligne ignoree (cle de 64 chiffres attendue)", AUTHORITIES_PATH),
+        }
+    }
+    loaded
+}
+
+/// A 32-byte key written as 64 hexadecimal digits.
+pub fn parse_key(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 || !hex.is_ascii() {
+        return None;
+    }
+    let mut key = [0u8; 32];
+    for (index, byte) in key.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(key)
 }
 
 // ============================================================
@@ -365,8 +477,12 @@ pub enum Reason {
     MalformedCertificate,
     /// The issuing authority is not in the root store.
     UntrustedAuthority,
-    /// The certificate does not attach to this binary.
+    /// The signature is not the authority's on this binary.
     BindingMismatch,
+    /// A version 1 certificate: a hash of public data, not a signature.
+    ObsoleteCertificate,
+    /// Outside the validity dates of the certificate.
+    CertificateExpired,
     /// The type declared by the certificate contradicts that of the header.
     CertificateTypeMismatch,
     /// Format/signature combination forbidden by spec 3.4.
@@ -380,7 +496,9 @@ impl Reason {
             Reason::UnknownSystemBinary => "signature SYSTEM revendiquee, empreinte inconnue",
             Reason::MalformedCertificate => "bloc de certificat absent ou mal forme",
             Reason::UntrustedAuthority => "autorite emettrice inconnue du magasin",
-            Reason::BindingMismatch => "le certificat ne se rattache pas a ce binaire",
+            Reason::BindingMismatch => "la signature de l'autorite ne couvre pas ce binaire",
+            Reason::ObsoleteCertificate => "certificat v1 sans signature asymetrique - refuse",
+            Reason::CertificateExpired => "certificat hors de sa periode de validite",
             Reason::CertificateTypeMismatch => "le certificat contredit le type du header",
             Reason::ForbiddenCombination => "combinaison format/signature interdite (spec 3.4)",
         }
@@ -473,19 +591,22 @@ pub fn verify(header: &BinaryHeader, data: &[u8]) -> Verdict {
             let Some(cert) = read_certificate(header, data) else {
                 return Verdict::Rejected(Reason::MalformedCertificate);
             };
+            if cert.version < CERT_VERSION {
+                return Verdict::Rejected(Reason::ObsoleteCertificate);
+            }
 
-            let block = &data[header.cert_offset as usize..];
+            let base = header.cert_offset as usize;
+            let block = &data[base..base + CERT_SIZE];
             if read_u16(block, cert_offsets::SIGNATURE_TYPE) != SignatureType::Enterprise as u16 {
                 return Verdict::Rejected(Reason::CertificateTypeMismatch);
             }
-            if !is_known_root(&cert.authority_key) {
-                return Verdict::Rejected(Reason::UntrustedAuthority);
+            if let Err(reason) = check_enterprise(&cert.authority_key, &certificate_message(block, &digest), &cert.signature) {
+                return Verdict::Rejected(reason);
             }
-            if !sha256::equal(
-                &cert.binding,
-                &expected_binding(&cert.authority_key, &digest),
-            ) {
-                return Verdict::Rejected(Reason::BindingMismatch);
+            if let Some(today) = today()
+                && (today < cert.valid_from || today > cert.valid_until)
+            {
+                return Verdict::Rejected(Reason::CertificateExpired);
             }
             Verdict::Enterprise
         }
