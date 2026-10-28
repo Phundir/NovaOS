@@ -72,6 +72,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+mod ext;
+
 // ============================================================
 //  Registers
 // ============================================================
@@ -460,6 +462,10 @@ const CONDITIONS: &[(&str, u8)] = &[
     ("jge", 0x8D),
     ("jle", 0x8E),
     ("jg", 0x8F),
+    ("js", 0x88),
+    ("jns", 0x89),
+    ("jp", 0x8A),
+    ("jnp", 0x8B),
 ];
 
 /// State of one pass.
@@ -738,6 +744,10 @@ fn emit_line(
         _ => {}
     }
 
+    if mnemonic == "align" {
+        return ext::align(state, number, operands);
+    }
+
     // --- data directives ---
     if let Some(width) = data_width(mnemonic) {
         if state.section == Section::Bss {
@@ -771,6 +781,11 @@ fn emit_line(
 
     if state.section != Section::Text {
         return Err(AsmError::UnknownMnemonic(number, String::from(mnemonic)));
+    }
+    // The forms 16.6 added for the C compiler (`ext.rs`); the others
+    // fall through, encoded as they always were.
+    if let Some(result) = ext::emit(state, number, mnemonic, operands) {
+        return result;
     }
     state.instructions += 1;
 

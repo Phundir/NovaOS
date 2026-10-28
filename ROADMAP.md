@@ -46,7 +46,8 @@ cochées sur 229.** Les sept restantes sont toutes en phase 9, et elles
 sont nommées juste en dessous. Il ne reste donc **plus de case à ouvrir**
 — seulement des limites à lever, listées phase par phase plus bas.
 
-**Prochaine étape : 16.6, compilateur C** ; la phase 15 et les
+**Prochaine étape : 16.6, compilateur C** (commencée, en pause : voir
+16.6 plus bas) ; la phase 15 et les
 étapes 16.0 (shell, terminal, recovery), 16.1 (moteur JavaScript), 16.2
 (scripts du navigateur intégré), 16.3 (`dev interpret` pour Node et
 Bun, modules ES, TypeScript), 16.4 (débogueur) et 16.5 (interprète
@@ -4323,6 +4324,21 @@ sur l'hôte :
 #### 16.6 C (9.5.2)
 - [ ] 16.6.1 Compilateur d'un sous-ensemble défini de C vers x86_64, binaire
   Nova qui s'exécute en ring 3 ; C++ refusé nommément
+
+**État de 16.6 au 28 octobre 2026 : en cours, non branchée, case non
+cochée.** Mis en pause à la demande de l'utilisateur.
+- Fait et vérifié : l'assembleur du SDK (`sdk/asm/`, scindé en `mod.rs`
+  et `ext.rs`) reçoit les formes dont un compilateur C a besoin (accès
+  8/16/32 bits, `movsx`/`movzx`/`movsxd`, `lea` sur la pile, `setcc`,
+  `test`, appels et sauts par registre, `rep movsb`/`stosb`, SSE2
+  scalaire, `align`). 85 encodages identiques à GNU `as`
+  (`tools/cchost --asm`) ; `make test` vert, 425 vérifications du SDK.
+- Écrit, **jamais compilé ni éprouvé** : `src/sdk/cc/` (lexer,
+  préprocesseur, analyse typée, génération, bibliothèque C `lib/`) et le
+  banc `tools/cchost`. Le noyau ne référence pas ce module : il est
+  inerte. Reste à faire : le faire compiler, le corpus `tests/c/` comparé
+  à gcc, l'intégration à `dev build`/`dev run`/`dev interpret`, la
+  capture de la sortie des programmes, l'autotest et son verdict.
 #### 16.7 Java (9.5.4)
 - [ ] 16.7.1 JVM minimale : fichiers `.class`, interprète de bytecode,
   `java.lang` réduit
