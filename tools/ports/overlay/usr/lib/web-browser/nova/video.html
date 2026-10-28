@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Essai video</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0f1115; color: #e6e9ef; font-family: sans-serif; }
+  video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+</style></head>
+<body>
+<!-- Video check of the Nova edition: a click plays a 10 s clip (image and
+     sound; a click because sound needs a gesture). ?mp4 for H.264/AAC, ?720 for
+     VP9 at 1280x720, ?1080 for VP9 at 1920x1080, VP9/Opus 854x480 otherwise. The title reports the frames shown and dropped,
+     for the serial console of the tests. -->
+<video id="v" playsinline></video>
+<script>
+const v = document.getElementById("v");
+const mp4 = location.search.includes("mp4");
+const hd = location.search.includes("720");
+const fhd = location.search.includes("1080");
+v.src = mp4 ? "essai.mp4" : fhd ? "essai1080.webm" : hd ? "essai720.webm" : "essai.webm";
+document.body.onclick = () => { v.currentTime = 0; v.play(); };
+setInterval(() => {
+  const q = v.getVideoPlaybackQuality();
+  document.title = (mp4 ? "h264" : fhd ? "vp9-1080p" : hd ? "vp9-720p" : "vp9") + " t=" + v.currentTime.toFixed(1) +
+    " images " + q.totalVideoFrames + " perdues " + q.droppedVideoFrames +
+    (v.error ? " erreur " + v.error.code : "") + (v.ended ? " fin" : "");
+}, 1000);
+</script>
+</body></html>

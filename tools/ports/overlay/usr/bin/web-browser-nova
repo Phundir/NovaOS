@@ -1,0 +1,22 @@
+#!/bin/sh
+# Starts the Web Browser in a Nova window (/dev/nova-gui), with a profile
+# in /home/nova -- the session's own space in the Nova tree, so bookmarks,
+# history and cookies survive the shutdown.
+export HOME=/home/nova
+export MOZ_HEADLESS=1
+export NOVA_DISPLAY=1
+export MOZ_CRASHREPORTER_DISABLE=1
+export MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1
+export MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 MOZ_DISABLE_UTILITY_SANDBOX=1
+PROFILE=$HOME/profile
+# First launch of the session: the profile prepared with the image
+# (tools/ports/webroot.sh), its first-run work already done.
+mkdir -p "$HOME"
+if [ ! -d "$PROFILE" ] && [ -d /usr/lib/web-browser/nova/profile ]; then
+    cp -a /usr/lib/web-browser/nova/profile "$PROFILE"
+fi
+if [ ! -d "$PROFILE/chrome" ]; then
+    mkdir -p "$PROFILE/chrome"
+    cp /usr/lib/web-browser/nova/chrome/userChrome.css "$PROFILE/chrome/"
+fi
+exec /usr/lib/web-browser/web-browser --no-remote --profile "$PROFILE" "$@"

@@ -1,0 +1,33 @@
+[package]
+name = "NovaOs"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "nova_os"
+crate-type = ["staticlib"]
+
+[dependencies]
+
+# `--cfg nova_pile` (make PILE=1) : la pile d'appels a la panique, par les
+# pointeurs de cadre. Declare ici pour que le lint `unexpected_cfgs` le
+# connaisse.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(nova_pile)'] }
+
+[profile.dev]
+panic = "abort"
+# Optimise, mais garde les filets de securite du mode debug : un calcul qui
+# deborde panique au lieu de boucler en silence, et les `debug_assert!`
+# restent actifs. Le code non optimise faisait tourner le peintre, les
+# glyphes et les copies d'ecran cinq a vingt fois plus lentement -- c'etait
+# la lenteur des applications. Voir DECISIONS.md, "Le noyau se compile
+# optimise".
+opt-level = 2
+debug-assertions = true
+overflow-checks = true
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = true

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Essai de chargement</title>
+<style>
+  html, body { margin: 0; background: #0f1115; color: #e6e9ef; font-family: sans-serif; }
+  main { max-width: 60em; margin: 2em auto; line-height: 1.5; }
+</style></head>
+<body>
+<!-- Load-time check of the Nova edition. The title reports the page's own
+     navigation timing, in milliseconds from the start of the navigation:
+     response received, DOMContentLoaded done, load done. The serial
+     console prints each title change with its delay from the Enter key,
+     so the two together split the time between the browser's chrome
+     (key to navigation start) and the page itself. The same file is
+     served from the host over HTTP (tools/ports/serve-test-pages.sh) to
+     measure a page that crosses the network stack without the Internet's
+     round trips. -->
+<main>
+<h1>Nova OS - essai de chargement</h1>
+<p id="p">Une page courte : un titre, un paragraphe, une feuille de style et un script.</p>
+</main>
+<script>
+addEventListener("load", () => setTimeout(() => {
+  const n = performance.getEntriesByType("navigation")[0];
+  const ms = (v) => Math.round(v);
+  document.title = "perf rep=" + ms(n.responseEnd) + " dcl=" + ms(n.domContentLoadedEventEnd) +
+    " load=" + ms(n.loadEventEnd);
+}, 0));
+</script>
+</body></html>

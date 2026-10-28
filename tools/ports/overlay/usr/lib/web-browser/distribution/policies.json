@@ -1,0 +1,14 @@
+{
+  "policies": {
+    "SearchEngines": { "Default": "DuckDuckGo" },
+    "DisableTelemetry": true,
+    "DisableFirefoxStudies": true,
+    "DisablePocket": true,
+    "DisableFirefoxAccounts": true,
+    "DontCheckDefaultBrowser": true,
+    "OverrideFirstRunPage": "",
+    "OverridePostUpdatePage": "",
+    "NoDefaultBookmarks": true,
+    "RequestedLocales": ["fr", "en-US"]
+  }
+}

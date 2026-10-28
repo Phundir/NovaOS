@@ -1,0 +1,903 @@
+diff -ruN a/widget/headless/HeadlessCompositorWidget.cpp b/widget/headless/HeadlessCompositorWidget.cpp
+--- a/widget/headless/HeadlessCompositorWidget.cpp	2026-09-22 13:39:13.664725134 +0200
++++ b/widget/headless/HeadlessCompositorWidget.cpp	2026-09-22 13:39:13.666725145 +0200
+@@ -6,6 +6,8 @@
+ #include "mozilla/widget/PlatformWidgetTypes.h"
+ #include "HeadlessCompositorWidget.h"
+ #include "VsyncDispatcher.h"
++#include "NovaDisplay.h"
++#include "mozilla/gfx/2D.h"
+ 
+ namespace mozilla {
+ namespace widget {
+@@ -38,6 +40,27 @@
+   return *size;
+ }
+ 
++already_AddRefed<gfx::DrawTarget>
++HeadlessCompositorWidget::StartRemoteDrawingInRegion(
++    const LayoutDeviceIntRegion& aInvalidRegion) {
++  RefPtr<NovaDisplay> display = NovaDisplay::For(mWidget);
++  if (!display) {
++    return nullptr;
++  }
++  RefPtr<gfx::DrawTarget> dt = gfx::Factory::CreateDrawTargetForData(
++      gfx::BackendType::SKIA, display->Pixels(),
++      gfx::IntSize(display->Width(), display->Height()), display->Stride(),
++      gfx::SurfaceFormat::B8G8R8A8);
++  return dt.forget();
++}
++
++void HeadlessCompositorWidget::EndRemoteDrawingInRegion(
++    gfx::DrawTarget* aDrawTarget, const LayoutDeviceIntRegion& aInvalidRegion) {
++  if (RefPtr<NovaDisplay> display = NovaDisplay::For(mWidget)) {
++    display->Present();
++  }
++}
++
+ uintptr_t HeadlessCompositorWidget::GetWidgetKey() {
+   return reinterpret_cast<uintptr_t>(mWidget);
+ }
+diff -ruN a/widget/headless/HeadlessCompositorWidget.h b/widget/headless/HeadlessCompositorWidget.h
+--- a/widget/headless/HeadlessCompositorWidget.h	2026-09-22 13:39:13.664725134 +0200
++++ b/widget/headless/HeadlessCompositorWidget.h	2026-09-22 13:39:13.666725145 +0200
+@@ -35,6 +35,13 @@
+ 
+   void ObserveVsync(VsyncObserver* aObserver) override;
+ 
++  // Nova OS: the window's mapped pixels are the draw target.
++  already_AddRefed<gfx::DrawTarget> StartRemoteDrawingInRegion(
++      const LayoutDeviceIntRegion& aInvalidRegion) override;
++  void EndRemoteDrawingInRegion(
++      gfx::DrawTarget* aDrawTarget,
++      const LayoutDeviceIntRegion& aInvalidRegion) override;
++
+   // CompositorWidgetDelegate Overrides
+ 
+   HeadlessCompositorWidget* AsHeadlessCompositorWidget() override {
+diff -ruN a/widget/headless/HeadlessWidget.cpp b/widget/headless/HeadlessWidget.cpp
+--- a/widget/headless/HeadlessWidget.cpp	2026-09-22 13:39:13.664725134 +0200
++++ b/widget/headless/HeadlessWidget.cpp	2026-09-22 13:39:13.665725140 +0200
+@@ -20,6 +20,9 @@
+ #include "mozilla/widget/Screen.h"
+ #include "nsIScreen.h"
+ #include "HeadlessKeyBindings.h"
++#include "NovaDisplay.h"
++#include "nsIRollupListener.h"
++#include "WidgetUtils.h"
+ 
+ using namespace mozilla;
+ using namespace mozilla::gfx;
+@@ -96,6 +99,12 @@
+   LOG(("HeadlessWidget::Destroy [%p]\n", (void*)this));
+   mDestroyed = true;
+ 
++  if (mNova) {
++    mNova->Close();
++    mNova = nullptr;
++  }
++  mNovaRoot = nullptr;
++
+   if (sActiveWindows) {
+     int32_t index = sActiveWindows->IndexOf(this);
+     if (index != -1) {
+@@ -176,9 +185,298 @@
+     RaiseWindow();
+   }
+ 
++  // Nova OS: a shown top-level window gets a window of the compositor; a
++  // shown popup is laid over the window of the active top-level one.
++  if (NovaDisplay::Enabled()) {
++    bool topLevel = mWindowType == WindowType::TopLevel ||
++                    mWindowType == WindowType::Dialog;
++    if (aState && !mNova && topLevel) {
++      mNova = NovaDisplay::Open(this, mBounds.Width(), mBounds.Height());
++    } else if (aState && !mNova && mWindowType == WindowType::Popup) {
++      RefPtr<HeadlessWidget> root = GetActiveWindow();
++      if (root && root != this && root->mNova) {
++        mNovaRoot = root;
++        LayoutDeviceIntPoint at =
++            WidgetToScreenOffset() - root->WidgetToScreenOffset();
++        mNova = NovaDisplay::AttachPopup(root->mNova, this, at.x, at.y,
++                                         mBounds.Width(), mBounds.Height());
++      }
++    } else if (!aState && mNova && mNovaRoot) {
++      mNova->Close();
++      mNova = nullptr;
++      mNovaRoot = nullptr;
++    }
++  }
++
+   ApplySizeModeSideEffects();
+ }
+ 
++nsresult HeadlessWidget::SetTitle(const nsAString& title) {
++  if (mNova) {
++    mNova->SetTitle(title);
++  }
++  return NS_OK;
++}
++
++void HeadlessWidget::SetCursor(const Cursor& aCursor) {
++  nsBaseWidget::SetCursor(aCursor);
++  if (!mNova) {
++    return;
++  }
++  uint32_t shape = 0;
++  switch (aCursor.mDefaultCursor) {
++    case eCursor_hyperlink:
++      shape = 1;
++      break;
++    case eCursor_select:
++    case eCursor_vertical_text:
++      shape = 2;
++      break;
++    default:
++      break;
++  }
++  mNova->SetCursor(shape);
++}
++
++// ------------------------------------------------------------
++//  Nova OS input
++// ------------------------------------------------------------
++
++namespace {
++
++// The keyboard of a Nova window has no input method: every key is a key.
++// TextEventDispatcher needs a listener to start a native transaction; this
++// one agrees to everything and asks for nothing.
++class NovaKeyListener final : public TextEventDispatcherListener {
++ public:
++  NS_DECL_ISUPPORTS
++  NS_IMETHOD NotifyIME(TextEventDispatcher*, const IMENotification&) override {
++    return NS_OK;
++  }
++  NS_IMETHOD_(IMENotificationRequests) GetIMENotificationRequests() override {
++    return IMENotificationRequests();
++  }
++  NS_IMETHOD_(void) OnRemovedFrom(TextEventDispatcher*) override {}
++  NS_IMETHOD_(void)
++  WillDispatchKeyboardEvent(TextEventDispatcher*, WidgetKeyboardEvent&,
++                            uint32_t, void*) override {}
++
++ private:
++  ~NovaKeyListener() = default;
++};
++
++NS_IMPL_ISUPPORTS(NovaKeyListener, TextEventDispatcherListener,
++                  nsISupportsWeakReference)
++
++// Nova key records carry the scan code of set 1 and, for printable keys,
++// the character. Keys without a character are recognised by their code.
++struct NovaKey {
++  uint32_t scancode;
++  uint32_t keyCode;
++  KeyNameIndex name;
++};
++
++const NovaKey kNovaKeys[] = {
++    {0x01, NS_VK_ESCAPE, KEY_NAME_INDEX_Escape},
++    {0x0E, NS_VK_BACK, KEY_NAME_INDEX_Backspace},
++    {0x0F, NS_VK_TAB, KEY_NAME_INDEX_Tab},
++    {0x1C, NS_VK_RETURN, KEY_NAME_INDEX_Enter},
++    {0x3B, NS_VK_F1, KEY_NAME_INDEX_F1},
++    {0x3C, NS_VK_F2, KEY_NAME_INDEX_F2},
++    {0x3D, NS_VK_F3, KEY_NAME_INDEX_F3},
++    {0x3E, NS_VK_F4, KEY_NAME_INDEX_F4},
++    {0x3F, NS_VK_F5, KEY_NAME_INDEX_F5},
++    {0x40, NS_VK_F6, KEY_NAME_INDEX_F6},
++    {0x41, NS_VK_F7, KEY_NAME_INDEX_F7},
++    {0x42, NS_VK_F8, KEY_NAME_INDEX_F8},
++    {0x43, NS_VK_F9, KEY_NAME_INDEX_F9},
++    {0x44, NS_VK_F10, KEY_NAME_INDEX_F10},
++    {0x57, NS_VK_F11, KEY_NAME_INDEX_F11},
++    {0x58, NS_VK_F12, KEY_NAME_INDEX_F12},
++    {0x47, NS_VK_HOME, KEY_NAME_INDEX_Home},
++    {0x48, NS_VK_UP, KEY_NAME_INDEX_ArrowUp},
++    {0x49, NS_VK_PAGE_UP, KEY_NAME_INDEX_PageUp},
++    {0x4B, NS_VK_LEFT, KEY_NAME_INDEX_ArrowLeft},
++    {0x4D, NS_VK_RIGHT, KEY_NAME_INDEX_ArrowRight},
++    {0x4F, NS_VK_END, KEY_NAME_INDEX_End},
++    {0x50, NS_VK_DOWN, KEY_NAME_INDEX_ArrowDown},
++    {0x51, NS_VK_PAGE_DOWN, KEY_NAME_INDEX_PageDown},
++    {0x52, NS_VK_INSERT, KEY_NAME_INDEX_Insert},
++    {0x53, NS_VK_DELETE, KEY_NAME_INDEX_Delete},
++};
++
++Modifiers NovaModifiers(uint32_t aBits) {
++  Modifiers m = 0;
++  if (aBits & 1) m |= MODIFIER_SHIFT;
++  if (aBits & 2) m |= MODIFIER_CONTROL;
++  if (aBits & 4) m |= MODIFIER_ALT;
++  if (aBits & 8) m |= MODIFIER_META;
++  return m;
++}
++
++}  // namespace
++
++TextEventDispatcherListener*
++HeadlessWidget::GetNativeTextEventDispatcherListener() {
++  if (!mNova) {
++    return nsBaseWidget::GetNativeTextEventDispatcherListener();
++  }
++  if (!mNovaKeys) {
++    mNovaKeys = new NovaKeyListener();
++  }
++  return mNovaKeys;
++}
++
++void HeadlessWidget::DispatchNovaKey(const NovaEvent& aEvent) {
++  bool down = aEvent.type == NOVA_EV_KEY_DOWN;
++  uint32_t keyCode = 0;
++  KeyNameIndex name = KEY_NAME_INDEX_USE_STRING;
++  char16_t ch = 0;
++  // Ctrl and Alt combinations still carry their letter: Gecko's
++  // shortcuts (Ctrl+L, Ctrl+T) look at the key value.
++  if (aEvent.character >= 0x20 && aEvent.character < 0xD800 &&
++      aEvent.character != 0x7F) {
++    ch = char16_t(aEvent.character);
++    keyCode = WidgetUtils::ComputeKeyCodeFromChar(ch);
++  } else {
++    for (const NovaKey& k : kNovaKeys) {
++      if (k.scancode == aEvent.code) {
++        keyCode = k.keyCode;
++        name = k.name;
++        break;
++      }
++    }
++    if (aEvent.character == 0x0A) {
++      keyCode = NS_VK_RETURN;
++      name = KEY_NAME_INDEX_Enter;
++    } else if (aEvent.character == 0x09) {
++      keyCode = NS_VK_TAB;
++      name = KEY_NAME_INDEX_Tab;
++    }
++    if (!keyCode) {
++      return;
++    }
++  }
++  RefPtr<TextEventDispatcher> dispatcher = GetTextEventDispatcher();
++  if (NS_FAILED(dispatcher->BeginNativeInputTransaction())) {
++    return;
++  }
++  WidgetKeyboardEvent event(true, down ? eKeyDown : eKeyUp, this);
++  event.mKeyCode = keyCode;
++  event.mKeyNameIndex = name;
++  if (name == KEY_NAME_INDEX_USE_STRING) {
++    event.mKeyValue = ch;
++  }
++  event.mCodeNameIndex = CODE_NAME_INDEX_UNKNOWN;
++  event.mModifiers = NovaModifiers(aEvent.modifiers);
++  event.mLocation = eKeyLocationStandard;
++  event.mTimeStamp = TimeStamp::Now();
++  nsEventStatus status = nsEventStatus_eIgnore;
++  if (!dispatcher->DispatchKeyboardEvent(event.mMessage, event, status) ||
++      !down || mDestroyed || status == nsEventStatus_eConsumeNoDefault) {
++    return;
++  }
++  WidgetKeyboardEvent press(true, eKeyPress, this);
++  press.AssignKeyEventData(event, false);
++  dispatcher->MaybeDispatchKeypressEvents(press, status);
++}
++
++void HeadlessWidget::HandleNovaPopupEvent(const NovaEvent& aEvent,
++                                          LayoutDeviceIntPoint aScreen) {
++  if (mDestroyed) {
++    return;
++  }
++  switch (aEvent.type) {
++    case NOVA_EV_MOTION:
++      SynthesizeNativeMouseEvent(aScreen, NativeMouseMessage::Move,
++                                 MouseButton::eNotPressed,
++                                 nsIWidget::Modifiers::NO_MODIFIERS, nullptr);
++      break;
++    case NOVA_EV_BUTTON_DOWN:
++    case NOVA_EV_BUTTON_UP:
++      SynthesizeNativeMouseEvent(aScreen,
++                                 aEvent.type == NOVA_EV_BUTTON_DOWN
++                                     ? NativeMouseMessage::ButtonDown
++                                     : NativeMouseMessage::ButtonUp,
++                                 MouseButton::ePrimary,
++                                 nsIWidget::Modifiers::NO_MODIFIERS, nullptr);
++      break;
++    case NOVA_EV_WHEEL:
++      SynthesizeNativeMouseScrollEvent(aScreen, 0, 0, double(aEvent.value), 0,
++                                       0, 0, nullptr);
++      break;
++    default:
++      break;
++  }
++}
++
++void HeadlessWidget::HandleNovaEvent(const NovaEvent& aEvent) {
++  if (mDestroyed) {
++    return;
++  }
++  LayoutDeviceIntPoint point(aEvent.x, aEvent.y);
++  point += WidgetToScreenOffset();
++  bool mouse = aEvent.type == NOVA_EV_MOTION ||
++               aEvent.type == NOVA_EV_BUTTON_DOWN ||
++               aEvent.type == NOVA_EV_BUTTON_UP || aEvent.type == NOVA_EV_WHEEL;
++  if (mouse && mNova) {
++    // A popup under the pointer takes the mouse; its own widget turns
++    // the screen point back into its coordinates.
++    int32_t lx, ly;
++    if (RefPtr<HeadlessWidget> popup = mNova->PopupAt(aEvent.x, aEvent.y, &lx, &ly)) {
++      NovaEvent local = aEvent;
++      popup->HandleNovaPopupEvent(local, point);
++      return;
++    }
++    // A press outside every popup closes them, as a window manager would.
++    if (aEvent.type == NOVA_EV_BUTTON_DOWN && mNova->HasPopups()) {
++      if (nsIRollupListener* rollup = nsBaseWidget::GetActiveRollupListener()) {
++        nsIRollupListener::RollupOptions options;
++        options.mFlush = nsIRollupListener::FlushViews::Yes;
++        options.mPoint = &point;
++        if (rollup->Rollup(options)) {
++          return;
++        }
++      }
++    }
++  }
++  switch (aEvent.type) {
++    case NOVA_EV_MOTION:
++      SynthesizeNativeMouseEvent(point, NativeMouseMessage::Move,
++                                 MouseButton::eNotPressed,
++                                 nsIWidget::Modifiers::NO_MODIFIERS, nullptr);
++      break;
++    case NOVA_EV_BUTTON_DOWN:
++    case NOVA_EV_BUTTON_UP:
++      SynthesizeNativeMouseEvent(point,
++                                 aEvent.type == NOVA_EV_BUTTON_DOWN
++                                     ? NativeMouseMessage::ButtonDown
++                                     : NativeMouseMessage::ButtonUp,
++                                 MouseButton::ePrimary,
++                                 nsIWidget::Modifiers::NO_MODIFIERS, nullptr);
++      break;
++    case NOVA_EV_WHEEL:
++      // A notch away from the user scrolls up: three lines, as on GTK.
++      SynthesizeNativeMouseScrollEvent(point, 0, 0, double(aEvent.value), 0,
++                                       0, 0, nullptr);
++      break;
++    case NOVA_EV_KEY_DOWN:
++    case NOVA_EV_KEY_UP:
++      DispatchNovaKey(aEvent);
++      break;
++    case NOVA_EV_RESIZE:
++      ResizeInternal(aEvent.x, aEvent.y, true);
++      break;
++    case NOVA_EV_CLOSE:
++      if (mWidgetListener) {
++        mWidgetListener->RequestWindowClose(this);
++      }
++      break;
++    default:
++      break;
++  }
++}
++
+ bool HeadlessWidget::IsVisible() const { return mVisible; }
+ 
+ void HeadlessWidget::SetFocus(Raise aRaise,
+@@ -227,6 +525,16 @@
+ 
+   mBounds.MoveTo(aX, aY);
+   NotifyWindowMoved(aX, aY);
++  UpdateNovaPopup();
++}
++
++void HeadlessWidget::UpdateNovaPopup() {
++  if (!mNova || !mNovaRoot) {
++    return;
++  }
++  LayoutDeviceIntPoint at =
++      WidgetToScreenOffset() - mNovaRoot->WidgetToScreenOffset();
++  mNova->SetRect(at.x, at.y, mBounds.Width(), mBounds.Height());
+ }
+ 
+ LayoutDeviceIntPoint HeadlessWidget::WidgetToScreenOffset() {
+@@ -262,6 +570,7 @@
+                                     bool aRepaint) {
+   ConstrainSize(&aWidth, &aHeight);
+   mBounds.SizeTo(LayoutDeviceIntSize(aWidth, aHeight));
++  UpdateNovaPopup();
+ 
+   if (mCompositorWidget) {
+     mCompositorWidget->NotifyClientSizeChanged(
+diff -ruN a/widget/headless/HeadlessWidget.h b/widget/headless/HeadlessWidget.h
+--- a/widget/headless/HeadlessWidget.h	2026-09-22 13:39:13.664725134 +0200
++++ b/widget/headless/HeadlessWidget.h	2026-09-22 13:39:13.665725140 +0200
+@@ -10,6 +10,8 @@
+ #include "nsBaseWidget.h"
+ #include "CompositorWidget.h"
+ #include "mozilla/dom/WheelEventBinding.h"
++#include "mozilla/TextEventDispatcherListener.h"
++#include "NovaDisplay.h"
+ 
+ // The various synthesized event values are hardcoded to avoid pulling
+ // in the platform specific widget code.
+@@ -73,10 +75,15 @@
+   void Invalidate(const LayoutDeviceIntRect& aRect) override {
+     // TODO: see if we need to do anything here.
+   }
+-  nsresult SetTitle(const nsAString& title) override {
+-    // Headless widgets have no title, so just ignore it.
+-    return NS_OK;
+-  }
++  nsresult SetTitle(const nsAString& title) override;
++  void SetCursor(const Cursor& aCursor) override;
++  TextEventDispatcherListener* GetNativeTextEventDispatcherListener() override;
++
++  // Nova OS: an input record from the window of this widget (main thread).
++  MOZ_CAN_RUN_SCRIPT_BOUNDARY void HandleNovaEvent(const NovaEvent& aEvent);
++  // The same, for a popup of that window, at a screen point.
++  MOZ_CAN_RUN_SCRIPT_BOUNDARY void HandleNovaPopupEvent(
++      const NovaEvent& aEvent, LayoutDeviceIntPoint aScreen);
+   LayoutDeviceIntPoint WidgetToScreenOffset() override;
+   void SetInputContext(const InputContext& aContext,
+                        const InputContextAction& aAction) override {
+@@ -134,6 +141,13 @@
+ 
+  private:
+   ~HeadlessWidget();
++  // Nova OS window of a top-level widget, when NOVA_DISPLAY=1.
++  RefPtr<NovaDisplay> mNova;
++  RefPtr<TextEventDispatcherListener> mNovaKeys;
++  // Popups: the top-level widget whose window shows this one.
++  RefPtr<HeadlessWidget> mNovaRoot;
++  void DispatchNovaKey(const NovaEvent& aEvent);
++  void UpdateNovaPopup();
+   bool mEnabled;
+   bool mVisible;
+   bool mDestroyed;
+diff -ruN a/widget/headless/moz.build b/widget/headless/moz.build
+--- a/widget/headless/moz.build	2026-09-22 13:39:13.665725140 +0200
++++ b/widget/headless/moz.build	2026-09-22 13:39:13.666725145 +0200
+@@ -27,6 +27,7 @@
+     "HeadlessScreenHelper.cpp",
+     "HeadlessSound.cpp",
+     "HeadlessWidget.cpp",
++    "NovaDisplay.cpp",
+ ]
+ 
+ if widget_dir == "gtk":
+diff -ruN a/widget/headless/NovaDisplay.cpp b/widget/headless/NovaDisplay.cpp
+--- a/widget/headless/NovaDisplay.cpp	1970-01-01 01:00:00.000000000 +0100
++++ b/widget/headless/NovaDisplay.cpp	2026-09-22 13:39:13.667725151 +0200
+@@ -0,0 +1,299 @@
++/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "NovaDisplay.h"
++
++#include <fcntl.h>
++#include <poll.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/ioctl.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++#include "HeadlessWidget.h"
++#include "mozilla/StaticMutex.h"
++#include "nsThreadUtils.h"
++
++namespace mozilla {
++namespace widget {
++
++static const unsigned long NOVA_IOCTL_CREATE = 0x4E01;
++static const unsigned long NOVA_IOCTL_PRESENT = 0x4E02;
++static const unsigned long NOVA_IOCTL_TITLE = 0x4E03;
++static const unsigned long NOVA_IOCTL_CURSOR = 0x4E04;
++
++static const char kDevice[] = "/dev/nova-gui";
++
++// Displays by widget, for the compositor thread, which knows its widget
++// but must not touch it. The same lock guards the popup lists: composing
++// reads them on the compositor thread, the main thread changes them.
++static StaticMutex sLock MOZ_UNANNOTATED;
++static const int kMaxDisplays = 64;
++static NovaDisplay* sDisplays[kMaxDisplays];
++static const void* sKeys[kMaxDisplays];
++
++bool NovaDisplay::Enabled() {
++  static int enabled = -1;
++  if (enabled < 0) {
++    const char* flag = getenv("NOVA_DISPLAY");
++    enabled = flag && flag[0] == '1' && access(kDevice, F_OK) == 0;
++  }
++  return enabled == 1;
++}
++
++void NovaDisplay::Register(NovaDisplay* aDisplay, const void* aKey) {
++  StaticMutexAutoLock lock(sLock);
++  for (int i = 0; i < kMaxDisplays; i++) {
++    if (!sDisplays[i]) {
++      sDisplays[i] = aDisplay;
++      sKeys[i] = aKey;
++      NS_ADDREF(aDisplay);
++      return;
++    }
++  }
++}
++
++already_AddRefed<NovaDisplay> NovaDisplay::Open(HeadlessWidget* aWidget,
++                                                int32_t aWidth,
++                                                int32_t aHeight) {
++  int fd = open(kDevice, O_RDWR | O_CLOEXEC);
++  if (fd < 0) {
++    return nullptr;
++  }
++  struct {
++    uint32_t w, h;
++    char title[128];
++  } create;
++  memset(&create, 0, sizeof(create));
++  create.w = aWidth > 64 ? aWidth : 64;
++  create.h = aHeight > 64 ? aHeight : 64;
++  strncpy(create.title, "Web Browser", sizeof(create.title) - 1);
++  if (ioctl(fd, NOVA_IOCTL_CREATE, &create) != 0) {
++    close(fd);
++    return nullptr;
++  }
++  size_t size = size_t(create.w) * create.h * 4;
++  void* mapped = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++  uint8_t* back = static_cast<uint8_t*>(calloc(1, size));
++  if (mapped == MAP_FAILED || !back) {
++    free(back);
++    close(fd);
++    return nullptr;
++  }
++  RefPtr<NovaDisplay> display = new NovaDisplay();
++  display->mFd = fd;
++  display->mMapped = static_cast<uint8_t*>(mapped);
++  display->mPixels = back;
++  display->mWidth = create.w;
++  display->mHeight = create.h;
++  display->mStride = create.w * 4;
++  display->mWidget = aWidget;
++  display->mKey = aWidget;
++  Register(display, aWidget);
++  NS_ADDREF(display.get());  // held by the input thread
++  display->mThread = PR_CreateThread(PR_USER_THREAD, InputLoop, display.get(),
++                                     PR_PRIORITY_NORMAL, PR_GLOBAL_THREAD,
++                                     PR_JOINABLE_THREAD, 0);
++  return display.forget();
++}
++
++already_AddRefed<NovaDisplay> NovaDisplay::AttachPopup(
++    NovaDisplay* aRoot, HeadlessWidget* aWidget, int32_t aX, int32_t aY,
++    int32_t aWidth, int32_t aHeight) {
++  if (!aRoot) {
++    return nullptr;
++  }
++  // As large as the root: a popup never needs more, and a resize then
++  // never has to move the buffer under a compositor drawing into it.
++  uint8_t* pixels = static_cast<uint8_t*>(calloc(1, size_t(aRoot->mStride) * aRoot->mHeight));
++  if (!pixels) {
++    return nullptr;
++  }
++  RefPtr<NovaDisplay> popup = new NovaDisplay();
++  popup->mRoot = aRoot;
++  popup->mPixels = pixels;
++  popup->mStride = aRoot->mStride;
++  popup->mWidth = aRoot->mWidth;
++  popup->mHeight = aRoot->mHeight;
++  popup->mX = aX;
++  popup->mY = aY;
++  popup->mW = aWidth;
++  popup->mH = aHeight;
++  popup->mWidget = aWidget;
++  popup->mKey = aWidget;
++  Register(popup, aWidget);
++  return popup.forget();
++}
++
++already_AddRefed<NovaDisplay> NovaDisplay::For(const void* aWidget) {
++  StaticMutexAutoLock lock(sLock);
++  for (int i = 0; i < kMaxDisplays; i++) {
++    if (sDisplays[i] && sKeys[i] == aWidget) {
++      RefPtr<NovaDisplay> display = sDisplays[i];
++      return display.forget();
++    }
++  }
++  return nullptr;
++}
++
++NovaDisplay::~NovaDisplay() {
++  if (mMapped) {
++    munmap(mMapped, size_t(mStride) * mHeight);
++  }
++  free(mPixels);
++  if (mFd >= 0) {
++    close(mFd);
++  }
++}
++
++int32_t NovaDisplay::Width() const {
++  return mRoot ? std::min(int32_t(mW), mWidth) : mWidth;
++}
++
++int32_t NovaDisplay::Height() const {
++  return mRoot ? std::min(int32_t(mH), mHeight) : mHeight;
++}
++
++void NovaDisplay::Compose() {
++  if (mRoot) {
++    mRoot->Compose();
++    return;
++  }
++  StaticMutexAutoLock lock(sLock);
++  memcpy(mMapped, mPixels, size_t(mStride) * mHeight);
++  for (int i = 0; i < kMaxDisplays; i++) {
++    NovaDisplay* p = sDisplays[i];
++    if (!p || p->mRoot != this) {
++      continue;
++    }
++    int32_t x0 = std::max(int32_t(p->mX), 0);
++    int32_t y0 = std::max(int32_t(p->mY), 0);
++    int32_t x1 = std::min(p->mX + p->Width(), mWidth);
++    int32_t y1 = std::min(p->mY + p->Height(), mHeight);
++    for (int32_t y = y0; y < y1; y++) {
++      const uint8_t* src = p->mPixels + size_t(y - p->mY) * p->mStride + size_t(x0 - p->mX) * 4;
++      uint8_t* dst = mMapped + size_t(y) * mStride + size_t(x0) * 4;
++      memcpy(dst, src, size_t(std::max(x1 - x0, 0)) * 4);
++    }
++  }
++  ioctl(mFd, NOVA_IOCTL_PRESENT, nullptr);
++}
++
++void NovaDisplay::Present() { Compose(); }
++
++void NovaDisplay::SetTitle(const nsAString& aTitle) {
++  if (mRoot) {
++    return;
++  }
++  char title[128];
++  memset(title, 0, sizeof(title));
++  NS_ConvertUTF16toUTF8 utf8(aTitle);
++  strncpy(title, utf8.get(), sizeof(title) - 1);
++  ioctl(mFd, NOVA_IOCTL_TITLE, title);
++}
++
++void NovaDisplay::SetCursor(uint32_t aShape) {
++  NovaDisplay* root = mRoot ? mRoot.get() : this;
++  ioctl(root->mFd, NOVA_IOCTL_CURSOR, (unsigned long)aShape);
++}
++
++void NovaDisplay::SetRect(int32_t aX, int32_t aY, int32_t aWidth,
++                          int32_t aHeight) {
++  mX = aX;
++  mY = aY;
++  mW = aWidth;
++  mH = aHeight;
++  if (mRoot) {
++    mRoot->Compose();
++  }
++}
++
++HeadlessWidget* NovaDisplay::PopupAt(int32_t aX, int32_t aY, int32_t* aLocalX,
++                                     int32_t* aLocalY) {
++  StaticMutexAutoLock lock(sLock);
++  // The most recent popup is on top: search from the end.
++  for (int i = kMaxDisplays - 1; i >= 0; i--) {
++    NovaDisplay* p = sDisplays[i];
++    if (!p || p->mRoot != this || !p->mWidget) {
++      continue;
++    }
++    if (aX >= p->mX && aY >= p->mY && aX < p->mX + p->mW && aY < p->mY + p->mH) {
++      *aLocalX = aX - p->mX;
++      *aLocalY = aY - p->mY;
++      return p->mWidget;
++    }
++  }
++  return nullptr;
++}
++
++bool NovaDisplay::HasPopups() {
++  StaticMutexAutoLock lock(sLock);
++  for (int i = 0; i < kMaxDisplays; i++) {
++    if (sDisplays[i] && sDisplays[i]->mRoot == this) {
++      return true;
++    }
++  }
++  return false;
++}
++
++void NovaDisplay::Close() {
++  MOZ_ASSERT(NS_IsMainThread());
++  mWidget = nullptr;
++  mStop = true;
++  {
++    StaticMutexAutoLock lock(sLock);
++    for (int i = 0; i < kMaxDisplays; i++) {
++      if (sDisplays[i] == this) {
++        sDisplays[i] = nullptr;
++        sKeys[i] = nullptr;
++        Release();
++      }
++    }
++  }
++  if (mRoot) {
++    // The area the popup covered shows the window again.
++    mRoot->Compose();
++    return;
++  }
++  if (mThread) {
++    PR_JoinThread(mThread);
++    mThread = nullptr;
++  }
++}
++
++void NovaDisplay::InputLoop(void* aSelf) {
++  NovaDisplay* self = static_cast<NovaDisplay*>(aSelf);
++  PR_SetCurrentThreadName("NovaInput");
++  while (!self->mStop) {
++    struct pollfd pfd = {self->mFd, POLLIN, 0};
++    if (poll(&pfd, 1, 200) <= 0) {
++      continue;
++    }
++    NovaEvent events[16];
++    ssize_t n = read(self->mFd, events, sizeof(events));
++    if (n <= 0) {
++      continue;
++    }
++    for (ssize_t i = 0; i < n / ssize_t(sizeof(NovaEvent)); i++) {
++      NovaEvent event = events[i];
++      RefPtr<NovaDisplay> display = self;
++      NS_DispatchToMainThread(NS_NewRunnableFunction(
++          "NovaDisplay::Deliver",
++          [display, event]() { display->Deliver(event); }));
++    }
++  }
++  self->Release();
++}
++
++void NovaDisplay::Deliver(const NovaEvent& aEvent) {
++  if (mWidget) {
++    RefPtr<HeadlessWidget> widget = mWidget;
++    widget->HandleNovaEvent(aEvent);
++  }
++}
++
++}  // namespace widget
++}  // namespace mozilla
+diff -ruN a/widget/headless/NovaDisplay.h b/widget/headless/NovaDisplay.h
+--- a/widget/headless/NovaDisplay.h	1970-01-01 01:00:00.000000000 +0100
++++ b/widget/headless/NovaDisplay.h	2026-09-22 13:39:13.666725145 +0200
+@@ -0,0 +1,132 @@
++/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/*
++ * NovaDisplay: shows a headless top-level window on Nova OS.
++ *
++ * Nova OS runs this browser through its Linux subsystem and gives it one
++ * device, /dev/nova-gui: a window of the Nova compositor whose pixels are
++ * a BGRA buffer the process maps, and whose input comes back as 32-byte
++ * records read from the descriptor. The headless widget already does
++ * everything else a window needs; with NOVA_DISPLAY=1 in the environment
++ * each top-level headless widget opens such a window, its compositor
++ * renders into the mapped buffer (StartRemoteDrawingInRegion), and a
++ * thread turns the records into Gecko input events on the main thread.
++ */
++
++#ifndef widget_headless_NovaDisplay_h
++#define widget_headless_NovaDisplay_h
++
++#include "mozilla/RefPtr.h"
++#include "mozilla/Atomics.h"
++#include "nsISupportsImpl.h"
++#include "nsString.h"
++#include "prthread.h"
++
++namespace mozilla {
++namespace widget {
++
++class HeadlessWidget;
++
++struct NovaEvent {
++  uint32_t type;
++  int32_t x;
++  int32_t y;
++  uint32_t code;
++  uint32_t modifiers;
++  uint32_t character;
++  int32_t value;
++  uint32_t reserved;
++};
++
++enum : uint32_t {
++  NOVA_EV_MOTION = 1,
++  NOVA_EV_BUTTON_DOWN = 2,
++  NOVA_EV_BUTTON_UP = 3,
++  NOVA_EV_WHEEL = 4,
++  NOVA_EV_KEY_DOWN = 5,
++  NOVA_EV_KEY_UP = 6,
++  NOVA_EV_RESIZE = 7,
++  NOVA_EV_CLOSE = 8,
++  NOVA_EV_FOCUS = 9,
++};
++
++class NovaDisplay final {
++ public:
++  NS_INLINE_DECL_THREADSAFE_REFCOUNTING(NovaDisplay)
++
++  // NOVA_DISPLAY=1 and the device exists.
++  static bool Enabled();
++
++  // Opens a window of aWidth x aHeight for a top-level aWidget (main
++  // thread).
++  static already_AddRefed<NovaDisplay> Open(HeadlessWidget* aWidget,
++                                            int32_t aWidth, int32_t aHeight);
++
++  // A popup of the window aRoot: a menu, a list, a tooltip. It has no
++  // window of its own; its pixels are laid over the root's at aX, aY.
++  static already_AddRefed<NovaDisplay> AttachPopup(NovaDisplay* aRoot,
++                                                   HeadlessWidget* aWidget,
++                                                   int32_t aX, int32_t aY,
++                                                   int32_t aWidth,
++                                                   int32_t aHeight);
++
++  // The display of a widget, from any thread (the compositor's).
++  static already_AddRefed<NovaDisplay> For(const void* aWidget);
++
++  // Where the compositor of this widget draws.
++  uint8_t* Pixels() const { return mPixels; }
++  int32_t Width() const;
++  int32_t Height() const;
++  int32_t Stride() const { return mStride; }
++
++  // The widget's frame is complete: compose and show.
++  void Present();
++  void SetTitle(const nsAString& aTitle);
++  void SetCursor(uint32_t aShape);
++  // Popups: new position or size, relative to the root window.
++  void SetRect(int32_t aX, int32_t aY, int32_t aWidth, int32_t aHeight);
++  // The popup under a point of the root window, if any (main thread).
++  HeadlessWidget* PopupAt(int32_t aX, int32_t aY, int32_t* aLocalX,
++                          int32_t* aLocalY);
++  bool HasPopups();
++  // Stops the input thread and closes the window, or detaches a popup
++  // (main thread).
++  void Close();
++
++ private:
++  NovaDisplay() = default;
++  ~NovaDisplay();
++
++  static void InputLoop(void* aSelf);
++  void Deliver(const NovaEvent& aEvent);
++  void Compose();
++  static void Register(NovaDisplay* aDisplay, const void* aKey);
++
++  // Root window only.
++  int mFd = -1;
++  uint8_t* mMapped = nullptr;  // what the compositor of Nova shows
++  PRThread* mThread = nullptr;
++  Atomic<bool> mStop{false};
++
++  // Both: the buffer this widget's compositor draws into. For the root,
++  // a back buffer composed onto mMapped with the popups at each present.
++  uint8_t* mPixels = nullptr;
++  int32_t mStride = 0;
++  int32_t mWidth = 0;
++  int32_t mHeight = 0;
++
++  // Popups only.
++  RefPtr<NovaDisplay> mRoot;
++  Atomic<int32_t> mX{0}, mY{0}, mW{0}, mH{0};
++
++  const void* mKey = nullptr;
++  HeadlessWidget* mWidget = nullptr;  // main thread only, cleared by Close
++};
++
++}  // namespace widget
++}  // namespace mozilla
++
++#endif

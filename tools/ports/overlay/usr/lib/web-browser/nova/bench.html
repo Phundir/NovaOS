@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Banc de navigation</title>
+<style>
+  html, body { margin: 0; background: #0f1115; color: #e6e9ef; font-family: sans-serif; }
+  main { max-width: 60em; margin: 2em auto; line-height: 1.5; }
+</style></head>
+<body>
+<!-- Navigation bench of the Nova edition: the page loads itself n times
+     (?n=20) and logs, for each load, the whole navigation cycle -- from
+     the previous page's request to this page's load event, wall clock --
+     and the page's own DOMContentLoaded and load times. With the pref
+     devtools.console.stdout.content the lines go to the browser's
+     standard output: the serial console under Nova, the terminal on a
+     Linux host running the same build, which is the comparison the bench
+     exists for. The title says when it is done. -->
+<main><h1>Banc de navigation</h1><p id="p">...</p></main>
+<script>
+const q = new URLSearchParams(location.search);
+const i = Number(q.get("i") || 0), n = Number(q.get("n") || 20), t0 = Number(q.get("t") || 0);
+addEventListener("load", () => setTimeout(() => {
+  const nav = performance.getEntriesByType("navigation")[0];
+  const cycle = t0 ? Date.now() - t0 : 0;
+  const line = "bench " + i + " cycle=" + cycle + " dcl=" + Math.round(nav.domContentLoadedEventEnd) +
+    " load=" + Math.round(nav.loadEventEnd);
+  console.log(line);
+  document.getElementById("p").textContent = line;
+  if (i < n) {
+    location.href = location.pathname + "?i=" + (i + 1) + "&n=" + n + "&t=" + Date.now();
+  } else {
+    document.title = "bench fini";
+  }
+}, 0));
+</script>
+</body></html>

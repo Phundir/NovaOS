@@ -1,0 +1,21 @@
+# gpu-rust -- the GPU test program of phase 13.6.3, in Rust: the triangle
+# of gpu.c, through the nova-gfx crate. No std: the Nova C library for the
+# process (start, write, exit), the crate for the GPU, nothing else.
+[package]
+name = "gpu-rust"
+version = "1.0.0"
+edition = "2021"
+
+[[bin]]
+name = "gpu-rust"
+path = "src/main.rs"
+
+[dependencies]
+nova-gfx = { path = "../../nova-gfx/rust" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = 2

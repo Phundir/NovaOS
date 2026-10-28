@@ -1,0 +1,4 @@
+/target
+disks/
+/build/
+/iso/boot/*.bin

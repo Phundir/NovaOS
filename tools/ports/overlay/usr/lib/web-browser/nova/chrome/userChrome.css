@@ -1,0 +1,92 @@
+/* Web Browser -- the Nova OS interface.
+ *
+ * Firefox's own front end, restyled: Nova's palette (src/gui/theme.rs),
+ * one compact bar of tabs above one bar holding the navigation buttons
+ * and a pill-shaped address field, no bookmarks bar, no account or
+ * Firefox View buttons. Layout comes from Firefox; the look is Nova's. */
+
+:root {
+  --nova-bg: #101218;
+  --nova-surface: #1c2028;
+  --nova-surface-alt: #262b35;
+  --nova-accent: #4a9eff;
+  --nova-text: #e6e9ef;
+  --nova-dim: #8a92a3;
+  --nova-border: #3a414e;
+
+  --toolbar-bgcolor: var(--nova-surface) !important;
+  --toolbar-color: var(--nova-text) !important;
+  --toolbarbutton-icon-fill: var(--nova-text) !important;
+  --tab-selected-bgcolor: var(--nova-surface-alt) !important;
+  --tab-selected-textcolor: var(--nova-text) !important;
+  --lwt-accent-color: var(--nova-bg) !important;
+  --lwt-text-color: var(--nova-dim) !important;
+  --urlbar-box-bgcolor: var(--nova-surface-alt) !important;
+  --toolbar-field-background-color: var(--nova-surface-alt) !important;
+  --toolbar-field-focus-background-color: var(--nova-bg) !important;
+  --toolbar-field-color: var(--nova-text) !important;
+  --toolbar-field-focus-border-color: var(--nova-accent) !important;
+  --arrowpanel-background: var(--nova-surface) !important;
+  --arrowpanel-color: var(--nova-text) !important;
+  --arrowpanel-border-color: var(--nova-border) !important;
+  --focus-outline-color: var(--nova-accent) !important;
+  --tab-min-height: 30px !important;
+}
+
+/* The strip of tabs: Nova's background, tabs as flat cards. */
+#TabsToolbar {
+  background: var(--nova-bg) !important;
+  padding-top: 4px !important;
+}
+.tabbrowser-tab .tab-background {
+  border-radius: 6px 6px 0 0 !important;
+  margin-block: 0 !important;
+  box-shadow: none !important;
+}
+.tabbrowser-tab[selected] .tab-background {
+  background: var(--nova-surface) !important;
+  border-top: 2px solid var(--nova-accent) !important;
+}
+.tabbrowser-tab:not([selected]):hover .tab-background {
+  background: var(--nova-surface-alt) !important;
+}
+.tab-label {
+  font-size: 12px !important;
+}
+
+/* Navigation bar. */
+#nav-bar {
+  background: var(--nova-surface) !important;
+  border-top: none !important;
+  box-shadow: none !important;
+  padding-block: 4px !important;
+}
+#urlbar-background {
+  border-radius: 16px !important;
+  border: 1px solid var(--nova-border) !important;
+}
+#urlbar[focused] #urlbar-background {
+  border-color: var(--nova-accent) !important;
+}
+#urlbar-input {
+  font-size: 13px !important;
+}
+
+/* Less chrome: no bookmarks bar, no account, no Firefox View, no list of
+ * all tabs, no extensions button. */
+#PersonalToolbar,
+#firefox-view-button,
+#fxa-toolbar-menu-button,
+#alltabs-button,
+#unified-extensions-button,
+#save-to-pocket-button,
+.titlebar-spacer[type="pre-tabs"] {
+  display: none !important;
+}
+
+/* Menus and panels. */
+menupopup, panel {
+  --panel-background: var(--nova-surface) !important;
+  --panel-color: var(--nova-text) !important;
+  --panel-border-color: var(--nova-border) !important;
+}

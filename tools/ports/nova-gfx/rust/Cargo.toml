@@ -1,0 +1,14 @@
+# nova-gfx -- the Nova graphics interface for Rust programs (spec 6.8,
+# phase 13.6.3). The Rust side of `SYS_GPU_*`, as `nova_gfx.h` is the C
+# side: `core` only, no dependency, a `syscall` instruction per call.
+[package]
+name = "nova-gfx"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+description = "Nova OS graphics interface (SYS_GPU_*)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
