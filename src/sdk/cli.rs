@@ -1035,9 +1035,9 @@ fn interpret(command: &Command) -> Result<Output, DevError> {
         return Err(DevError::NoInterpreter(language));
     }
 
-    // JavaScript (16.3) reads its own files, its modules with them, in a
-    // task with the stack the engine needs.
-    if language == Language::Node {
+    // JavaScript and TypeScript (16.3) read their own files, their modules
+    // with them, in a task with the stack the engine needs.
+    if language == Language::Node || language == Language::Bun {
         let arguments: Vec<String> = command.positional.iter().skip(1).map(|a| String::from(*a)).collect();
         let run = super::js::run_file(&path, &arguments, super::js::session_rights()).map_err(DevError::BadCommand)?;
         return Ok(Output::InterpretedJs(run));

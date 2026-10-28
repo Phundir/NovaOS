@@ -40,6 +40,7 @@ use crate::fs::perm::Credentials;
 use crate::vga::SpinLock;
 use crate::web::js::builtins;
 use crate::web::js::interp::{private_key, Ctrl, Ctx, Host, R};
+use crate::web::js::parse::Options;
 use crate::web::js::ops;
 use crate::web::js::value::*;
 
@@ -171,16 +172,59 @@ fn is_file(path: &str) -> bool {
     crate::fs::stat(path, rights()).is_ok_and(|node| node.kind != crate::fs::format::NodeKind::Directory)
 }
 
-/// Where `require(name)` from `directory` leads, as Node resolves a
-/// relative module: the file, then `.js`, `.json`, then `index.js`.
+/// Where `require(name)` or `import ... from name` leads from
+/// `directory`, as Node and Bun resolve a relative module: the file, then
+/// with an extension, then `index` of a directory; and, as TypeScript
+/// writes it, `./lib.js` naming `lib.ts`.
 fn resolve_module(directory: &str, name: &str) -> Option<String> {
     let base = join(directory, name);
-    for candidate in [base.clone(), alloc::format!("{}.js", base), alloc::format!("{}.json", base), alloc::format!("{}/index.js", base)] {
-        if is_file(&candidate) {
-            return Some(candidate);
+    let mut candidates = alloc::vec![base.clone()];
+    for extension in ["js", "json", "ts", "mjs", "cjs", "mts", "cts"] {
+        candidates.push(alloc::format!("{}.{}", base, extension));
+    }
+    candidates.push(alloc::format!("{}/index.js", base));
+    candidates.push(alloc::format!("{}/index.ts", base));
+    for (javascript, typescript) in [(".js", ".ts"), (".mjs", ".mts"), (".cjs", ".cts")] {
+        if let Some(stem) = base.strip_suffix(javascript) {
+            candidates.push(alloc::format!("{}{}", stem, typescript));
         }
     }
-    None
+    candidates.into_iter().find(|candidate| is_file(candidate))
+}
+
+/// How a file runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ModuleKind {
+    Json,
+    CommonJs,
+    EsModule,
+}
+
+fn is_typescript(path: &str) -> bool {
+    [".ts", ".mts", ".cts", ".tsx"].iter().any(|extension| path.ends_with(extension))
+}
+
+/// `.mjs`/`.mts` are ES modules and `.cjs`/`.cts` CommonJS, whatever they
+/// contain; a `.js` or `.ts` is an ES module when it has `import` or
+/// `export` at its top level -- the detection Node 22 does, and Bun.
+fn module_kind(ctx: &mut Ctx, path: &str, source: &str) -> ModuleKind {
+    if path.ends_with(".json") {
+        return ModuleKind::Json;
+    }
+    if path.ends_with(".mjs") || path.ends_with(".mts") {
+        return ModuleKind::EsModule;
+    }
+    if path.ends_with(".cjs") || path.ends_with(".cts") {
+        return ModuleKind::CommonJs;
+    }
+    let options = Options { module: true, typescript: is_typescript(path) };
+    match crate::web::js::parse::parse_with(source, ctx.headroom, options) {
+        Ok(program) => match program.module {
+            Some(info) if !info.imports.is_empty() || !info.exports.is_empty() => ModuleKind::EsModule,
+            _ => ModuleKind::CommonJs,
+        },
+        Err(_) => ModuleKind::CommonJs,
+    }
 }
 
 // ------------------------------------------------------------
@@ -226,7 +270,8 @@ fn require(ctx: &mut Ctx, _: &Value, args: &[Value], data: &Value) -> R<Value> {
     load_module(ctx, &path)
 }
 
-/// Runs a module once and gives its `module.exports`.
+/// Runs a module once and gives its `module.exports` -- the namespace,
+/// for an ES module.
 fn load_module(ctx: &mut Ctx, path: &str) -> R<Value> {
     let table = cache(ctx);
     if let Some(module) = table.own_value(path) {
@@ -234,6 +279,10 @@ fn load_module(ctx: &mut Ctx, path: &str) -> R<Value> {
     }
     if ops::own_keys(&table, false, false).len() >= MAX_MODULES {
         return ctx.throw_range("trop de modules charges");
+    }
+    if path.ends_with(".tsx") {
+        let message = alloc::format!("{} : JSX n'est pas pris en charge", path);
+        return ctx.throw_error("SyntaxError", &message);
     }
     let source = match read_source(path) {
         Ok(source) => source,
@@ -274,26 +323,77 @@ fn load_module(ctx: &mut Ctx, path: &str) -> R<Value> {
     outcome
 }
 
-/// Runs the source of a module: JSON parsed, JavaScript wrapped in the
-/// function Node wraps it in.
+/// Runs the source of a module: JSON parsed, CommonJS wrapped in the
+/// function Node wraps it in, an ES module linked and run by the engine.
 fn run_module(ctx: &mut Ctx, path: &str, source: &str, module: &Obj, exports: Obj, main: Value) -> R<Value> {
-    if path.ends_with(".json") {
-        let value = builtins::json::parse_text(ctx, source)?;
-        module.put("exports", value.clone());
-        return Ok(value);
-    }
+    let typescript = is_typescript(path);
     let directory = dirname(path);
     let local_require = ctx.native_with("require", 1, require, Value::str(&directory));
     local_require.put("main", main);
-    let wrapper = alloc::format!("(function (exports, require, module, __filename, __dirname) {{\n{}\n}})", strip_shebang(source));
-    let function = ctx.eval_global(&wrapper)?;
-    ctx.call(
-        &function,
-        Value::Obj(exports.clone()),
-        &[Value::Obj(exports), Value::Obj(local_require), Value::Obj(module.clone()), Value::str(path), Value::str(&directory)],
-    )?;
-    module.put("loaded", Value::Bool(true));
-    ops::get(ctx, &Value::Obj(module.clone()), "exports")
+    match module_kind(ctx, path, source) {
+        ModuleKind::Json => {
+            let value = builtins::json::parse_text(ctx, source)?;
+            module.put("exports", value.clone());
+            Ok(value)
+        }
+        ModuleKind::EsModule => {
+            // The namespace is the module's exports from now on: a cycle
+            // that comes back here finds its getters.
+            let namespace = ctx.new_object();
+            module.put("exports", Value::Obj(namespace.clone()));
+            // Bun gives `require` and the paths to modules too; Node does
+            // not.
+            let mut bindings: Vec<(&str, Value)> = Vec::new();
+            if typescript {
+                bindings.push(("require", Value::Obj(local_require)));
+                bindings.push(("__filename", Value::str(path)));
+                bindings.push(("__dirname", Value::str(&directory)));
+            }
+            let options = Options { module: true, typescript };
+            crate::web::js::module::run_module(ctx, strip_shebang(source), options, path, &namespace, &bindings)?;
+            module.put("loaded", Value::Bool(true));
+            Ok(Value::Obj(namespace))
+        }
+        ModuleKind::CommonJs => {
+            let wrapper = alloc::format!("(function (exports, require, module, __filename, __dirname) {{\n{}\n}})", strip_shebang(source));
+            let function = ctx.eval_global_with(&wrapper, Options { module: false, typescript })?;
+            ctx.call(
+                &function,
+                Value::Obj(exports.clone()),
+                &[Value::Obj(exports), Value::Obj(local_require), Value::Obj(module.clone()), Value::str(path), Value::str(&directory)],
+            )?;
+            module.put("loaded", Value::Bool(true));
+            ops::get(ctx, &Value::Obj(module.clone()), "exports")
+        }
+    }
+}
+
+/// The realm's loader for `import`: a built-in module, or a file
+/// resolved from the importing module's directory.
+fn import_loader(ctx: &mut Ctx, referrer: &str, specifier: &str) -> R<Obj> {
+    let name = specifier.strip_prefix("node:").unwrap_or(specifier);
+    if let Some(Value::Obj(module)) = node::builtin_module(ctx, name)? {
+        return Ok(module);
+    }
+    if !(name.starts_with("./") || name.starts_with("../") || name.starts_with('/')) {
+        let message = alloc::format!("Cannot find package '{}' imported from {} (aucun paquet npm dans Nova)", name, referrer);
+        return ctx.throw_error("Error", &message);
+    }
+    let directory = dirname(referrer);
+    let Some(path) = resolve_module(&directory, name) else {
+        let message = alloc::format!("Cannot find module '{}' imported from {}", join(&directory, name), referrer);
+        return ctx.throw_error("Error", &message);
+    };
+    match load_module(ctx, &path)? {
+        Value::Obj(exports) => Ok(exports),
+        // `module.exports = 42`: a namespace whose default is 42.
+        other => {
+            let namespace = ctx.new_object();
+            namespace.put_key(private_key("esm"), Value::Bool(true), 0);
+            namespace.put("default", other);
+            Ok(namespace)
+        }
+    }
 }
 
 /// `#!/usr/bin/env node` on the first line is not JavaScript; the new
@@ -328,6 +428,7 @@ fn run_here(path: &str, arguments: &[String]) -> JsRun {
         let mut ctx = Ctx::new(&mut realm, &mut host, &mut document, &headroom, FUEL, alloc::format!("file://{}", directory), (80, 25));
         builtins::install(&mut ctx);
         node::install_process(&mut ctx, path, arguments);
+        ctx.realm.loader = Some(import_loader);
         let outcome = load_module(&mut ctx, path).and_then(|_| {
             // The jobs, then the timers, the clock jumping to each.
             drain(&mut ctx)

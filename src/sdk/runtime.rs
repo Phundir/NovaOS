@@ -112,8 +112,8 @@ impl Language {
             "cs" => Language::CSharp,
             "java" => Language::Java,
             "py" => Language::Python,
-            "js" | "mjs" => Language::Node,
-            "ts" => Language::Bun,
+            "js" | "mjs" | "cjs" => Language::Node,
+            "ts" | "mts" | "cts" | "tsx" => Language::Bun,
             "asm" | "s" => Language::Asm,
             "ns" => Language::Script,
             _ => return None,
@@ -277,7 +277,7 @@ pub static TABLE: &[RuntimeSpec] = &[
         compiler: "JS -> Rust",
         targets: APP_ONLY,
         system_required: NONE_FORMATS,
-        extensions: &["js", "mjs"],
+        extensions: &["js", "mjs", "cjs"],
         // The interpreter column, since 16.3: Nova's own engine
         // (`sdk::js`), not the V8 the table names. The compiler column
         // stays what ETR does (`dev convertir`).
@@ -291,8 +291,11 @@ pub static TABLE: &[RuntimeSpec] = &[
         compiler: "TS/JS -> Rust",
         targets: APP_ONLY,
         system_required: NONE_FORMATS,
-        extensions: &["ts", "tsx"],
-        support: Support::Delegated,
+        extensions: &["ts", "mts", "cts", "tsx"],
+        // The interpreter column, since 16.3.2: Nova's engine with the
+        // types erased, as Bun runs TypeScript (`sdk::js`). JSX (`.tsx`)
+        // is refused by name. The compiler column stays ETR.
+        support: Support::Interpreted,
         directory: "bun",
     },
     RuntimeSpec {

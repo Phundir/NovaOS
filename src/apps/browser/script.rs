@@ -35,6 +35,8 @@ use crate::web::url::Url;
 /// Steps one entry into the engine may take: a long script ends there
 /// (and the page says so) rather than freezing the window.
 const FUEL: u64 = 20_000_000;
+/// Largest module a page may import.
+const MAX_MODULE_BYTES: usize = 2 * 1024 * 1024;
 
 pub struct BrowserHost {
     /// Minutes east of UTC, from the session's settings.
@@ -115,6 +117,20 @@ impl Host for BrowserHost {
 
     fn cookies(&mut self, url: &str) -> String {
         super::net::script_cookies(url)
+    }
+
+    /// An imported module: fetched now, as `fetch` is (the page's own
+    /// `<script type="module">` came with the page).
+    fn module_source(&mut self, url: &str) -> Option<String> {
+        let target = Url::parse(url)?;
+        if !matches!(target.scheme.as_str(), "http" | "https") {
+            return None;
+        }
+        let response = super::net::fetch_now(Request::new(Method::Get, target)).ok()?;
+        if response.status != 200 || response.body.len() > MAX_MODULE_BYTES {
+            return None;
+        }
+        Some(crate::web::text::decode(&response.body, response.charset().as_deref()))
     }
 
     fn set_cookie(&mut self, url: &str, line: &str) {
@@ -198,6 +214,7 @@ impl ScriptPage {
         let outcome = page.run(|ctx| {
             crate::web::js::builtins::install(ctx);
             dom::install(ctx);
+            ctx.realm.loader = Some(crate::web::js::module::host_loader);
             for line in &skipped {
                 crate::web::js::builtins::global::console_line(ctx, "avertissement", line);
             }
@@ -382,7 +399,7 @@ pub fn selftest() -> (usize, usize) {
     };
     let mut loaded = page::from_html(url, TEST_PAGE);
     let document = &loaded.document;
-    loaded.scripts = document.elements("script").iter().map(|s| document.text_content_raw(*s)).collect();
+    loaded.scripts = document.elements("script").iter().map(|s| dom::PageScript::Classic(document.text_content_raw(*s))).collect();
     let (mut page, outcome) = ScriptPage::start(loaded, 800, 600);
     check(outcome.relayout, "le script a change le document");
     check(page.loaded.document.title() == "Apres", "document.title");

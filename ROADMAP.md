@@ -28,7 +28,7 @@ x86_64, GRUB/Multiboot2.
 | Phase 13 — Pile graphique Nova et accélération GPU | 🔧 faite hors Firefox, à valider | Spec acceptée (24 septembre) ; pilote virtio-gpu 3D, anneau Venus, encodeur généré et vérifié (68 commandes), cœur GPU, écran et plan curseur au cœur, compositeur sur le GPU (égal au pixel près au processeur), `SYS_GPU_*`, bibliothèques C et Rust, modules `.kmd` signés, délai de garde éprouvé ; 75 vérifications ; aucune case cochée (validation de l'utilisateur attendue) ; Firefox (13.0, 13.9-13.10, 13.11.1) reporté par l'utilisateur |
 | Phase 14 — LIFS (nouveau type de partition, liens CoW et Tag) | 🔧 implémentée, à valider | Décisions 14.1 prises (24 septembre) ; GPT/MBR, partitions montées une lettre chacune, racine LIFS, plus aucun formatage implicite ; LIFS (arbres B+, étendues, clones CoW, Tag, index inverse, journal) ; `SYS_FS_NODE_*` ; `tools/lifs.py` et reprise NovaFS → LIFS ; 81 vérifications LIFS dont 32 coupures simulées ; aucune case cochée (validation de l'utilisateur attendue) |
 | Phase 15 — Mises à jour atomiques des applications | ✅ faite (28 octobre 2026) | Proposition de l'utilisateur du 24 septembre 2026 ; points 15.1 tranchés sous mandat d'autonomie ; JSON, Ed25519 (ENTERPRISE enfin signé), HTTPS en flux, pointeur atomique, registre signé, versions à part, lancement par le pointeur, nettoyage différé, `spm.dsa` ; 70 vérifications ; reste 15.6.2 (canal par application dans l'interface) et 15.7.3 partiel |
-| Phase 16 — Langages et outils (fin de la phase 9) | 🔄 en cours | 16.0 (shell, terminal, recovery), 16.1 (moteur JavaScript, 95 cas vérifiés contre Node 22) et 16.2 (DOM et scripts du navigateur, 30 cas vérifiés contre jsdom + 12 vérifications du navigateur) et 16.3.1 (`dev interpret main.js`, sorties comparées à Node 22) faites le 28 octobre 2026 ; restent modules ES et TypeScript, Python, C, Java, débogueur de `dev run --debug` |
+| Phase 16 — Langages et outils (fin de la phase 9) | 🔄 en cours | 16.0 (shell, terminal, recovery), 16.1 (moteur JavaScript, 95 cas vérifiés contre Node 22) et 16.2 (DOM et scripts du navigateur, 30 cas vérifiés contre jsdom + 12 vérifications du navigateur) et 16.3 (`dev interpret` pour Node et Bun, modules ES, TypeScript, sorties comparées à Node 22 et Bun) faites le 28 octobre 2026 ; restent le débogueur de `dev run --debug`, Python, C, Java |
 | Phase 17 — Reliquats système de fichiers et POSIX | 📝 planifiée | Ce que les phases 12 et 14 ont laissé ouvert hors Firefox : page de temps, autotest appel par appel, `copy_file_range`/clonage, Tag dans l'explorateur, GPT de secours, partitionneur |
 | Phase 18 — Firefox sur la pile Nova | ⏸ chez l'auteur | 12.5, 12.7, 12.8, 13.0, 13.9, 13.10, 13.11.1 : demandent la construction du fork et le GPU de la machine de l'auteur |
 
@@ -46,10 +46,11 @@ cochées sur 229.** Les sept restantes sont toutes en phase 9, et elles
 sont nommées juste en dessous. Il ne reste donc **plus de case à ouvrir**
 — seulement des limites à lever, listées phase par phase plus bas.
 
-**Prochaine étape : 16.3.2, modules ES et TypeScript** ; la phase 15 et
-les étapes 16.0 (shell, terminal, recovery), 16.1 (moteur JavaScript),
-16.2 (scripts du navigateur intégré) et 16.3.1 (`dev interpret main.js`)
-sont faites (28 octobre 2026).
+**Prochaine étape : 16.4, débogueur de `dev run --debug`** ; la phase 15
+et les étapes 16.0 (shell, terminal, recovery), 16.1 (moteur
+JavaScript), 16.2 (scripts du navigateur intégré) et 16.3 (`dev
+interpret` pour Node et Bun, modules ES, TypeScript) sont faites (28
+octobre 2026).
 (L'ancien choix « un espace d'adressage par processus » ou « élargir le
 sous-ensemble Rust » est derrière nous : les espaces privés sont faits
 depuis 11.3, et le reste de la phase 9 forme la phase 16.)
@@ -4077,7 +4078,7 @@ Ce qu'il y a derrière :
 - [x] 16.3.1 `dev interpret main.js` : le moteur Nova, `console`, `require`
   de modules locaux, `fs` sur `SYS_FS_*` ; la colonne « compilateur »
   reste ETR
-- [ ] 16.3.2 Modules ES (`import`/`export`, `.mjs`) et TypeScript à types
+- [x] 16.3.2 Modules ES (`import`/`export`, `.mjs`) et TypeScript à types
   effacés (`.ts`, la ligne Bun) sur le même moteur
 
 **Validation de 16.3.1 (28 octobre 2026, sous mandat d'autonomie).**
@@ -4118,6 +4119,55 @@ journaux de démarrage :
   après une fonction `async` qui attend passait après l'attente. C'est
   la limite connue de 16.1 (`await` attend sur place) ; le test garde ce
   que les deux font pareil, et la limite reste ouverte ci-dessous.
+
+**Validation de 16.3.2 (28 octobre 2026, sous mandat d'autonomie).**
+Relevés de `make test` (4 cœurs, deux démarrages), `make test-smp1`,
+`make test-novga` et `make test-recovery`, tous verts, et de
+`make js-test` (134 cas sur l'hôte) :
+
+```
+[test] phase 16.2 validee - 31 cas du DOM, 12 verifications du navigateur
+[test] phase 16.3 validee - 30 verifications de dev interpret (Node, Bun), 8 cas de modules et TypeScript
+```
+
+- `web/js/parse.rs` scindé en `parse/` (le découpage seul d'abord,
+  vérifié 125/125 sur l'hôte), puis `module.rs` (`import`/`export` retirés
+  du corps dans `Program::module`) et `ts.rs` (types lus par leur propre
+  grammaire et jetés ; essais avec retour arrière pour `f<T>(x)` et les
+  flèches typées ; `enum` et propriétés de paramètres traduits).
+- `web/js/module.rs` : liaison des modules. Exports en accesseurs sur
+  l'espace de noms, imports en liaisons `IMPORTED` (vivantes), espace de
+  noms créé avant le chargement des dépendances (cycles), réexports,
+  `import()`, `import.meta`, `Realm::loader`, `host_loader` (sources
+  données par l'hôte).
+- `dev interpret` : `.mjs`/`.cjs`/`.ts`/`.mts`/`.cts`, détection du genre
+  d'un `.js`/`.ts` comme Node 22 ; un module ES importe CommonJS, JSON et
+  les intégrés ; un `.ts` reçoit `require`/`__dirname` comme sous Bun ;
+  la ligne Bun du §13.2 passe à « interprété ».
+- Navigateur : `<script type="module">` différés, imports récupérés à la
+  demande par l'hôte du navigateur.
+- **Références** : les huit cas de modules et de TypeScript du moteur
+  ont été passés dans Node 22 (`.mjs`) et Bun (`.ts`, et Node avec
+  `--experimental-transform-types` pour trois d'entre eux) ; les trois
+  programmes ajoutés à l'autotest de `dev interpret` aussi ; le cas de
+  page avec module dans **Chromium** (Playwright). Un programme TypeScript
+  plus large (types conditionnels, `infer`, `asserts`, surcharges, champs
+  privés typés, signatures d'index) donne la même sortie que Bun
+  (`build/jshost --module`, nouveau).
+- Deux écarts trouvés en route : `try_type_arguments` refusait
+  `Map<string, Array<number>>(...)` (le `>>` coupé) ; Node ne voit pas
+  les noms d'un `module.exports = { ... }` que Nova lit à l'exécution
+  (Nova plus permissif, consigné).
+
+**Ce qui reste ouvert dans la 16.3.2**
+- `namespace`, décorateurs, JSX (`.tsx`) refusés nommément ; aucun type
+  n'est vérifié.
+- Un `await` au premier niveau sans `import`/`export` ne fait pas d'un
+  `.js` un module.
+- Les imports d'un module de page sont récupérés de façon synchrone
+  (comme `fetch`) ; aucun n'a été éprouvé sur un vrai réseau sous QEMU.
+- `require` d'un module ES rend son espace de noms même s'il utilise
+  `await` au premier niveau (Node refuse).
 
 **Ce qui reste ouvert dans la 16.3.1**
 - `await` attend sur place et les générateurs s'exécutent d'un bloc

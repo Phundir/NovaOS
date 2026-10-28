@@ -4506,6 +4506,71 @@ fonction `async` qui attend passe, ici, après l'attente. Le test ne
 masque pas l'écart, il s'en tient à ce que les deux font pareil ; la
 limite est écrite dans la roadmap.
 
+### Modules ES : des liaisons vivantes faites de fermetures (16.3.2)
+
+Un import ES n'est pas une copie : il lit la liaison de l'exportateur à
+chaque fois (un compteur incrémenté là-bas se voit ici, un cycle marche
+tant qu'on ne lit pas une liaison avant qu'elle existe). Plutôt que de
+réécrire le programme, chaque export est un **accesseur** sur l'espace
+de noms du module (`() => local`, fermeture sur la portée du module) et
+chaque import une liaison d'état `IMPORTED` dont la valeur est une
+fonction `() => ns[nom]` : la lire l'appelle, l'écrire est la
+`TypeError` d'une constante. Les exports existent avant que le corps ne
+tourne et avant que les imports du module ne soient chargés : un module
+qui l'importe en retour trouve les accesseurs, et une liaison pas encore
+faite répond la `ReferenceError` habituelle. `export default expr`
+devient une constante nommée `default`, un nom qu'aucune source ne peut
+écrire.
+
+Le moteur ne sait pas où vivent les modules : `Realm::loader` le sait.
+Le lanceur Node (`sdk::js::import_loader`) mêle intégrés, CommonJS, JSON
+et modules ES ; `module::host_loader` ne connaît que les modules ES, dont
+il demande la source à l'hôte (`Host::module_source`) — l'autotest et le
+navigateur s'en servent.
+
+### Détection du genre d'un fichier
+
+`.mjs`/`.mts` module, `.cjs`/`.cts` CommonJS ; un `.js` ou un `.ts` est un
+module s'il contient `import` ou `export` au premier niveau, comme le
+détecte Node 22 et comme le fait Bun. Un `await` au premier niveau sans
+`import` ni `export` n'est pas détecté (limite écrite). Les noms
+importés d'un CommonJS sont lus sur son objet `exports` à l'exécution :
+plus permissif que Node, dont l'analyse statique ne voit pas
+`module.exports = { a: ... }`.
+
+### TypeScript : effacer, ne pas vérifier
+
+La ligne Bun du §13.2 est servie comme Bun et Node 22
+(`--experimental-transform-types`) la servent : les types sont lus par
+une petite grammaire et jetés ; rien n'est vérifié. Lire un type par sa
+grammaire, et non en comptant les chevrons, est ce qui garde `a < b &&
+c > (d)` une comparaison. Là où le langage est ambigu (un `<` après un
+nom, une `(` qui ouvre peut-être une flèche typée), l'analyseur essaie
+et revient en arrière ; les jetons qu'un type a coupés (`>>` fermant deux
+listes) sont remis avec lui (`Parser::splits`). Ce qui a une valeur à
+l'exécution est traduit comme `tsc` : `enum` (avec la correspondance
+inverse pour les nombres) et propriétés de paramètres (`this.x = x`
+après `super(...)`). Refusés nommément : `namespace`, décorateurs, JSX
+(`.tsx`). Un `export { T }` d'un type n'exporte rien, et un import d'un
+nom absent n'est pas une erreur en TypeScript (il peut ne nommer qu'un
+type).
+
+### `<script type="module">` dans le navigateur
+
+Les modules d'une page sont différés : ils tournent après les scripts
+classiques, avant `DOMContentLoaded`, comme le veut la norme HTML. Le
+module lui-même vient avec la page (tâche de chargement) ; ses imports
+sont récupérés quand ils sont demandés, de façon synchrone, comme
+`fetch`. `nomodule` est ignoré : Nova a les modules. Cas vérifié dans
+Chromium (Playwright) avant d'être confronté au moteur.
+
+### `parse.rs` scindé
+
+1 569 lignes avant l'ajout des modules et de TypeScript : il est devenu
+`parse/` (instructions, expressions, fonctions et classes, modules,
+TypeScript), découpage fait seul et vérifié par le banc hôte (125/125)
+avant tout ajout.
+
 ---
 
 ## 4. Invariants à ne jamais casser

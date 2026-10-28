@@ -231,7 +231,7 @@ autotest qui imprime un **verdict** sur la console série.
 [test] phase 16.0 validee - 60 verifications du shell et du terminal (spec 1.1, 2.2)
 [test] phase 16.1 validee - 95 cas du moteur JavaScript (2270 ms)
 [test] phase 16.2 validee - 30 cas du DOM, 12 verifications du navigateur
-[test] phase 16.3 validee - 15 verifications de dev interpret (Node)
+[test] phase 16.3 validee - 30 verifications de dev interpret (Node, Bun), 8 cas de modules et TypeScript
 ```
 
 `make test` démarre l'ISO sans fenêtre (`tools/boot-test.py`), arrête
@@ -354,8 +354,11 @@ en rendu logiciel.
   promesses et minuteries ; nombres IEEE 754 calculés en entiers, `exp` et
   `ln` correctement arrondis. Le navigateur intégré exécute les scripts
   des pages : DOM, événements, `fetch`, `XMLHttpRequest`, `localStorage`.
-  `dev interpret main.js` exécute un programme Node : `require` de modules
-  locaux et JSON, `fs`, `path`, `os`, `util`, `events`, `process`.
+  Modules ES (`import`/`export`, liaisons vivantes, `import()`) et
+  **TypeScript** à types effacés. `dev interpret main.js` (ou `.mjs`,
+  `.ts`) exécute un programme Node ou Bun : `require` et `import` de
+  modules locaux et JSON, `fs`, `path`, `os`, `util`, `events`,
+  `process`.
 - **Shell** : interprète de commandes (fichiers, tâches, mémoire, disques,
   `spm`, `dev`), fenêtre **Terminal** avec historique et défilement, shell
   sur la console série et mode recovery.
@@ -456,7 +459,7 @@ d'interruption, appels système, invariants — est dans
 | 13 | Pile graphique Nova et GPU | 🔧 à valider |
 | 14 | LIFS et partitions | 🔧 à valider |
 | 15 | Mises à jour atomiques des applications, Ed25519 | ✅ |
-| 16 | Langages et outils : shell et terminal ✅, JavaScript (navigateur et `dev interpret`) ✅ ; modules ES et TypeScript, Python, C, Java, débogueur | 🔄 |
+| 16 | Langages et outils : shell et terminal ✅, JavaScript et TypeScript (navigateur et `dev interpret`) ✅ ; débogueur, Python, C, Java | 🔄 |
 | 17 | Reliquats système de fichiers et POSIX | 📝 |
 | 18 | Firefox sur la pile Nova (machine de l'auteur) | ⏸ |
 

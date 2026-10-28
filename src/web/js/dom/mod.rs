@@ -137,17 +137,48 @@ pub fn node_list(ctx: &mut Ctx, nodes: &[NodeId]) -> Value {
     Value::Obj(ctx.alloc(Kind::Array(values), Some(proto), "NodeList"))
 }
 
-/// Runs a page's scripts in document order, then fires
+/// A script of the page, in document order.
+#[derive(Debug, Clone)]
+pub enum PageScript {
+    /// A classic script: its text.
+    Classic(String),
+    /// `<script type="module">`: the address its imports resolve from
+    /// (its own, or the page's for an inline one) and its text.
+    Module(String, String),
+}
+
+/// Runs a page's scripts: the classic ones in document order, then the
+/// modules (deferred, as the HTML standard wants), then fires
 /// `DOMContentLoaded` (at the document) and `load` (at the window), the
 /// job queue drained after each. An error stops its script only.
-pub fn start_page(ctx: &mut Ctx, scripts: &[String]) {
+pub fn start_page(ctx: &mut Ctx, scripts: &[PageScript]) {
     ctx.realm.dom.ready_state = "loading";
-    for source in scripts {
-        if let Err(error) = ctx.run_script(source) {
-            ctx.report(error);
+    for script in scripts {
+        if let PageScript::Classic(source) = script {
+            if let Err(error) = ctx.run_script(source) {
+                ctx.report(error);
+            }
+            if let Err(reason) = ctx.run_jobs() {
+                ctx.report(reason);
+            }
         }
-        if let Err(reason) = ctx.run_jobs() {
-            ctx.report(reason);
+    }
+    for script in scripts {
+        if let PageScript::Module(url, source) = script {
+            match super::module::run_page_module(ctx, url, source) {
+                Err(super::interp::Ctrl::Throw(error)) => {
+                    let text = ctx.describe_error(&error);
+                    ctx.report(text);
+                }
+                Err(super::interp::Ctrl::Halt(reason)) => {
+                    ctx.report(reason);
+                    return;
+                }
+                _ => {}
+            }
+            if let Err(reason) = ctx.run_jobs() {
+                ctx.report(reason);
+            }
         }
     }
     ctx.realm.dom.ready_state = "interactive";

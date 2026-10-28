@@ -59,6 +59,31 @@ pub mod web;
 fn run() -> bool {
     let args: Vec<String> = std::env::args().collect();
     let headroom = &scheduler::stack_headroom;
+    // `jshost --module main.ts`: a module from the disk, with its
+    // directory's files, as `dev interpret` would run it.
+    if args.get(1).map(String::as_str) == Some("--module") {
+        let Some(main) = args.get(2) else {
+            println!("usage : jshost --module fichier");
+            return false;
+        };
+        let main = std::fs::canonicalize(main).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| main.clone());
+        let directory = std::path::Path::new(&main).parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let mut owned: Vec<(String, String)> = Vec::new();
+        let mut pending = vec![directory];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if let Ok(text) = std::fs::read_to_string(&path) {
+                    owned.push((path.to_string_lossy().into_owned(), text));
+                }
+            }
+        }
+        let files: Vec<(&str, &str)> = owned.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
+        println!("{}", web::js::selftest::run_module_case(&files, &main, headroom));
+        return true;
+    }
     if let Some(body) = args.get(1) {
         let outcome = web::js::selftest::run_case(body, headroom);
         println!("{:?}", outcome);

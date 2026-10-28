@@ -6,6 +6,7 @@ pub mod builtins;
 pub mod dom;
 pub mod interp;
 pub mod lex;
+pub mod module;
 pub mod num;
 pub mod ops;
 pub mod parse;

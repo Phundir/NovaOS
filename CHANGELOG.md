@@ -8,6 +8,49 @@ a été observé, reste dans `ROADMAP.md` ; les décisions dans `DECISIONS.md`.
 Schéma de version : `0.{phase}.{correctif}` — la phase est la dernière de
 la roadmap dont le code est complet.
 
+## [0.15.5] — 2026-10-28
+
+Phase 16.3.2 : modules ES et TypeScript, dans `dev interpret` comme dans
+le navigateur.
+
+### Ajouté
+
+- **Modules ES** dans le moteur (`web::js::module`) : `import` et
+  `export` sous toutes leurs formes (par défaut, nommés, renommés,
+  espace de noms, réexports, `export *`), **liaisons vivantes** (un
+  compteur exporté se lit à jour, les cycles d'imports marchent avec les
+  fonctions hissées), `import()` dynamique, `import.meta`, `await` au
+  premier niveau.
+- **TypeScript à types effacés** (la ligne Bun du §13.2) : annotations,
+  génériques, `as`, `satisfies`, `!`, `interface`, `type`, `declare`,
+  surcharges, classes abstraites, modificateurs, signatures d'index,
+  `enum` et propriétés de paramètres traduits comme `tsc`.
+- **`dev interpret`** : `.mjs`, `.cjs`, `.ts`, `.mts`, `.cts` ; un module
+  ES importe CommonJS, JSON (`with { type: "json" }`) et les modules
+  intégrés (`node:fs`...) ; `require` d'un module ES ; un `.ts` reçoit
+  `require` et `__dirname` comme sous Bun ; `./lib.js` trouve `lib.ts`.
+- **Navigateur** : `<script type="module">` (différés, avant
+  `DOMContentLoaded`), leurs imports récupérés à la demande.
+- `make js-test` : 8 cas de modules et de TypeScript ; `jshost --module
+  fichier` exécute un module du disque sur l'hôte.
+
+### Modifié
+
+- `web/js/parse.rs` (1 569 lignes) scindé en `parse/` : instructions,
+  expressions, fonctions et classes, modules, TypeScript.
+
+### Vérifié contre les références
+
+- Modules : Node 22 ; TypeScript : Bun (et Node 22 avec
+  `--experimental-transform-types`) ; module de page : Chromium.
+
+### Limites connues
+
+- `namespace`, décorateurs et JSX refusés nommément ; aucun type
+  vérifié.
+- Un `await` au premier niveau sans `import`/`export` ne fait pas d'un
+  `.js` un module.
+
 ## [0.15.4] — 2026-10-28
 
 Phase 16.3.1 : `dev interpret main.js`, des programmes Node sur le moteur

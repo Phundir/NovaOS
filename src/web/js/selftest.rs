@@ -29,6 +29,8 @@ pub struct TestHost {
     pub stored: Vec<(String, bool, Vec<(String, String)>)>,
     pub cookie_jar: String,
     pub navigated: Option<String>,
+    /// Module sources by path, for `module::host_loader`.
+    pub files: Vec<(String, String)>,
 }
 
 impl TestHost {
@@ -42,6 +44,7 @@ impl TestHost {
             stored: Vec::new(),
             cookie_jar: String::new(),
             navigated: None,
+            files: Vec::new(),
         }
     }
 }
@@ -118,6 +121,10 @@ impl Host for TestHost {
             self.lines.push(String::from(line));
         }
     }
+
+    fn module_source(&mut self, path: &str) -> Option<String> {
+        self.files.iter().find(|(p, _)| p == path).map(|(_, text)| text.clone())
+    }
 }
 
 /// Fuel of one case: enough for every legitimate case, little enough
@@ -148,14 +155,30 @@ pub fn run_case(body: &str, headroom: &dyn Fn() -> usize) -> Result<String, Stri
 pub fn run_page_case(html: &str, body: &str, headroom: &dyn Fn() -> usize) -> Result<String, String> {
     let mut realm = super::builtins::new_realm();
     let mut host = TestHost::new();
+    host.files = PAGE_MODULES.iter().map(|(p, t)| (String::from(*p), String::from(*t))).collect();
     let source = alloc::format!("<!doctype html><html><head><title>Essai</title></head><body>{}</body></html>", html);
     let mut doc = crate::web::html::parse(&source);
     let outcome = {
         let mut ctx = Ctx::new(&mut realm, &mut host, &mut doc, headroom, FUEL, String::from("https://exemple.fr/dossier/page.html?q=1#ancre"), (800, 600));
         super::builtins::install(&mut ctx);
         super::dom::install(&mut ctx);
-        // The page's own scripts first, as a browser runs them.
-        let scripts: Vec<String> = ctx.doc.elements("script").iter().map(|s| ctx.doc.text_content_raw(*s)).collect();
+        // The page's own scripts first, as a browser runs them; modules
+        // import from `PAGE_MODULES`.
+        let base = ctx.base_url.clone();
+        let scripts: Vec<super::dom::PageScript> = ctx
+            .doc
+            .elements("script")
+            .iter()
+            .map(|s| {
+                let text = ctx.doc.text_content_raw(*s);
+                if ctx.doc.attribute(*s, "type") == Some("module") {
+                    super::dom::PageScript::Module(base.clone(), text)
+                } else {
+                    super::dom::PageScript::Classic(text)
+                }
+            })
+            .collect();
+        ctx.realm.loader = Some(super::module::host_loader);
         super::dom::start_page(&mut ctx, &scripts);
         let source = alloc::format!("(function() {{\n{}\n}})()", body);
         match ctx.run_script(&source) {
@@ -165,6 +188,47 @@ pub fn run_page_case(html: &str, body: &str, headroom: &dyn Fn() -> usize) -> Re
     };
     realm.teardown();
     outcome
+}
+
+/// Runs the module `main` among `files`; the console, one line per
+/// line, with an uncaught error as its last line.
+pub fn run_module_case(files: &[(&str, &str)], main: &str, headroom: &dyn Fn() -> usize) -> String {
+    let mut realm = super::builtins::new_realm();
+    let mut host = TestHost::new();
+    host.files = files.iter().map(|(p, t)| (String::from(*p), String::from(*t))).collect();
+    let mut doc = crate::web::html::parse("");
+    {
+        let mut ctx = Ctx::new(&mut realm, &mut host, &mut doc, headroom, FUEL, String::from(main), (800, 600));
+        super::builtins::install(&mut ctx);
+        ctx.realm.loader = Some(super::module::host_loader);
+        let outcome = super::module::host_loader(&mut ctx, "/", main).map(|_| ()).and_then(|_| {
+            // The jobs, then the timers, the clock jumping to each.
+            for _ in 0..1000 {
+                ctx.run_jobs().map_err(Ctrl::Halt)?;
+                let Some(due) = ctx.realm.timers.iter().map(|t| t.due).min() else {
+                    break;
+                };
+                let now = ctx.now();
+                if due > now {
+                    ctx.realm.clock_skew += due - now;
+                }
+                let now = ctx.now();
+                ctx.run_timers(now).map_err(Ctrl::Halt)?;
+            }
+            Ok(())
+        });
+        match outcome {
+            Err(Ctrl::Throw(error)) => {
+                let text = ctx.describe_error(&error);
+                ctx.realm.console.push(alloc::format!("[erreur] {}", text));
+            }
+            Err(Ctrl::Halt(reason)) => ctx.realm.console.push(alloc::format!("[arret] {}", reason)),
+            _ => {}
+        }
+    }
+    let output = realm.console.join("\n");
+    realm.teardown();
+    output
 }
 
 /// The value as text; a promise is awaited first.
@@ -219,6 +283,12 @@ fn settle(ctx: &mut Ctx, value: Value) -> Result<String, String> {
         other => super::ops::to_display(other),
     })
 }
+
+/// The modules a page case's `<script type="module">` may import.
+const PAGE_MODULES: &[(&str, &str)] = &[
+    ("https://exemple.fr/dossier/outils.mjs", "export const titre = 'module'; export function marque(el) { el.setAttribute('data-par', 'module'); }"),
+    ("https://exemple.fr/lib/conf.mjs", "export default { niveau: 2 };"),
+];
 
 /// (name, body, expected).
 pub const CASES: &[(&str, &str, &str)] = &[
@@ -364,14 +434,110 @@ pub const PAGE_CASES: &[(&str, &str, &str, &str)] = &[
     ("XMLHttpRequest sans reseau", "", "const x = new XMLHttpRequest(); const log = []; x.onerror = () => log.push('erreur'); x.addEventListener('loadend', () => log.push('fin')); x.open('GET', '/a'); x.send(); log.push('envoye'); return new Promise(r => setTimeout(() => r(log.join() + '|' + x.readyState + '|' + x.status), 1));", "envoye,erreur,fin|4|0"),
     ("instanceof et constantes", "<div id=\"d\"></div>", "const d = document.getElementById('d'); return [d instanceof HTMLElement, d instanceof Node, document instanceof Document, d.nodeType === Node.ELEMENT_NODE, d.nodeName].join('|');", "true|true|true|true|DIV"),
     ("history.pushState", "", "history.pushState({ p: 1 }, '', '/autre?x=2'); return location.pathname + location.search + '|' + history.state.p;", "/autre?x=2|1"),
+    ("script de type module differe", "<p id=\"p\">avant</p><script type=\"module\">import { titre, marque } from './outils.mjs'; import conf from '../lib/conf.mjs'; const p = document.getElementById('p'); p.textContent = titre + conf.niveau; marque(p); window.ordre.push('module');</script><script>window.ordre = ['classique']; document.addEventListener('DOMContentLoaded', () => ordre.push('dom'));</script>", "const p = document.getElementById('p'); return ordre.join() + '|' + p.textContent + '|' + p.dataset.par + '|' + typeof titre;", "classique,module,dom|module2|module|undefined"),
 ];
 
-/// Runs the corpus of the engine (16.1). Returns (passed, failed); a
-/// failure prints what was expected and what came.
+/// ES modules and TypeScript (16.3.2): (name, files, main, console).
+/// The expected lines are what Node 22 prints for the `.mjs` cases and
+/// Bun for the `.ts` ones, on the same files.
+pub const MODULE_CASES: &[(&str, &[(&str, &str)], &str, &str)] = &[
+    (
+        "import, export et liaisons vivantes",
+        &[
+            ("/m/compteur.mjs", "export let n = 0;\nexport function inc() { n++; }\nexport default 'defaut';\n"),
+            ("/m/main.mjs", "import d, { n, inc } from './compteur.mjs';\nimport * as ns from './compteur.mjs';\nconsole.log(d, n);\ninc(); inc();\nconsole.log(n, ns.n, Object.keys(ns).sort().join(','));\ntry { n = 5; } catch (e) { console.log(e.constructor.name); }\n"),
+        ],
+        "/m/main.mjs",
+        "defaut 0\n2 2 default,inc,n\nTypeError",
+    ),
+    (
+        "cycle d'imports et fonctions hissees",
+        &[
+            ("/c/a.mjs", "import { b } from './b.mjs';\nexport function a() { return 'a'; }\nconsole.log('a voit', b());\n"),
+            ("/c/b.mjs", "import { a } from './a.mjs';\nexport function b() { return 'b+' + a(); }\nconsole.log('b voit', a());\n"),
+        ],
+        "/c/a.mjs",
+        "b voit a\na voit b+a",
+    ),
+    (
+        "reexports et export par defaut anonyme",
+        &[
+            ("/r/index.mjs", "export * from './util.mjs';\nexport { default as f, x as z } from './util.mjs';\nexport * as tout from './util.mjs';\n"),
+            ("/r/main.mjs", "import { x, y, z, f, tout } from './index.mjs';\nconsole.log(x, y, z, f(), f.name, tout.y, typeof tout.default);\n"),
+            ("/r/util.mjs", "export const x = 1, y = 2;\nexport default function () { return 'anonyme'; }\n"),
+        ],
+        "/r/main.mjs",
+        "1 2 1 anonyme default 2 function",
+    ),
+    (
+        "import dynamique, import.meta, export absent",
+        &[
+            ("/d/lib.mjs", "export const v = 42;\n"),
+            ("/d/main.mjs", "const m = await import('./lib.mjs');\nconsole.log(m.v, import.meta.url.endsWith('/d/main.mjs'));\ntry { await import('./mauvais.mjs'); } catch (e) { console.log(e.name, e.message); }\nlet ordre = [];\nconst p = import('./lib.mjs').then(() => ordre.push('charge'));\nordre.push('apres');\nawait p;\nconsole.log(ordre.join(','));\n"),
+            ("/d/mauvais.mjs", "import { absent } from './lib.mjs';\nconsole.log(absent);\n"),
+        ],
+        "/d/main.mjs",
+        "42 true\nSyntaxError The requested module './lib.mjs' does not provide an export named 'absent'\napres,charge",
+    ),
+    (
+        "TypeScript : annotations, as, generiques",
+        &[
+            ("/t/main.ts", "interface Point { x: number; y?: number }\ntype Pair<T> = [T, T];\nfunction somme(a: number, b: number = 2): number { return a + b; }\nconst p: Point = { x: 1 };\nlet q = p as unknown as Point;\nconst id = <T,>(v: T): T => v;\nconst paire: Pair<string> = ['a', 'b'];\nlet maybe: string | null = null;\nconsole.log(somme(1), q.x, id<number>(5), paire.join(''), maybe?.length ?? 'vide');\n"),
+        ],
+        "/t/main.ts",
+        "3 1 5 ab vide",
+    ),
+    (
+        "TypeScript : classes, abstract, proprietes de parametres",
+        &[
+            ("/u/main.ts", "abstract class Forme {\n  abstract aire(): number;\n  protected readonly nom: string = 'forme';\n  decrire(): string { return `${this.nom}:${this.aire()}`; }\n}\nclass Carre extends Forme implements Iterable<number> {\n  static compte: number = 0;\n  private cote: number;\n  constructor(public readonly c: number, private echelle = 1) { super(); this.cote = c; Carre.compte++; }\n  aire(): number { return this.cote * this.cote * this.echelle; }\n  *[Symbol.iterator](): Iterator<number> { yield this.c; }\n  get double(): number { return this.c * 2; }\n}\nconst c = new Carre(3, 2);\nconsole.log(c.decrire(), c.c, c.double, [...c].join(), Carre.compte, Object.keys(c).sort().join());\n"),
+        ],
+        "/u/main.ts",
+        "forme:18 3 6 3 1 c,cote,echelle,nom",
+    ),
+    (
+        "TypeScript : enum, surcharges, satisfies, declare",
+        &[
+            ("/v/main.ts", "enum Couleur { Rouge, Vert = 5, Bleu }\nenum Dir { Haut = 'H', Bas = 'B' }\nconst enum Taille { S = 1, M = S * 2, L = M * 2 }\ndeclare const VERSION: string;\nfunction f(x: string): string;\nfunction f(x: number): number;\nfunction f(x: any): any { return x; }\ntype Fn = (a: number) => void;\nconst m = new Map<string, Array<number>>([['a', [1, 2]]]);\nconst conf = { port: 80 } satisfies Record<string, number>;\nfunction isStr(v: unknown): v is string { return typeof v === 'string'; }\nlet n: number = (<any>'7') * 1;\nconsole.log(Couleur.Bleu, Couleur[5], Dir.Bas, Taille.L, Object.keys(Couleur).join());\nconsole.log(f('x'), f(3), m.get('a')!.length, conf.port, isStr('a'), n, typeof VERSION);\n"),
+        ],
+        "/v/main.ts",
+        "6 Vert B 4 0,5,6,Rouge,Vert,Bleu\nx 3 2 80 true 7 undefined",
+    ),
+    (
+        "TypeScript : modules, import type, fleches typees",
+        &[
+            ("/w/lib.ts", "export interface Opt { n: number }\nexport type Id = string;\nexport const defaut: Opt = { n: 3 };\nexport function cree(o: Opt = defaut): Opt { return { ...o }; }\nexport enum Mode { A = 'a', B = 'b' }\n"),
+            ("/w/main.ts", "import { cree, defaut, Mode, type Opt } from './lib.js';\nimport type { Id } from './lib';\nconst f = (o: { a: number; b?: string }, ...rest: number[]): string => `${o.a}${rest.length}`;\nconst g = async <T>(x: T): Promise<T> => x;\nconst h = (x: number): x is number => true;\nlet t: [string, number] = ['a', 1];\nlet u: Array<Array<number>> = [[1]];\nlet fn: (x: number) => (y: number) => number = x => y => x + y;\nclass K<T extends object = {}> { m<U>(u: U): U { return u; } }\nconst o: Opt = cree();\nconst id: Id = 'x';\nconsole.log(o.n, defaut.n, Mode.B, id, f({ a: 1 }, 1, 2), t[1], u[0][0], fn(1)(2), new K<{}>().m<string>('k'), h(1));\ng(5).then(v => console.log('g', v));\n"),
+        ],
+        "/w/main.ts",
+        "3 3 b x 12 1 1 3 k true\ng 5",
+    ),
+];
+
+/// Runs the corpus of the engine (16.1), the DOM (16.2), modules and
+/// TypeScript (16.3.2). Returns (passed, failed); a failure prints what
+/// was expected and what came.
 pub fn run(headroom: &dyn Fn() -> usize) -> (usize, usize) {
     let (engine_passed, engine_failed) = run_engine(headroom);
     let (page_passed, page_failed) = run_pages(headroom);
-    (engine_passed + page_passed, engine_failed + page_failed)
+    let (module_passed, module_failed) = run_modules(headroom);
+    (engine_passed + page_passed + module_passed, engine_failed + page_failed + module_failed)
+}
+
+/// The module and TypeScript cases (16.3.2).
+pub fn run_modules(headroom: &dyn Fn() -> usize) -> (usize, usize) {
+    let mut passed = 0;
+    let mut failed = 0;
+    for (name, files, main, expected) in MODULE_CASES {
+        let got = run_module_case(files, main, headroom);
+        if got == *expected {
+            passed += 1;
+        } else {
+            failed += 1;
+            crate::serial_println!("[js] ECHEC {} : attendu {:?}, obtenu {:?}", name, expected, got);
+        }
+    }
+    (passed, failed)
 }
 
 /// The DOM cases (16.2).

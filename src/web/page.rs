@@ -15,11 +15,12 @@
 //! engine covers a part of what pages expect, and a page that falls back
 //! on it says more than one that silently half works.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use super::css;
 use super::html::{self, Document};
+use super::js::dom::PageScript;
 use super::http::{self, Method, Net, Request, Response, Store};
 use super::tls::{Failure, Session};
 use super::layout::{self, Laid};
@@ -43,8 +44,8 @@ pub struct Loaded {
     /// The `<style>` or `<link>` element each sheet came from.
     pub sheet_nodes: Vec<html::NodeId>,
     /// JavaScript sources, in document order.
-    pub scripts: Vec<String>,
-    /// Scripts left out, and why (modules, sources too large): for the
+    pub scripts: Vec<crate::web::js::dom::PageScript>,
+    /// Scripts left out, and why (sources too large, too many): for the
     /// page's console.
     pub skipped_scripts: Vec<String>,
     pub security: String,
@@ -184,7 +185,8 @@ pub fn load<N: Net, S: Store>(net: &mut N, store: &mut S, request: Request, widt
 }
 
 /// Is this `type` of `<script>` JavaScript? The empty type and the
-/// historical names are; `module`, JSON and templates are not run.
+/// historical names are; JSON and templates are not run, and `module`
+/// is a module (`gather_scripts`).
 fn is_classic_script(kind: &str) -> bool {
     let kind = kind.trim().to_ascii_lowercase();
     kind.is_empty()
@@ -196,20 +198,24 @@ fn is_classic_script(kind: &str) -> bool {
 
 /// The page's scripts, in document order: inline text, or the fetched
 /// file of `src`. Returns them, and what was left out.
-fn gather_scripts<N: Net, S: Store>(net: &mut N, store: &mut S, document: &Document, base: &Url) -> (Vec<String>, Vec<String>) {
+fn gather_scripts<N: Net, S: Store>(net: &mut N, store: &mut S, document: &Document, base: &Url) -> (Vec<PageScript>, Vec<String>) {
     let mut scripts = Vec::new();
     let mut skipped = Vec::new();
     let mut fetched = 0;
     for id in document.elements("script") {
         let kind = document.attribute(id, "type").unwrap_or("");
-        if !is_classic_script(kind) {
-            if kind.eq_ignore_ascii_case("module") {
-                skipped.push(String::from("script de type module ignore (modules ES non pris en charge)"));
-            }
+        let module = kind.trim().eq_ignore_ascii_case("module");
+        if !module && !is_classic_script(kind) {
+            continue;
+        }
+        // `nomodule`: the fallback of browsers without modules; Nova has
+        // them.
+        if !module && document.attribute(id, "nomodule").is_some() {
             continue;
         }
         match document.attribute(id, "src") {
-            None => scripts.push(document.text_content_raw(id)),
+            None if module => scripts.push(PageScript::Module(base.to_string(), document.text_content_raw(id))),
+            None => scripts.push(PageScript::Classic(document.text_content_raw(id))),
             Some(src) => {
                 let Some(url) = base.join(src) else {
                     continue;
@@ -220,7 +226,8 @@ fn gather_scripts<N: Net, S: Store>(net: &mut N, store: &mut S, document: &Docum
                 }
                 fetched += 1;
                 match fetch_text(net, store, url.clone(), MAX_SCRIPT_BYTES) {
-                    Some(source) => scripts.push(source),
+                    Some(source) if module => scripts.push(PageScript::Module(url.to_string(), source)),
+                    Some(source) => scripts.push(PageScript::Classic(source)),
                     None => skipped.push(alloc::format!("{} : script non charge", url)),
                 }
             }

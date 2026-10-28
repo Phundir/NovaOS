@@ -202,8 +202,11 @@ pub enum Expr {
     SuperCall(Vec<Arg>),
     SuperMember(Box<Expr>),
     NewTarget,
-    /// `import(...)`: not supported, evaluates to a rejected promise.
+    /// `import(...)`: a promise of the module's namespace, from the
+    /// realm's module loader.
     Import(Box<Expr>),
+    /// `import.meta`
+    ImportMeta,
 }
 
 #[derive(Debug, Clone)]
@@ -237,9 +240,51 @@ pub enum Stmt {
     Empty,
 }
 
+/// What an `import` binds a local name to.
+#[derive(Debug, Clone)]
+pub enum ImportName {
+    /// `import x from`
+    Default,
+    /// `import * as x from`
+    Namespace,
+    /// `import { a as x } from`
+    Named(JsStr),
+}
+
+/// `import ... from "source"`: the local names and what they read.
+#[derive(Debug, Clone)]
+pub struct ImportDecl {
+    pub source: JsStr,
+    pub bindings: Vec<(ImportName, JsStr)>,
+}
+
+/// One name a module exports.
+#[derive(Debug, Clone)]
+pub enum ExportEntry {
+    /// Exported name, local binding: `export const a`, `export { a as b }`,
+    /// `export default` (the binding is named `default`, which no source
+    /// can name).
+    Local(JsStr, JsStr),
+    /// Exported name, source module, imported name (`None`: the whole
+    /// namespace, `export * as ns from`).
+    From(JsStr, JsStr, Option<JsStr>),
+    /// `export * from "source"`
+    All(JsStr),
+}
+
+/// The import and export declarations of a module, taken out of its body:
+/// imports are resolved before the body runs, as the language wants.
+#[derive(Debug, Clone, Default)]
+pub struct ModuleInfo {
+    pub imports: Vec<ImportDecl>,
+    pub exports: Vec<ExportEntry>,
+}
+
 /// A parsed script.
 pub struct Program {
     pub body: Vec<Stmt>,
     pub vars: Vec<JsStr>,
     pub strict: bool,
+    /// A module: what it imports and exports.
+    pub module: Option<ModuleInfo>,
 }

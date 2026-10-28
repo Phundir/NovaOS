@@ -842,12 +842,22 @@ fn task_js_selftest() -> ! {
             dom_passed + dom_failed + browser_passed + browser_failed
         );
     }
-    // 16.3: `dev interpret main.js`, programs checked against Node.
+    // 16.3: `dev interpret`, programs checked against Node and Bun; the
+    // engine's module and TypeScript cases with them.
     let (node_passed, node_failed) = sdk::js::selftest::run();
-    if node_failed == 0 {
-        serial_println!("[test] phase 16.3 validee - {} verifications de dev interpret (Node)", node_passed);
+    let (module_passed, module_failed) = web::js::selftest::run_modules(&scheduler::stack_headroom);
+    if node_failed + module_failed == 0 {
+        serial_println!(
+            "[test] phase 16.3 validee - {} verifications de dev interpret (Node, Bun), {} cas de modules et TypeScript",
+            node_passed,
+            module_passed
+        );
     } else {
-        serial_println!("[test] phase 16.3 ECHEC - {} verifications incorrectes sur {}", node_failed, node_passed + node_failed);
+        serial_println!(
+            "[test] phase 16.3 ECHEC - {} verifications incorrectes sur {}",
+            node_failed + module_failed,
+            node_passed + node_failed + module_passed + module_failed
+        );
     }
     selftest_done()
 }

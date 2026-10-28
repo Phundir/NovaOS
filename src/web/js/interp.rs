@@ -78,6 +78,9 @@ const MUTABLE: u8 = 0;
 const CONSTANT: u8 = 1;
 /// `let`/`const`/`class` before its declaration ran: reading it throws.
 const UNINITIALIZED: u8 = 2;
+/// An imported name: the value is a function that reads the exporting
+/// module's binding, so the import stays live (`module.rs`).
+pub(super) const IMPORTED: u8 = 3;
 
 pub struct Binding {
     pub name: JsStr,
@@ -109,7 +112,7 @@ impl Scope {
         Scope(Rc::new(RefCell::new(ScopeData { vars: Vec::new(), parent, frame })))
     }
 
-    fn declare(&self, name: JsStr, value: Value, state: u8) {
+    pub(super) fn declare(&self, name: JsStr, value: Value, state: u8) {
         let mut data = self.0.borrow_mut();
         if let Some(binding) = data.vars.iter_mut().find(|b| b.name.ptr_eq(&name) || b.name == name) {
             binding.value = value;
@@ -119,7 +122,7 @@ impl Scope {
         data.vars.push(Binding { name, value, state });
     }
 
-    fn has_own(&self, name: &JsStr) -> bool {
+    pub(super) fn has_own(&self, name: &JsStr) -> bool {
         self.0.borrow().vars.iter().any(|b| b.name.ptr_eq(name) || b.name == *name)
     }
 
@@ -243,6 +246,10 @@ pub struct Realm {
     /// Sources of the scripts, for `Function.prototype.toString`.
     pub sources: Vec<Rc<str>>,
     pub halted: Option<String>,
+    /// How `import` finds a module: set by whoever runs modules (the
+    /// Node runner); `None` where there are none (a page's classic
+    /// scripts), and `import()` then rejects.
+    pub loader: Option<super::module::Loader>,
 }
 
 /// What the page's scripts reach outside the engine.
@@ -281,6 +288,12 @@ pub trait Host {
     /// The page asks to go to `url`.
     fn navigate(&mut self, url: &str, replace: bool);
     fn log(&mut self, line: &str);
+    /// The source of the module at `path` (a resolved path or URL), for
+    /// `module::host_loader`. None by default: no module to load.
+    fn module_source(&mut self, path: &str) -> Option<String> {
+        let _ = path;
+        None
+    }
     /// `alert`/`confirm`/`prompt`: shown, not waited on.
     fn dialog(&mut self, kind: &str, message: &str) -> Option<String> {
         let _ = (kind, message);
@@ -310,6 +323,7 @@ impl Realm {
             unhandled: Vec::new(),
             sources: Vec::new(),
             halted: None,
+            loader: None,
         };
         let scope = realm.global_scope.clone();
         realm.track_scope(&scope);
@@ -576,8 +590,13 @@ impl<'a> Ctx<'a> {
     /// Parses and runs source text in the global scope: scripts, `eval`
     /// and `new Function`. A syntax error is thrown as a SyntaxError.
     pub fn eval_global(&mut self, source: &str) -> R<Value> {
+        self.eval_global_with(source, super::parse::Options::SCRIPT)
+    }
+
+    /// `eval_global` of a script that may be TypeScript.
+    pub fn eval_global_with(&mut self, source: &str, options: super::parse::Options) -> R<Value> {
         let headroom = self.headroom;
-        let program = match super::parse::parse(source, headroom) {
+        let program = match super::parse::parse_with(source, headroom, options) {
             Ok(program) => program,
             Err(error) => {
                 let (line, column) = super::lex::position(source, error.at);
@@ -756,6 +775,11 @@ impl<'a> Ctx<'a> {
                             let message = alloc::format!("Cannot access '{}' before initialization", name.as_str());
                             return self.throw_error("ReferenceError", &message);
                         }
+                        if binding.state == IMPORTED {
+                            let getter = binding.value.clone();
+                            drop(data);
+                            return self.call(&getter, Value::Undefined, &[]);
+                        }
                         return Ok(binding.value.clone());
                     }
                 }
@@ -796,7 +820,7 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    fn is_declared(&self, name: &JsStr, scope: &Scope) -> bool {
+    pub(super) fn is_declared(&self, name: &JsStr, scope: &Scope) -> bool {
         let mut current = Some(scope.clone());
         while let Some(scope) = current {
             if scope.has_own(name) {
@@ -824,7 +848,7 @@ impl<'a> Ctx<'a> {
                 }
                 match state {
                     Some(MUTABLE) => return Ok(()),
-                    Some(CONSTANT) => {
+                    Some(CONSTANT) | Some(IMPORTED) => {
                         drop(data);
                         return self.throw_type("Assignment to constant variable.");
                     }
@@ -861,7 +885,7 @@ impl<'a> Ctx<'a> {
     // --------------------------------------------------------
 
     /// Function declarations of a statement list are made on entry.
-    fn hoist_functions(&mut self, body: &[Stmt], scope: &Scope, top: bool) -> R<()> {
+    pub(super) fn hoist_functions(&mut self, body: &[Stmt], scope: &Scope, top: bool) -> R<()> {
         for statement in body {
             let target = match statement {
                 Stmt::Function(func) => func,
@@ -886,7 +910,7 @@ impl<'a> Ctx<'a> {
     }
 
     /// Declares the `let`/`const`/`class` names of a block, uninitialized.
-    fn declare_lexical(&mut self, body: &[Stmt], scope: &Scope) {
+    pub(super) fn declare_lexical(&mut self, body: &[Stmt], scope: &Scope) {
         for statement in body {
             match statement {
                 Stmt::Var(kind, declarations) if *kind != VarKind::Var => {
@@ -1587,10 +1611,12 @@ impl<'a> Ctx<'a> {
                 ops::get_from(self, &proto, &key, &this)
             }
             Expr::NewTarget => Ok(scope.frame().map_or(Value::Undefined, |f| f.new_target.clone())),
-            Expr::Import(_) => {
-                let error = self.error_object(self.realm.protos.type_error.clone(), "TypeError", "import() n'est pas pris en charge");
-                super::builtins::promise::rejected(self, Value::Obj(error))
+            Expr::Import(specifier) => {
+                let specifier = self.eval(specifier, scope)?;
+                let specifier = ops::to_string(self, &specifier)?;
+                super::module::dynamic_import(self, specifier.as_str(), scope)
             }
+            Expr::ImportMeta => super::module::import_meta(self, scope),
             // Handled by `eval`.
             Expr::Num(_) | Expr::Str(_) | Expr::Ident(_) | Expr::This | Expr::Null | Expr::Undefined | Expr::Bool(_) | Expr::Member(..)
             | Expr::Index(..) | Expr::Call(..) => self.eval(expr, scope),

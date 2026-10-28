@@ -210,7 +210,17 @@ nova-os/
 │   │   ├── paint.rs           Rendu dans un tampon de pixels
 │   │   ├── page.rs            Chaine complete d'une page
 │   │   ├── js/                Moteur JavaScript (16.1), compilé en entier
-│   │   │   ├── lex.rs / parse.rs / ast.rs  ES2022 vers un arbre
+│   │   │   ├── lex.rs / ast.rs  Jetons ; l'arbre (Program::module)
+│   │   │   ├── parse/         ES2022 et TypeScript vers un arbre (16.3.2)
+│   │   │   │   ├── mod.rs     Options (module, typescript), programme
+│   │   │   │   ├── stmt.rs / expr.rs / func.rs  par grammaire
+│   │   │   │   ├── module.rs  import / export retirés du corps
+│   │   │   │   └── ts.rs      Types lus et jetés ; enum, propriétés de
+│   │   │   │                  paramètres ; essais avec retour arrière
+│   │   │   ├── module.rs      Liaison des modules ES : exports en
+│   │   │   │                  accesseurs, imports en liaisons IMPORTED
+│   │   │   │                  (vivantes), import(), import.meta,
+│   │   │   │                  host_loader (sources données par l'hôte)
 │   │   │   ├── interp.rs      Interprète d'arbre, bornes (pas, pile,
 │   │   │   │                  mémoire), file de tâches, minuteries, Host
 │   │   │   ├── ops.rs         Opérations abstraites, check_string/array
@@ -223,7 +233,8 @@ nova-os/
 │   │   │   │                  Map/Set/Weak*, Promise, console, minuteries
 │   │   │   ├── dom/           (16.2) Node, Element, Document, événements,
 │   │   │   │                  window, location, storage, fetch, XHR
-│   │   │   └── selftest.rs    94 cas (Node 22) + 30 cas DOM (jsdom)
+│   │   │   └── selftest.rs    95 cas (Node 22) + 31 cas DOM (jsdom,
+│   │   │                      Chromium) + 8 cas modules/TS (Node, Bun)
 │   │   └── selftest.rs        Autotest hors reseau
 │   │
 │   ├── vm/                    Espaces d'adressage prives (11.3)
@@ -414,8 +425,9 @@ nova-os/
 │   │   ├── etr.rs             AST JavaScript, correspondances, seuil 70 % (9.6)
 │   │   ├── libdev.rs          Catalogue des abstractions (9.4.3)
 │   │   ├── cli.rs             Les six verbes du §15.2 (9.1)
-│   │   ├── js/                dev interpret main.js (16.3)
-│   │   │   ├── mod.rs         Hote, require, tache dev-js, droits
+│   │   ├── js/                dev interpret main.js / main.ts (16.3)
+│   │   │   ├── mod.rs         Hote, require, import (ESM, CJS, JSON),
+│   │   │   │                  detection du genre, tache dev-js, droits
 │   │   │   ├── node.rs        fs, path, os, util, events, process
 │   │   │   └── selftest.rs    Trois programmes compares a Node 22
 │   │   ├── rustc/             Compilateur et interprète Rust (9.5.1)
@@ -2460,6 +2472,13 @@ dev interpret a.js x y (cli::interpret, tache du shell, pile 128 Kio)
 | `private_key("main")` | le module du programme (`require.main`, `module.id === "."`) |
 | `private_key("stdout")` | ce que `process.stdout.write` a laissé sans fin de ligne |
 | `js::RIGHTS` | les droits des appels `fs` de l'exécution en cours |
+| `Realm::loader` | `import_loader` : intégrés, puis fichiers résolus depuis le module qui importe ; un module ES rendu par son espace de noms, un CommonJS par ses `exports` |
+
+Le genre d'un fichier : `.mjs`/`.mts` module ES, `.cjs`/`.cts` CommonJS,
+`.json` données ; un `.js` ou un `.ts` est un module ES s'il a `import`
+ou `export` au premier niveau (la détection de Node 22 et de Bun),
+CommonJS sinon. Un `.ts` reçoit en plus `require`, `__filename` et
+`__dirname` même en module ES, comme sous Bun.
 
 ## 12. Points d'extension immédiats
 

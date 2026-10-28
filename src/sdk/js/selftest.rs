@@ -8,7 +8,11 @@
 //! corner cases (a cycle of requires, `require.main`, a module that fails
 //! twice, `fs` error codes and directories, `stdout.write` in pieces,
 //! `setInterval`, `await`, `nextTick`, `process.exitCode`), and the
-//! uncaught error. Then `dev interpret` itself, through the command line.
+//! uncaught error. Then three more for 16.3.2: an ES module importing
+//! CommonJS, JSON and built-in modules (checked against Node), and
+//! TypeScript as an ES module and as CommonJS (checked against Bun, the
+//! runtime the 13.2 row names). Then `dev interpret` itself, through the
+//! command line, for a `.js` and a `.ts`.
 //!
 //! `nextTick` comes before the `async` function in the second program:
 //! `await` waits in place in this engine (16.1), so code written after a
@@ -86,6 +90,17 @@ setTimeout(() => console.log('jamais'), 10);
 null.x;
 "),
     ("bonjour.js", "console.log('bonjour', process.argv.length - 2);\nprocess.exitCode = 2;\n"),
+    // 16.3.2: an ES module with CommonJS, JSON and built-in imports
+    // (Node), TypeScript as an ES module and as CommonJS (Bun).
+    ("quatre/d.json", "{\"v\": 7}\n"),
+    ("quatre/esp.mjs", "export const double = n => n * 2;\n"),
+    ("quatre/main.mjs", "import fs from 'fs';\nimport { join } from 'node:path';\nimport vieux, { nomme } from './vieux.cjs';\nimport * as esp from './esp.mjs';\nimport donnees from './d.json' with { type: 'json' };\nconsole.log(typeof fs.readFileSync, join('/a', 'b'), vieux.autre, nomme, esp.double(4), donnees.v);\nconsole.log(typeof require, typeof module, import.meta.filename.endsWith('/quatre/main.mjs'));\nconst r = await import('./vieux.cjs');\nconsole.log(r.default === vieux, r.nomme);\n"),
+    ("quatre/vieux.cjs", "exports.nomme = 'n';\nexports.autre = 2;\n"),
+    ("cinq/main.ts", "import { readFileSync, writeFileSync } from 'fs';\nimport path from 'path';\nimport { Pile } from './pile';\nconst outil = require('./outil.cjs');\nconst p = new Pile<number>().pousse(1).pousse(2);\nwriteFileSync(path.join(__dirname, 'f.txt'), 'abc');\nconsole.log(p.taille, outil.nom, readFileSync(path.join(__dirname, 'f.txt'), 'utf8'), typeof __filename);\n"),
+    ("cinq/outil.cjs", "exports.nom = 'outil';\n"),
+    ("cinq/pile.ts", "export class Pile<T> {\n  private items: T[] = [];\n  pousse(v: T): this { this.items.push(v); return this; }\n  get taille(): number { return this.items.length; }\n}\n"),
+    ("six/main.ts", "const fs = require('fs');\ninterface A { x: number }\nconst a: A = { x: 1 };\nenum E { Un = 1 }\nconsole.log(a.x, typeof module, typeof fs.existsSync, E.Un, require.main === module);\n"),
+    ("bonjour.ts", "const n: number = process.argv.length - 2;\nconsole.log('bonjour', n);\n"),
 ];
 
 /// What the three programs must print, and exit with.
@@ -128,6 +143,15 @@ const EXPECTED: &[(&str, &[&str], &[&str], i64, usize)] = &[
         4,
         3,
     ),
+    (
+        "quatre/main.mjs",
+        &[],
+        &["function /a/b 2 n 8 7", "undefined undefined true", "true n"],
+        0,
+        4,
+    ),
+    ("cinq/main.ts", &[], &["2 outil abc string"], 0, 3),
+    ("six/main.ts", &[], &["1 object function 1 true"], 0, 1),
 ];
 
 struct Report {
@@ -241,6 +265,22 @@ pub fn run() -> (usize, usize) {
         }
         Err(error) => report.check(false, &alloc::format!("dev interpret : {:?}", error)),
     }
+    // A `.ts` goes to Bun's row, run by the same engine.
+    let line = alloc::format!("dev interpret {}/bonjour.ts x", TEST_ROOT);
+    match crate::sdk::cli::execute(&line, now) {
+        Ok(output) => {
+            let lines = output.lines();
+            report.check(lines.first().map(String::as_str) == Some("  bonjour 1"), "dev interpret .ts : sortie");
+            report.check(
+                lines.last().map(String::as_str) == Some("code de sortie : 0 - 1 module(s)"),
+                "dev interpret .ts : code de sortie",
+            );
+        }
+        Err(error) => report.check(false, &alloc::format!("dev interpret .ts : {:?}", error)),
+    }
+    // The file the TypeScript program wrote.
+    let written = crate::fs::read_file(&alloc::format!("{}/cinq/f.txt", TEST_ROOT), kernel);
+    report.check(written.as_deref() == Ok(b"abc".as_slice()), "cinq/f.txt sur le volume");
 
     purge_tree(TEST_ROOT, now);
     (report.passed, report.failed)
