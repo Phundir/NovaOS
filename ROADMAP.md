@@ -28,7 +28,7 @@ x86_64, GRUB/Multiboot2.
 | Phase 13 — Pile graphique Nova et accélération GPU | 🔧 faite hors Firefox, à valider | Spec acceptée (24 septembre) ; pilote virtio-gpu 3D, anneau Venus, encodeur généré et vérifié (68 commandes), cœur GPU, écran et plan curseur au cœur, compositeur sur le GPU (égal au pixel près au processeur), `SYS_GPU_*`, bibliothèques C et Rust, modules `.kmd` signés, délai de garde éprouvé ; 75 vérifications ; aucune case cochée (validation de l'utilisateur attendue) ; Firefox (13.0, 13.9-13.10, 13.11.1) reporté par l'utilisateur |
 | Phase 14 — LIFS (nouveau type de partition, liens CoW et Tag) | 🔧 implémentée, à valider | Décisions 14.1 prises (24 septembre) ; GPT/MBR, partitions montées une lettre chacune, racine LIFS, plus aucun formatage implicite ; LIFS (arbres B+, étendues, clones CoW, Tag, index inverse, journal) ; `SYS_FS_NODE_*` ; `tools/lifs.py` et reprise NovaFS → LIFS ; 81 vérifications LIFS dont 32 coupures simulées ; aucune case cochée (validation de l'utilisateur attendue) |
 | Phase 15 — Mises à jour atomiques des applications | ✅ faite (28 octobre 2026) | Proposition de l'utilisateur du 24 septembre 2026 ; points 15.1 tranchés sous mandat d'autonomie ; JSON, Ed25519 (ENTERPRISE enfin signé), HTTPS en flux, pointeur atomique, registre signé, versions à part, lancement par le pointeur, nettoyage différé, `spm.dsa` ; 70 vérifications ; reste 15.6.2 (canal par application dans l'interface) et 15.7.3 partiel |
-| Phase 16 — Langages et outils (fin de la phase 9) | 🔄 en cours | 16.0 faite (28 octobre 2026) : shell, `terminal.ss`, shell série et mode recovery, 60 vérifications + `make test-recovery` ; restent le moteur JavaScript complet (navigateur intégré et ligne Node/Bun du §13.2), Python, C, Java, débogueur de `dev run --debug` |
+| Phase 16 — Langages et outils (fin de la phase 9) | 🔄 en cours | 16.0 (shell, terminal, recovery), 16.1 (moteur JavaScript, 95 cas vérifiés contre Node 22) et 16.2 (DOM et scripts du navigateur, 30 cas vérifiés contre jsdom + 12 vérifications du navigateur) faites le 28 octobre 2026 ; restent la ligne Node/Bun du §13.2, Python, C, Java, débogueur de `dev run --debug` |
 | Phase 17 — Reliquats système de fichiers et POSIX | 📝 planifiée | Ce que les phases 12 et 14 ont laissé ouvert hors Firefox : page de temps, autotest appel par appel, `copy_file_range`/clonage, Tag dans l'explorateur, GPT de secours, partitionneur |
 | Phase 18 — Firefox sur la pile Nova | ⏸ chez l'auteur | 12.5, 12.7, 12.8, 13.0, 13.9, 13.10, 13.11.1 : demandent la construction du fork et le GPU de la machine de l'auteur |
 
@@ -46,8 +46,9 @@ cochées sur 229.** Les sept restantes sont toutes en phase 9, et elles
 sont nommées juste en dessous. Il ne reste donc **plus de case à ouvrir**
 — seulement des limites à lever, listées phase par phase plus bas.
 
-**Prochaine étape : 16.1, le moteur JavaScript** ; la phase 15 et
-l'étape 16.0 (shell, terminal, recovery) sont faites (28 octobre 2026).
+**Prochaine étape : 16.3, `dev interpret main.js`** ; la phase 15 et
+les étapes 16.0 (shell, terminal, recovery), 16.1 (moteur JavaScript) et
+16.2 (scripts du navigateur intégré) sont faites (28 octobre 2026).
 (L'ancien choix « un espace d'adressage par processus » ou « élargir le
 sous-ensemble Rust » est derrière nous : les espaces privés sont faits
 depuis 11.3, et le reste de la phase 9 forme la phase 16.)
@@ -4012,10 +4013,65 @@ Ce qu'il y a derrière :
   d'origine, documentées dans `interp.rs`.
 - Les collections faibles ne sont pas faibles (libérées avec le royaume).
 #### 16.2 Scripts dans le navigateur intégré
-- [ ] 16.2.1 DOM : `document`, éléments, attributs, texte, événements,
+- [x] 16.2.1 DOM : `document`, éléments, attributs, texte, événements,
   minuteries ; une modification du DOM refait la mise en page
-- [ ] 16.2.2 `fetch` et `XMLHttpRequest` sur le client de 15.0.4
-- [ ] 16.2.3 `about:accueil` ne dit plus « aucune page n'exécute de script »
+- [x] 16.2.2 `fetch` et `XMLHttpRequest` sur le client de 15.0.4
+- [x] 16.2.3 `about:accueil` ne dit plus « aucune page n'exécute de script »
+
+**Validée le 28 octobre 2026** par l'assistant, sous mandat d'autonomie
+de l'utilisateur. `make test` (4 cœurs, deux démarrages), `make
+test-smp1`, `make test-novga`, QEMU TCG :
+```
+[navigateur] console : pret
+[navigateur] 1 script(s) executes en 10 ms - 1 ligne(s) de console, 0 erreur(s)
+[test] phase 16.2 validee - 30 cas du DOM, 12 verifications du navigateur
+```
+Ce qu'il y a derrière :
+- `web::tree` : l'arbre que les scripts changent (création, insertion,
+  retrait, attributs, `innerHTML` dans les deux sens, clonage sans
+  récursion). **Bug latent corrigé** : la cascade (`style::compute`)
+  parcourait l'arène en supposant qu'un parent précède ses enfants, ce
+  qu'un nœud déplacé par un script dément ; elle suit maintenant l'ordre
+  de l'arbre (`Document::preorder`), comme `elements()`.
+- `web::js::dom` (5 fichiers) : `Node`, `Element`, `Text`, `Document`
+  (sélecteurs CSS de la cascade pour `querySelector`, `classList`,
+  `style`, `dataset`, contrôles de formulaire), `EventTarget` et le
+  dispatch capture/cible/bouillonnement avec gestionnaires en ligne,
+  `window` (`location`, `history`, `navigator`, `localStorage` persistant,
+  `sessionStorage`, `matchMedia`, `requestAnimationFrame`, dialogues),
+  `fetch`, `Headers`, `Response`, `XMLHttpRequest`.
+- Les 30 cas du DOM ont été vérifiés contre **jsdom 24** : un seul écart,
+  `fetch` (jsdom ne l'a pas). Deux corrections en sont sorties :
+  `cssText` se termine par `;`, et un test dont l'ordre des cookies
+  dépendait du chemin.
+- Le navigateur (`apps/browser/script.rs`) : les scripts de la page
+  (en ligne et externes, ramenés par la tâche de chargement avec les
+  feuilles), un royaume par onglet, mise en page refaite depuis le
+  document vivant (`page::render_live`, y compris les `<style>` ajoutés
+  par script), clics donnés à l'élément sous le pointeur par les boîtes
+  de la mise en page (`Page::boxes`, nouveau), `keydown`, `input`,
+  `change`, `submit` annulables, minuteries de l'onglet visible,
+  `about:console` (Ctrl+J). L'autotest de bout en bout passe par ce même
+  chemin, sans fenêtre : arrivée, nouvelle mise en page, clic trouvé par
+  sa boîte, `preventDefault` sur un lien, minuterie qui ajoute une
+  feuille, navigation demandée par `location.href`.
+- Un défaut attrapé par le banc hôte avant tout démarrage : un
+  `XMLHttpRequest` (cible qui n'est pas un nœud) faisait lire un attribut
+  à un indice hors de l'arène — une panique du noyau.
+
+**Ce qui reste ouvert dans la 16.2**
+- `fetch` et `XMLHttpRequest` sont **synchrones** sous la promesse : la
+  fenêtre attend la fin du transfert. Aucun n'a été éprouvé sur un vrai
+  réseau sous QEMU (pas de serveur joignable dans cet environnement).
+- Aucune session interactive relevée (clic réel dans la fenêtre) : le
+  chemin de la fenêtre est celui de l'autotest, mais l'œil de l'auteur
+  manque.
+- Collections instantanées (pas de listes vivantes), `dataset` sans
+  nouvelles clés (pas de `Proxy`), `getComputedStyle` limité au style en
+  ligne, pas de `MutationObserver`, de `FormData`, de canvas ni d'images.
+- Les nœuds retirés gardent leur place dans l'arène : une page qui crée
+  et jette des nœuds sans fin atteint `html::MAX_NODES` (60 000).
+- Les minuteries d'un onglet en arrière-plan attendent qu'il revienne.
 #### 16.3 Node et Bun (§13.2)
 - [ ] 16.3.1 `dev interpret main.js` : le moteur Nova, `console`, `require`
   de modules locaux, `fs` sur `SYS_FS_*` ; la colonne « compilateur »

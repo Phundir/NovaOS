@@ -25,12 +25,24 @@ pub struct TestHost {
     pub seed: u64,
     pub lines: Vec<String>,
     pub offset_minutes: i32,
+    /// `localStorage`, in memory: (origin, session, items).
+    pub stored: Vec<(String, bool, Vec<(String, String)>)>,
+    pub cookie_jar: String,
+    pub navigated: Option<String>,
 }
 
 impl TestHost {
     pub fn new() -> TestHost {
         // 2026-10-28T12:00:00Z
-        TestHost { now: 1_793_188_800_000, seed: 0x9E37_79B9_7F4A_7C15, lines: Vec::new(), offset_minutes: 60 }
+        TestHost {
+            now: 1_793_188_800_000,
+            seed: 0x9E37_79B9_7F4A_7C15,
+            lines: Vec::new(),
+            offset_minutes: 60,
+            stored: Vec::new(),
+            cookie_jar: String::new(),
+            navigated: None,
+        }
     }
 }
 
@@ -68,18 +80,30 @@ impl Host for TestHost {
     }
 
     fn cookies(&mut self, _url: &str) -> String {
-        String::new()
+        self.cookie_jar.clone()
     }
 
-    fn set_cookie(&mut self, _url: &str, _line: &str) {}
-
-    fn storage(&mut self, _origin: &str, _session: bool) -> Vec<(String, String)> {
-        Vec::new()
+    fn set_cookie(&mut self, _url: &str, line: &str) {
+        // Enough of a jar for the tests: name=value pairs, last one wins.
+        let pair = line.split(';').next().unwrap_or("").trim();
+        let name = pair.split('=').next().unwrap_or("");
+        let mut kept: Vec<&str> = self.cookie_jar.split("; ").filter(|c| !c.is_empty() && c.split('=').next() != Some(name)).collect();
+        kept.push(pair);
+        self.cookie_jar = kept.join("; ");
     }
 
-    fn set_storage(&mut self, _origin: &str, _session: bool, _items: &[(String, String)]) {}
+    fn storage(&mut self, origin: &str, session: bool) -> Vec<(String, String)> {
+        self.stored.iter().find(|(o, s, _)| o == origin && *s == session).map(|(_, _, items)| items.clone()).unwrap_or_default()
+    }
 
-    fn navigate(&mut self, _url: &str, _replace: bool) {}
+    fn set_storage(&mut self, origin: &str, session: bool, items: &[(String, String)]) {
+        self.stored.retain(|(o, s, _)| !(o == origin && *s == session));
+        self.stored.push((String::from(origin), session, items.to_vec()));
+    }
+
+    fn navigate(&mut self, url: &str, _replace: bool) {
+        self.navigated = Some(String::from(url));
+    }
 
     fn memory_ok(&mut self) -> bool {
         crate::heap::room_for(0)
@@ -111,6 +135,30 @@ pub fn run_case(body: &str, headroom: &dyn Fn() -> usize) -> Result<String, Stri
         let source = alloc::format!("(function() {{\n{}\n}})()", body);
         let value = ctx.run_script(&source);
         match value {
+            Err(error) => Err(error),
+            Ok(value) => settle(&mut ctx, value),
+        }
+    };
+    realm.teardown();
+    outcome
+}
+
+/// Runs one case body in a page made of `html` (the content of
+/// `<body>`), with the DOM installed and the page's address set.
+pub fn run_page_case(html: &str, body: &str, headroom: &dyn Fn() -> usize) -> Result<String, String> {
+    let mut realm = super::builtins::new_realm();
+    let mut host = TestHost::new();
+    let source = alloc::format!("<!doctype html><html><head><title>Essai</title></head><body>{}</body></html>", html);
+    let mut doc = crate::web::html::parse(&source);
+    let outcome = {
+        let mut ctx = Ctx::new(&mut realm, &mut host, &mut doc, headroom, FUEL, String::from("https://exemple.fr/dossier/page.html?q=1#ancre"), (800, 600));
+        super::builtins::install(&mut ctx);
+        super::dom::install(&mut ctx);
+        // The page's own scripts first, as a browser runs them.
+        let scripts: Vec<String> = ctx.doc.elements("script").iter().map(|s| ctx.doc.text_content_raw(*s)).collect();
+        super::dom::start_page(&mut ctx, &scripts);
+        let source = alloc::format!("(function() {{\n{}\n}})()", body);
+        match ctx.run_script(&source) {
             Err(error) => Err(error),
             Ok(value) => settle(&mut ctx, value),
         }
@@ -284,9 +332,70 @@ pub const CASES: &[(&str, &str, &str)] = &[
     ("chaine trop longue refusee", "let s = 'x'; try { while (true) s += s; } catch (e) { return e.name + (s.length >= 1 << 20); }", "RangeErrortrue"),
 ];
 
-/// Runs the corpus. Returns (passed, failed); a failure prints what was
-/// expected and what came.
+/// (name, content of the body, script, expected): the DOM (16.2).
+pub const PAGE_CASES: &[(&str, &str, &str, &str)] = &[
+    ("getElementById et textContent", "<p id=\"a\">Bonjour <b>le</b> monde</p>", "return document.getElementById('a').textContent;", "Bonjour le monde"),
+    ("createElement, appendChild, innerHTML", "<ul><li>w</li></ul>", "const ul = document.querySelector('ul'); for (const t of ['x', 'y']) { const li = document.createElement('li'); li.textContent = t; ul.appendChild(li); } return ul.innerHTML + '|' + ul.children.length;", "<li>w</li><li>x</li><li>y</li>|3"),
+    ("querySelectorAll et selecteurs", "<div class=\"a b\"><span data-k=\"1\">1</span><span>2</span></div><p class=\"a\">3</p>", "return [document.querySelectorAll('div.a > span[data-k]').length, document.querySelectorAll('span').length, document.querySelectorAll('.a').length, document.querySelector('span:last-child').textContent, document.querySelectorAll('div span, p').length].join();", "1,2,2,2,3"),
+    ("classList", "<div id=\"d\" class=\"x\"></div>", "const d = document.getElementById('d'); d.classList.add('y', 'z'); d.classList.remove('x'); const t = d.classList.toggle('w'); return [d.className, t, d.classList.contains('y'), d.classList.length, d.classList.toggle('w', true)].join('|');", "y z w|true|true|3|true"),
+    ("attributs", "<a id=\"l\" href=\"autre.html\">lien</a>", "const a = document.getElementById('l'); a.setAttribute('title', 'T'); const before = a.hasAttribute('title'); a.removeAttribute('title'); return [before, a.hasAttribute('title'), a.getAttribute('href'), a.href, a.getAttribute('absent'), a.getAttributeNames().join('+')].join('|');", "true|false|autre.html|https://exemple.fr/dossier/autre.html||id+href"),
+    ("style en ligne", "<div id=\"d\" style=\"color: blue\"></div>", "const d = document.getElementById('d'); d.style.backgroundColor = 'red'; d.style.width = '10px'; d.style.color = ''; d.style.setProperty('margin-top', '2px'); return d.getAttribute('style') + '|' + d.style.width + '|' + d.style.getPropertyValue('margin-top');", "background-color: red; width: 10px; margin-top: 2px;|10px|2px"),
+    ("evenements : capture, cible, bouillonnement", "<div id=\"d\"><button id=\"b\">ok</button></div>", "const log = []; const d = document.getElementById('d'), b = document.getElementById('b'); document.addEventListener('click', e => log.push('doc-capture'), true); d.addEventListener('click', e => log.push('div:' + e.eventPhase)); b.addEventListener('click', e => log.push('bouton:' + e.eventPhase + ':' + (e.target === b))); window.addEventListener('click', () => log.push('fenetre')); b.click(); return log.join(',');", "doc-capture,bouton:2:true,div:3,fenetre"),
+    ("preventDefault et stopPropagation", "<div id=\"d\"><a id=\"a\" href=\"#\">x</a></div>", "const log = []; document.getElementById('d').addEventListener('click', () => log.push('div')); const a = document.getElementById('a'); a.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); log.push('a'); }); a.addEventListener('click', () => log.push('a2')); const e = new MouseEvent('click', { bubbles: true, cancelable: true }); const r = a.dispatchEvent(e); return log.join() + '|' + r + '|' + e.defaultPrevented;", "a,a2|false|true"),
+    ("gestionnaire en ligne", "<button id=\"b\" onclick=\"window.compte = (window.compte || 0) + 1; return false;\">+</button>", "const b = document.getElementById('b'); b.click(); b.click(); b.onclick = () => { window.compte += 10; }; b.click(); return String(window.compte);", "12"),
+    ("once et removeEventListener", "<p id=\"p\">x</p>", "let n = 0, m = 0; const p = document.getElementById('p'); const f = () => m++; p.addEventListener('ping', () => n++, { once: true }); p.addEventListener('ping', f); p.dispatchEvent(new Event('ping')); p.removeEventListener('ping', f); p.dispatchEvent(new Event('ping')); return n + ',' + m;", "1,1"),
+    ("CustomEvent et detail", "<p id=\"p\">x</p>", "let got; document.getElementById('p').addEventListener('mon-evenement', e => got = e.detail.v); document.getElementById('p').dispatchEvent(new CustomEvent('mon-evenement', { detail: { v: 42 } })); return String(got);", "42"),
+    ("dataset", "<div id=\"d\" data-user-id=\"7\" data-x=\"y\"></div>", "const d = document.getElementById('d'); const before = d.dataset.userId; d.dataset.userId = 8; return [before, d.getAttribute('data-user-id'), Object.keys(d.dataset).join('+')].join('|');", "7|8|userId+x"),
+    ("deplacer, inserer, remplacer, cloner", "<ul id=\"u\"><li>1</li><li>2</li><li>3</li></ul>", "const u = document.getElementById('u'); const [a, b, c] = u.children; u.insertBefore(c, a); u.replaceChild(document.createTextNode('T'), b); const copy = u.cloneNode(true); a.remove(); return u.innerHTML + '|' + copy.innerHTML + '|' + a.isConnected + '|' + u.contains(c);", "<li>3</li>T|<li>3</li><li>1</li>T|false|true"),
+    ("innerHTML et outerHTML", "<div id=\"d\"></div>", "const d = document.getElementById('d'); d.innerHTML = '<p class=\"x\">a &amp; b</p><br><span>c</span>'; return d.children.length + '|' + d.firstElementChild.textContent + '|' + d.outerHTML;", "3|a & b|<div id=\"d\"><p class=\"x\">a &amp; b</p><br><span>c</span></div>"),
+    ("insertAdjacentHTML et append", "<p id=\"p\">b</p>", "const p = document.getElementById('p'); p.insertAdjacentHTML('afterbegin', '<i>a</i>'); p.append('c', document.createElement('hr')); p.insertAdjacentHTML('beforebegin', '<h1>t</h1>'); return document.body.innerHTML;", "<h1>t</h1><p id=\"p\"><i>a</i>bc<hr></p>"),
+    ("valeurs des controles", "<input id=\"i\" value=\"a\"><input type=\"checkbox\" id=\"c\" checked><select id=\"s\"><option>u</option><option value=\"v\" selected>V</option></select><textarea id=\"t\">texte</textarea>", "const i = document.getElementById('i'), c = document.getElementById('c'), s = document.getElementById('s'); i.value = 'b'; c.checked = false; const before = s.value; s.value = 'u'; return [i.value, i.getAttribute('value'), c.checked, before, s.value, s.selectedIndex, document.getElementById('t').value].join('|');", "b|a|false|v|u|0|texte"),
+    ("formulaire et elements", "<form id=\"f\"><input name=\"nom\" value=\"Ada\"><button>ok</button></form>", "const f = document.getElementById('f'); let submitted = 0; f.addEventListener('submit', e => { e.preventDefault(); submitted++; }); f.requestSubmit(); return [f.elements.length, f.elements.nom.value, submitted, document.querySelector('input').form === f].join('|');", "2|Ada|1|true"),
+    ("closest et matches", "<section class=\"s\"><div><em id=\"e\">x</em></div></section>", "const e = document.getElementById('e'); return [e.closest('section').className, e.closest('.absent'), e.matches('div > em'), e.matches('p em')].join('|');", "s||true|false"),
+    ("childNodes et texte", "<p id=\"p\">a<b>b</b>c</p>", "const p = document.getElementById('p'); return [p.childNodes.length, p.children.length, p.firstChild.nodeType, p.firstChild.data, p.lastChild.textContent, p.childNodes.item(1).tagName].join('|');", "3|1|3|a|c|B"),
+    ("fragment de document", "<ul id=\"u\"></ul>", "const f = document.createDocumentFragment(); for (let i = 0; i < 3; i++) { const li = document.createElement('li'); li.textContent = i; f.appendChild(li); } document.getElementById('u').appendChild(f); return document.getElementById('u').children.length + '|' + f.childNodes.length;", "3|0"),
+    ("document.title et head", "", "const before = document.title; document.title = 'Nouveau'; return [before, document.title, document.head.tagName, document.body.tagName, document.documentElement.tagName, document.readyState].join('|');", "Essai|Nouveau|HEAD|BODY|HTML|complete"),
+    ("location et URL", "", "return [location.href, location.hostname, location.pathname, location.search, location.hash, location.origin, location.protocol].join('|');", "https://exemple.fr/dossier/page.html?q=1#ancre|exemple.fr|/dossier/page.html|?q=1|#ancre|https://exemple.fr|https:"),
+    ("localStorage et cookies", "", "localStorage.setItem('a', 1); localStorage.setItem('b', 'deux'); localStorage.removeItem('a'); document.cookie = 'x=1; path=/'; document.cookie = 'y=2; path=/'; return [localStorage.getItem('b'), localStorage.getItem('a'), localStorage.length, document.cookie].join('|');", "deux||1|x=1; y=2"),
+    ("matchMedia, innerWidth, navigator", "", "return [matchMedia('(min-width: 600px)').matches, matchMedia('(max-width: 400px)').matches, innerWidth, navigator.language, typeof navigator.userAgent].join('|');", "true|false|800|fr-FR|string"),
+    ("scripts de la page et chargement", "<p id=\"p\">avant</p><script>window.log = ['script']; document.addEventListener('DOMContentLoaded', () => log.push('dom')); window.addEventListener('load', () => log.push('load')); document.getElementById('p').textContent = 'apres';</script>", "return log.join() + '|' + document.getElementById('p').textContent;", "script,dom,load|apres"),
+    ("minuterie qui modifie le DOM", "<p id=\"p\">0</p>", "return new Promise(r => setTimeout(() => { document.getElementById('p').textContent = 'fait'; r(document.getElementById('p').textContent); }, 50));", "fait"),
+    ("fetch sans reseau", "", "return fetch('/donnees.json').then(() => 'non', e => e.name + ':' + e.message.startsWith('Failed to fetch'));", "TypeError:true"),
+    ("XMLHttpRequest sans reseau", "", "const x = new XMLHttpRequest(); const log = []; x.onerror = () => log.push('erreur'); x.addEventListener('loadend', () => log.push('fin')); x.open('GET', '/a'); x.send(); log.push('envoye'); return new Promise(r => setTimeout(() => r(log.join() + '|' + x.readyState + '|' + x.status), 1));", "envoye,erreur,fin|4|0"),
+    ("instanceof et constantes", "<div id=\"d\"></div>", "const d = document.getElementById('d'); return [d instanceof HTMLElement, d instanceof Node, document instanceof Document, d.nodeType === Node.ELEMENT_NODE, d.nodeName].join('|');", "true|true|true|true|DIV"),
+    ("history.pushState", "", "history.pushState({ p: 1 }, '', '/autre?x=2'); return location.pathname + location.search + '|' + history.state.p;", "/autre?x=2|1"),
+];
+
+/// Runs the corpus of the engine (16.1). Returns (passed, failed); a
+/// failure prints what was expected and what came.
 pub fn run(headroom: &dyn Fn() -> usize) -> (usize, usize) {
+    let (engine_passed, engine_failed) = run_engine(headroom);
+    let (page_passed, page_failed) = run_pages(headroom);
+    (engine_passed + page_passed, engine_failed + page_failed)
+}
+
+/// The DOM cases (16.2).
+pub fn run_pages(headroom: &dyn Fn() -> usize) -> (usize, usize) {
+    let mut passed = 0;
+    let mut failed = 0;
+    for (name, html, body, expected) in PAGE_CASES {
+        match run_page_case(html, body, headroom) {
+            Ok(got) if got == *expected => passed += 1,
+            Ok(got) => {
+                failed += 1;
+                crate::serial_println!("[js] ECHEC {} : attendu {:?}, obtenu {:?}", name, expected, got);
+            }
+            Err(error) => {
+                failed += 1;
+                crate::serial_println!("[js] ECHEC {} : {}", name, error);
+            }
+        }
+    }
+    (passed, failed)
+}
+
+/// The engine's cases (16.1).
+pub fn run_engine(headroom: &dyn Fn() -> usize) -> (usize, usize) {
     let mut passed = 0;
     let mut failed = 0;
     for (name, body, expected) in CASES {

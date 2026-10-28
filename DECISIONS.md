@@ -4384,6 +4384,88 @@ laissé à l'implémentation).
 - `WeakMap`, `WeakSet`, `WeakRef` gardent leurs clés jusqu'à la fin du
   royaume.
 
+## Scripts du navigateur intégré (phase 16.2) — décisions
+
+### Un nœud ne meurt pas : l'arène garde sa place
+
+Un objet de script nomme son nœud par indice ; libérer un nœud et
+réutiliser sa place ferait parler un vieil objet d'un nœud neuf. Les
+nœuds retirés restent donc, sans parent, et la création reste bornée par
+`html::MAX_NODES`. Conséquence qu'il fallait tirer partout : **l'ordre du
+document est celui de l'arbre, pas de l'arène.** `style::compute` le
+supposait (« un parent précède toujours ses enfants, puisque l'analyseur
+les ajoute dans cet ordre ») ; un script qui déplace un nœud sous un nœud
+créé après lui le démentait. Tout parcours ordonné passe par
+`Document::preorder`, qui écarte aussi les nœuds détachés.
+
+### Le DOM s'éprouve contre jsdom, comme le langage contre Node
+
+Même règle que pour 16.1 : les 30 cas du DOM ont été passés dans jsdom 24
+avant d'être confrontés au moteur. Les écarts trouvés ont été corrigés du
+côté qui avait tort (le moteur pour `cssText`, le test pour l'ordre des
+cookies).
+
+### Les écouteurs vivent sur l'objet cible
+
+Dans une propriété qu'aucun script ne peut nommer : les nœuds, la fenêtre
+(objet global) et un `XMLHttpRequest` partagent un seul mécanisme. Un
+gestionnaire en ligne est compilé la première fois que son événement part,
+puis gardé ; le réécrire (`setAttribute('onclick', ...)`) l'oublie.
+
+### Un clic va à l'élément par les boîtes de la mise en page
+
+La mise en page rend la boîte de chaque bloc, contrôle, image et passage
+de texte (`Page::boxes`), dans l'ordre de peinture : la dernière qui
+contient le point est la plus intérieure. Un passage de texte vaut son
+élément parent. Les mêmes boîtes servent `getBoundingClientRect`.
+
+### Les scripts d'abord, le comportement par défaut ensuite
+
+Un clic, une touche, l'envoi d'un formulaire passent d'abord par les
+écouteurs de la page ; `preventDefault` annule ce que le navigateur
+aurait fait (suivre le lien, éditer le champ, envoyer). Un script ne
+peut pas commander le navigateur pour autant : une navigation qu'il
+demande passe par `may_open`, qui refuse `about:action/...` depuis une
+page du web, et les pages internes ne portent aucun script.
+
+### `fetch` synchrone sous la promesse — limite assumée
+
+La requête se fait dans l'appel (`net::fetch_now`) : la promesse rendue
+est déjà réglée, ses `then` passent après le script comme le langage
+l'exige, mais la fenêtre attend le transfert. Un transfert dans une tâche
+à part, la promesse réglée à son arrivée, est l'étape suivante.
+
+### `document.cookie` ne voit pas `HttpOnly`
+
+`Jar::for_script` les écarte, `Jar::store_from_script` refuse d'en créer
+ou d'en remplacer : c'est la raison d'être de l'attribut.
+
+### Bug du noyau trouvé en route : une tâche morte récoltée pendant qu'on la quittait
+
+Un démarrage sur une quarantaine (sans écran, 4 cœurs), pendant
+l'autotest 11.3 : « faute noyau 0x0 - tache 3 sur le coeur 2 - RIP 0x0 »,
+juste après deux tâches ring 3 terminées par une faute de page sur ce
+cœur ; le cœur arrêté, l'autotest suivant y affamait son voisin. Sans
+rapport avec le JavaScript, qui ne tournait pas encore.
+
+La course : `yield_now` met `current[cpu]` sur la tâche entrante **sous le
+verrou**, rend le verrou, puis `switch_context` empile 576 octets sur la
+pile de la tâche sortante et écrit son RSP dans sa case de la table.
+`try_reap` jugeait une tâche morte récoltable dès qu'aucun cœur ne la
+nommait courante : un autre cœur pouvait donc, dans cette fenêtre,
+libérer sa pile et donner sa case à une tâche neuve — que le changement
+de contexte écrasait ensuite. Le commentaire de `try_reap` (« tant qu'un
+cœur la nomme courante, elle n'est pas récoltable ») était juste, mais
+`current` change avant que le cœur ait fini de partir.
+
+Correctif : `scheduler::LEAVING`, par cœur, la tâche qu'il quitte, posée
+sous le verrou avec `current` et effacée par la tâche entrante
+(`switched_in`, au retour de `switch_context` et dans `task_trampoline`
+pour une première exécution) ; `try_reap` refuse une tâche encore
+quittée. **À ne pas réintroduire** : toute libération d'une tâche doit
+attendre que son cœur ait fini de la quitter, pas seulement qu'il en ait
+élu une autre.
+
 ---
 
 ## 4. Invariants à ne jamais casser

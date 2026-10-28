@@ -5,8 +5,8 @@
 //! They are HTML, laid out by the same engine as any site: no second way
 //! of drawing a page, and whatever the engine gets wrong shows here first.
 //! Their actions are links to `about:action/...`, which the window
-//! performs before showing the preferences again -- there is no script to
-//! run a button with.
+//! performs before showing the preferences again: the browser's own
+//! pages carry no script, so that a page of the web cannot pass for one.
 
 use alloc::format;
 use alloc::string::String;
@@ -73,11 +73,29 @@ pub fn home(search_action: &str, field: &str, recent: &[(String, String)]) -> St
          <li>Ctrl+T : nouvel onglet - Ctrl+W : fermer l'onglet - Ctrl+Tab : onglet suivant</li>\
          <li>Ctrl+L : barre d'adresse - F5 : recharger - Alt+Gauche / Alt+Droite : precedent / suivant</li>\
          <li>Molette, fleches, Page haut / bas, Espace : defiler - Ctrl+clic : ouvrir dans un onglet</li>\
-         <li>Ctrl+H : historique</li></ul>\
-         <p class=\"dim\">Pages HTML et CSS. Les scripts (JavaScript) et les images ne sont pas executes ni affiches. \
-         <a href=\"about:preferences\">Preferences, cookies et cache</a></p>",
+         <li>Ctrl+H : historique</li>\
+         <li>Ctrl+J : console des scripts de la derniere page</li></ul>\
+         <p class=\"dim\">Pages HTML et CSS, scripts JavaScript (ES2022 et DOM). Les images ne sont pas affichees. \
+         <a href=\"about:preferences\">Preferences, cookies et cache</a> - <a href=\"about:console\">Console</a></p>",
     );
     wrap("Accueil", &body)
+}
+
+/// `about:console`: what the scripts of the last page printed, and
+/// their errors.
+pub fn console(lines: &[String]) -> String {
+    let mut body = String::from("<h1>Console</h1>");
+    if lines.is_empty() {
+        body.push_str("<p class=\"dim\">Aucune ligne : la derniere page n'a rien ecrit, ou n'avait pas de script.</p>");
+    } else {
+        body.push_str("<div class=\"box\"><pre>");
+        for line in lines.iter().rev().take(500).rev() {
+            body.push_str(&escape(line));
+            body.push('\n');
+        }
+        body.push_str("</pre></div>");
+    }
+    wrap("Console", &body)
 }
 
 pub fn history(entries: &[(String, String)]) -> String {

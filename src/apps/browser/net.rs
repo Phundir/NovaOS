@@ -143,6 +143,97 @@ struct BrowserStore {
     memory: cache::Memory,
     /// Cookies changed since the last save.
     dirty: bool,
+    /// `localStorage` by origin, saved with the cookies; and
+    /// `sessionStorage`, which dies with the window.
+    local: BTreeMap<String, Vec<(String, String)>>,
+    session: BTreeMap<String, Vec<(String, String)>>,
+    local_dirty: bool,
+}
+
+/// Origins whose `localStorage` is kept at most.
+const MAX_STORAGE_ORIGINS: usize = 64;
+
+fn storage_file(user: &str) -> String {
+    alloc::format!("{}/stockage-local.txt", settings_directory(user))
+}
+
+/// One line per item: origin, key, value, tab-separated; the three
+/// characters that would break the line escaped.
+fn escape_field(text: &str) -> String {
+    text.replace('%', "%25").replace('\t', "%09").replace('\n', "%0A").replace('\r', "%0D")
+}
+
+fn load_storage(text: &str) -> BTreeMap<String, Vec<(String, String)>> {
+    let mut out: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for line in text.lines() {
+        let mut fields = line.split('\t');
+        let (Some(origin), Some(key), Some(value)) = (fields.next(), fields.next(), fields.next()) else {
+            continue;
+        };
+        let decode = |field: &str| crate::web::url::percent_decode(field, false);
+        out.entry(decode(origin)).or_default().push((decode(key), decode(value)));
+    }
+    out
+}
+
+fn save_storage(local: &BTreeMap<String, Vec<(String, String)>>) -> String {
+    let mut out = String::new();
+    for (origin, items) in local {
+        for (key, value) in items {
+            out.push_str(&alloc::format!("{}\t{}\t{}\n", escape_field(origin), escape_field(key), escape_field(value)));
+        }
+    }
+    out
+}
+
+/// `document.cookie`, as the page at `url` may read it.
+pub fn script_cookies(url: &str) -> String {
+    let Some(url) = Url::parse(url) else {
+        return String::new();
+    };
+    let now = crate::rtc::now().unwrap_or(0);
+    match STORE.lock().as_mut() {
+        Some(store) => store.jar.for_script(&url, now),
+        None => String::new(),
+    }
+}
+
+/// `document.cookie = line`.
+pub fn script_set_cookie(url: &str, line: &str) {
+    let Some(url) = Url::parse(url) else {
+        return;
+    };
+    let now = crate::rtc::now().unwrap_or(0);
+    if let Some(store) = STORE.lock().as_mut() {
+        store.jar.store_from_script(&url, line, now);
+        store.dirty = true;
+    }
+}
+
+/// The items of an origin's `localStorage` or `sessionStorage`.
+pub fn storage(origin: &str, session: bool) -> Vec<(String, String)> {
+    let store = STORE.lock();
+    let Some(store) = store.as_ref() else {
+        return Vec::new();
+    };
+    let map = if session { &store.session } else { &store.local };
+    map.get(origin).cloned().unwrap_or_default()
+}
+
+pub fn set_storage(origin: &str, session: bool, items: &[(String, String)]) {
+    let mut store = STORE.lock();
+    let Some(store) = store.as_mut() else {
+        return;
+    };
+    let map = if session { &mut store.session } else { &mut store.local };
+    if items.is_empty() {
+        map.remove(origin);
+    } else if map.contains_key(origin) || map.len() < MAX_STORAGE_ORIGINS {
+        map.insert(String::from(origin), items.to_vec());
+    }
+    if !session {
+        store.local_dirty = true;
+    }
 }
 
 static STORE: SpinLock<Option<BrowserStore>> = SpinLock::new(None);
@@ -184,36 +275,47 @@ pub fn open_store() {
             crate::idt::ticks(),
         );
     }
+    let local = crate::fs::read_file(&storage_file(&user), credentials)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .map(|text| load_storage(&text))
+        .unwrap_or_default();
     crate::serial_println!("[navigateur] {} cookie(s) relus pour \"{}\"", jar.len(), user);
     *STORE.lock() = Some(BrowserStore {
         user,
         jar,
         memory: cache::Memory::new(8 * 1024 * 1024),
         dirty: false,
+        local,
+        session: BTreeMap::new(),
+        local_dirty: false,
     });
 }
 
 /// Writes the persistent cookies if they changed. Called now and then by
 /// the window, and when it closes.
 pub fn save_cookies() {
-    let (user, text) = {
+    let (user, cookies, storage) = {
         let mut store = STORE.lock();
         let Some(store) = store.as_mut() else {
             return;
         };
-        if !store.dirty {
-            return;
-        }
+        let cookies = store.dirty.then(|| store.jar.save());
+        let storage = store.local_dirty.then(|| save_storage(&store.local));
         store.dirty = false;
-        (store.user.clone(), store.jar.save())
+        store.local_dirty = false;
+        (store.user.clone(), cookies, storage)
     };
     let Some(credentials) = crate::fs::credentials_of(&user) else {
         return;
     };
-    let path = cookie_file(&user);
     let now = crate::idt::ticks();
-    let _ = crate::fs::delete(&path, credentials, now);
-    let _ = crate::fs::write_file(&path, text.as_bytes(), credentials, crate::fs::perm::Mode::private_file(), now);
+    for (path, text) in [(cookie_file(&user), cookies), (storage_file(&user), storage)] {
+        if let Some(text) = text {
+            let _ = crate::fs::delete(&path, credentials, now);
+            let _ = crate::fs::write_file(&path, text.as_bytes(), credentials, crate::fs::perm::Mode::private_file(), now);
+        }
+    }
 }
 
 /// The window closed: session cookies die with it (RFC 6265).
@@ -419,6 +521,28 @@ pub fn forget_all() {
         job.cancelled = true;
     }
     RESULTS.lock().clear();
+}
+
+/// Makes a request now, in the calling task: what a page's script asks
+/// (`fetch`, `XMLHttpRequest`). The window waits for it (see
+/// `web::js::dom::fetch`). The job entry gives it a progress line and a
+/// cancel, like a page load.
+pub fn fetch_now(request: Request) -> Result<crate::web::http::Response, crate::web::tls::Failure> {
+    let id = NEXT_JOB.fetch_add(1, Ordering::Relaxed);
+    JOBS.lock().push(Job {
+        id,
+        request: request.clone(),
+        width: 0,
+        viewport_height: 0,
+        cancelled: false,
+        progress: String::from("script : requete..."),
+        started: true,
+    });
+    let mut net = KernelNet { job: id };
+    let mut store = KernelStore;
+    let outcome = crate::web::http::fetch(&mut net, &mut store, request);
+    JOBS.lock().retain(|j| j.id != id);
+    outcome
 }
 
 /// Bytes of stack left, for the layout's recursion.

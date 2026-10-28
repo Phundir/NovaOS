@@ -1132,9 +1132,11 @@ pub fn compute(document: &Document, author: &[Stylesheet], size: (i32, i32)) -> 
 
     let root = Style::root();
     let mut styles: Vec<Style> = alloc::vec![root.clone(); document.nodes.len()];
-    // Document order: a parent always precedes its children, since the
-    // parser appends nodes as it opens them.
-    for node in 0..document.nodes.len() {
+    // Tree order, so that a parent's style is known before its children:
+    // the parser appends nodes in that order, but a script may move a
+    // node under one created after it (`tree.rs`). Nodes out of the tree
+    // keep the root style; nothing lays them out.
+    for node in document.preorder(0) {
         let parent_style = match document.nodes[node].parent {
             Some(parent) => styles[parent].clone(),
             None => root.clone(),

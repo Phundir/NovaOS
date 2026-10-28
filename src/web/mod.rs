@@ -16,5 +16,6 @@ pub mod selftest;
 pub mod style;
 pub mod text;
 pub mod tls;
+pub mod tree;
 pub mod url;
 pub mod x509;

@@ -26,6 +26,7 @@ bits 64
 global switch_context
 global start_first_task
 global task_trampoline
+extern switched_in
 
 ; ------------------------------------------------------------
 ;  switch_context(old_rsp: *mut u64, new_rsp: u64)
@@ -104,5 +105,9 @@ start_first_task:
 ;  promise into an immediate, visible fault.
 ; ------------------------------------------------------------
 task_trampoline:
+    ; The core that switched here has stopped writing the task it left
+    ; (scheduler::LEAVING): that one may be reaped from now on. R12 is
+    ; callee-saved, and RSP keeps the alignment the comment above needs.
+    call switched_in
     call r12
     ud2

@@ -230,6 +230,7 @@ autotest qui imprime un **verdict** sur la console série.
 [test] phase 15 validee - 70 verifications des mises a jour atomiques (spec 10.5)
 [test] phase 16.0 validee - 60 verifications du shell et du terminal (spec 1.1, 2.2)
 [test] phase 16.1 validee - 95 cas du moteur JavaScript (2270 ms)
+[test] phase 16.2 validee - 30 cas du DOM, 12 verifications du navigateur
 ```
 
 `make test` démarre l'ISO sans fenêtre (`tools/boot-test.py`), arrête
@@ -316,7 +317,7 @@ modules de pilote signés `.kmd` (§3.6).
   fond d'écran, lanceur, curseur.
 - Écran de connexion avec anti-bruteforce, splash modulaire, thèmes.
 - Applications : explorateur de fichiers, bloc-notes, lecteur et
-  enregistreur audio, navigateur intégré (HTML/CSS, HTTP, TLS),
+  enregistreur audio, navigateur intégré (HTML/CSS, JavaScript, HTTP, TLS),
   paramètres (son, réseau, horloge, affichage).
 - **Accessibilité** : lecteur d'écran avec synthèse vocale, loupe,
   contraste élevé, modes daltonisme, navigation clavier complète — dès
@@ -350,7 +351,8 @@ en rendu logiciel.
 - **Moteur JavaScript** (ES2022) : interprète d'arbre borné (pas, pile,
   mémoire), bibliothèque standard complète hors `Intl`/`Proxy`/`BigInt`,
   promesses et minuteries ; nombres IEEE 754 calculés en entiers, `exp` et
-  `ln` correctement arrondis.
+  `ln` correctement arrondis. Le navigateur intégré exécute les scripts
+  des pages : DOM, événements, `fetch`, `XMLHttpRequest`, `localStorage`.
 - **Shell** : interprète de commandes (fichiers, tâches, mémoire, disques,
   `spm`, `dev`), fenêtre **Terminal** avec historique et défilement, shell
   sur la console série et mode recovery.

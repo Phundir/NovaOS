@@ -86,9 +86,10 @@ impl Document {
         }
     }
 
-    /// Every element with this tag, in document order.
+    /// Every element with this tag in the tree, in document order (the
+    /// tree's: a script may have moved nodes, see `tree.rs`).
     pub fn elements(&self, tag: &str) -> Vec<NodeId> {
-        (0..self.nodes.len()).filter(|id| self.tag(*id) == Some(tag)).collect()
+        self.preorder(0).into_iter().filter(|id| self.tag(*id) == Some(tag)).collect()
     }
 
     /// The text under a node, whitespace collapsed.

@@ -815,7 +815,7 @@ fn task_phase16_selftest() -> ! {
 /// `web::js::selftest`, one realm per case.
 fn task_js_selftest() -> ! {
     let started = idt::ticks();
-    let (passed, failed) = web::js::selftest::run(&scheduler::stack_headroom);
+    let (passed, failed) = web::js::selftest::run_engine(&scheduler::stack_headroom);
     let elapsed_ms = (idt::ticks() - started) * 1000 / TIMER_HZ as u64;
     if failed == 0 {
         serial_println!(
@@ -825,6 +825,22 @@ fn task_js_selftest() -> ! {
         );
     } else {
         serial_println!("[test] phase 16.1 ECHEC - {} cas incorrects sur {}", failed, passed + failed);
+    }
+    // 16.2: the DOM, then a page with scripts through the browser's path.
+    let (dom_passed, dom_failed) = web::js::selftest::run_pages(&scheduler::stack_headroom);
+    let (browser_passed, browser_failed) = apps::browser::script::selftest();
+    if dom_failed + browser_failed == 0 {
+        serial_println!(
+            "[test] phase 16.2 validee - {} cas du DOM, {} verifications du navigateur",
+            dom_passed,
+            browser_passed
+        );
+    } else {
+        serial_println!(
+            "[test] phase 16.2 ECHEC - {} cas incorrects sur {}",
+            dom_failed + browser_failed,
+            dom_passed + dom_failed + browser_passed + browser_failed
+        );
     }
     selftest_done()
 }

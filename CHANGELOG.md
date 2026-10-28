@@ -8,6 +8,45 @@ a été observé, reste dans `ROADMAP.md` ; les décisions dans `DECISIONS.md`.
 Schéma de version : `0.{phase}.{correctif}` — la phase est la dernière de
 la roadmap dont le code est complet.
 
+## [0.15.3] — 2026-10-28
+
+Phase 16.2 : le navigateur intégré exécute les scripts des pages.
+
+### Ajouté
+
+- **DOM** (`web::js::dom`) : `Node`, `Element`, `Text`, `Document`,
+  `querySelector(All)` sur les sélecteurs de la cascade, `classList`,
+  `style`, `dataset`, `innerHTML`/`outerHTML`, contrôles de formulaire,
+  `getBoundingClientRect` ; événements (capture, cible, bouillonnement,
+  gestionnaires en ligne, `Event`/`CustomEvent`) ; `window`, `location`,
+  `history`, `navigator`, `localStorage` (persistant) et
+  `sessionStorage`, `matchMedia`, `requestAnimationFrame`, dialogues ;
+  `fetch`, `Headers`, `Response`, `XMLHttpRequest`.
+- **Navigateur** : scripts en ligne et externes exécutés, mise en page
+  refaite après chaque changement du document (y compris les `<style>`
+  ajoutés), clics donnés à l'élément sous le pointeur, `keydown`,
+  `input`, `change`, `submit` annulables, minuteries, `about:console`
+  (Ctrl+J), `document.cookie` sans les cookies `HttpOnly`.
+- `web::tree` : l'arbre modifiable ; boîtes des éléments dans la mise en
+  page (`Page::boxes`).
+- Autotest 16.2 : 30 cas du DOM vérifiés contre jsdom, 12 vérifications du
+  navigateur de bout en bout (`[test] phase 16.2 validee`).
+
+### Corrigé
+
+- **Noyau** : une tâche morte pouvait être récoltée pendant que son cœur
+  la quittait encore — sa pile et sa case réutilisées, puis écrasées par
+  le changement de contexte (saut en 0, cœur arrêté ; un démarrage sur
+  une quarantaine). `scheduler::LEAVING`.
+- La cascade CSS supposait l'ordre de l'arène égal à celui du document,
+  ce que les scripts démentent : elle suit l'arbre.
+
+### Limites connues
+
+- `fetch`/`XMLHttpRequest` synchrones sous la promesse (la fenêtre attend
+  le transfert) ; pas de `Proxy` (`dataset` sans nouvelles clés), de
+  `MutationObserver`, de `FormData`, d'images ni de canvas.
+
 ## [0.15.2] — 2026-10-28
 
 Phase 16.1 : le moteur JavaScript est compilé, complet et éprouvé.

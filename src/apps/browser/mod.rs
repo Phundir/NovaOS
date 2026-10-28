@@ -11,14 +11,15 @@
 //!
 //! ## What it does not
 //!
-//! **No JavaScript, no images.** A script engine is a project the size
-//! of this whole system, and decoding PNG and JPEG a smaller one that has
-//! not been done: images show as a frame with their description. Pages
-//! that build themselves with scripts show what their HTML carries --
-//! often a `<noscript>` notice, sometimes nothing. The sites that keep a
-//! page without scripts -- DuckDuckGo's HTML version, Wikipedia, news
-//! sites, documentation -- read well. Named here and on the home page, so
-//! nobody mistakes the one for the other.
+//! **No images.** Decoding PNG and JPEG has not been done: images show as
+//! a frame with their description.
+//!
+//! **Scripts run** since 16.2 (`script.rs`, on the engine of `web::js`):
+//! a page's scripts, its timers, its events -- clicks, typing, form
+//! submission -- and what they change in the document is laid out again.
+//! The engine covers ES2022 and the common DOM; a page that leans on what
+//! it lacks (`Proxy`, `Intl`, modules, images, canvas) shows what its HTML
+//! carries, and its console (`about:console`) says what failed.
 //!
 //! ## How it is built
 //!
@@ -30,6 +31,7 @@
 pub mod certs;
 pub mod net;
 pub mod pages;
+pub mod script;
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -106,6 +108,8 @@ struct View {
     security: String,
     /// The form controls, with what the user typed into them.
     controls: Vec<Control>,
+    /// The page and its realm, when it has scripts.
+    script: Option<alloc::boxed::Box<script::ScriptPage>>,
 }
 
 struct Tab {
@@ -204,6 +208,9 @@ struct Browser {
     ctrl_held: bool,
     dragging_scrollbar: bool,
     message: String,
+    /// The console of the last page whose scripts ran, for
+    /// `about:console`.
+    last_console: Vec<String>,
 }
 
 fn session_file(user: &str) -> String {
@@ -267,6 +274,7 @@ impl Browser {
             ctrl_held: false,
             dragging_scrollbar: false,
             message: String::new(),
+            last_console: Vec::new(),
         }
     }
 
@@ -506,6 +514,7 @@ impl Browser {
             laid,
             security: String::from("page interne du navigateur"),
             controls,
+            script: None,
         });
         tab.loading.clear();
         tab.scroll = 0;
@@ -613,6 +622,7 @@ impl Browser {
                 pages::home(pages::engine_form(&self.engine), pages::engine_field(&self.engine), &recent)
             }
             "about:historique" | "about:history" => pages::history(&self.visited),
+            "about:console" => pages::console(&self.last_console),
             "about:certificat" => {
                 let tab = self.tab();
                 certs::viewer(&tab.session_address, tab.session.as_ref())
@@ -670,19 +680,40 @@ impl Browser {
             self.current = index;
             match done {
                 net::Done::Page { loaded, laid } => {
-                    let title = text::fold(&loaded.title);
                     let address = loaded.url.to_string();
+                    let url = loaded.url.clone();
+                    let security = loaded.security.clone();
+                    let tls = loaded.tls.clone();
+                    let mut title = text::fold(&loaded.title);
+                    let (width, height) = (self.content_width(), self.content_height());
+                    // A page with scripts keeps its document and gets a
+                    // realm; they may change it before the first paint.
+                    let (laid, script, outcome) = if loaded.scripts.is_empty() && loaded.skipped_scripts.is_empty() {
+                        (laid, None, None)
+                    } else {
+                        let (mut page, outcome) = script::ScriptPage::start(loaded, width, height);
+                        let laid = if outcome.relayout {
+                            page.relayout(width, height)
+                        } else {
+                            page.realm.dom.boxes = laid.page.boxes.clone();
+                            laid
+                        };
+                        title = text::fold(&page.loaded.document.title());
+                        self.last_console = page.realm.console.clone();
+                        (laid, Some(page), Some(outcome))
+                    };
                     let controls = laid.page.controls.clone();
                     let tab = self.tab_mut();
-                    tab.title = if title.trim().is_empty() { loaded.url.host.clone() } else { title.clone() };
-                    tab.session = loaded.tls.clone();
+                    tab.title = if title.trim().is_empty() { url.host.clone() } else { title.clone() };
+                    tab.session = tls;
                     tab.session_address = address.clone();
                     tab.view = Some(View {
-                        url: loaded.url.clone(),
+                        url,
                         address: address.clone(),
                         laid,
-                        security: loaded.security.clone(),
+                        security,
                         controls,
+                        script,
                     });
                     tab.loading.clear();
                     tab.scroll = 0;
@@ -700,6 +731,9 @@ impl Browser {
                         self.visited.remove(0);
                     }
                     self.visited_dirty = true;
+                    if let Some(outcome) = outcome {
+                        self.apply(outcome);
+                    }
                 }
                 net::Done::Download(response) => {
                     let address = response.url.to_string();
@@ -726,6 +760,185 @@ impl Browser {
     }
 
     // --------------------------------------------------------
+    //  Scripts
+    // --------------------------------------------------------
+
+    /// Does what a run of the page's scripts asked, on the current tab.
+    fn apply(&mut self, outcome: script::Outcome) {
+        if outcome.relayout {
+            self.relayout_scripted();
+        }
+        if let Some(view) = self.tab().view.as_ref()
+            && let Some(page) = view.script.as_ref()
+        {
+            self.last_console = page.realm.console.clone();
+        }
+        if let Some(text) = outcome.dialog {
+            self.message = text::fold(&text);
+        }
+        if let Some(y) = outcome.scroll {
+            self.tab_mut().scroll = y;
+            self.clamp_scroll();
+        }
+        if let Some(address) = outcome.address {
+            let tab = self.tab_mut();
+            if let Some(view) = tab.view.as_mut()
+                && let Some(url) = Url::parse(&address)
+            {
+                view.url = url;
+                view.address = address.clone();
+            }
+            if let Some(entry) = tab.history.get_mut(tab.position) {
+                *entry = address;
+            }
+        }
+        if let Some(form) = outcome.submit {
+            let index = self.tab().view.as_ref().and_then(|view| {
+                let form_index = view.laid.forms.iter().position(|f| f.node == form)?;
+                view.controls.iter().position(|c| c.form == Some(form_index))
+            });
+            if let Some(index) = index {
+                self.send_form(index, None);
+            }
+        }
+        if let Some(delta) = outcome.history {
+            if delta < 0 {
+                self.back();
+            } else {
+                self.forward();
+            }
+        }
+        if let Some((target, _)) = outcome.navigate {
+            if self.may_open(&target) {
+                crate::serial_println!("[navigateur] script : navigation vers {}", target);
+                self.open(&target, false);
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Lays the current page out again from its live document, keeping
+    /// what the user typed.
+    fn relayout_scripted(&mut self) {
+        let (width, height) = (self.content_width(), self.content_height());
+        let tab = self.tab_mut();
+        let Some(view) = tab.view.as_mut() else {
+            return;
+        };
+        let Some(page) = view.script.as_mut() else {
+            return;
+        };
+        let laid = page.relayout(width, height);
+        let mut controls = laid.page.controls.clone();
+        for control in controls.iter_mut() {
+            if let Some(value) = page.realm.dom.values.get(&control.node) {
+                if control.kind == ControlKind::Select {
+                    if let Some(position) = control.options.iter().position(|(v, _)| v == value) {
+                        control.selected = position;
+                    }
+                } else {
+                    control.value = value.clone();
+                }
+            }
+            if let Some(checked) = page.realm.dom.checked.get(&control.node) {
+                control.checked = *checked;
+            }
+        }
+        let title = text::fold(&page.loaded.document.title());
+        view.laid = laid;
+        view.controls = controls;
+        if !title.trim().is_empty() {
+            tab.title = title;
+        }
+        self.clamp_scroll();
+        self.dirty = true;
+    }
+
+    /// A click in the page at window coordinates: given to the page's
+    /// scripts first. False when a listener cancelled the default action.
+    fn script_click(&mut self, x: i32, y: i32) -> bool {
+        let page_y = y - self.content_top() + self.tab().scroll;
+        let current = self.current;
+        let Some(view) = self.tabs[current].view.as_mut() else {
+            return true;
+        };
+        let Some(page) = view.script.as_mut() else {
+            return true;
+        };
+        let Some(node) = page.element_at(&view.laid, x, page_y) else {
+            return true;
+        };
+        let (allowed, outcome) = page.click(node, x, page_y);
+        self.apply(outcome);
+        allowed
+    }
+
+    /// A key while the page (or one of its fields) has the focus: a
+    /// `keydown` for the page first. False when a listener cancelled it.
+    fn script_key(&mut self, key: &KeyEvent, target: Option<usize>) -> bool {
+        let name = match key.scancode {
+            SCAN_ENTER => String::from("Enter"),
+            SCAN_ESCAPE => String::from("Escape"),
+            SCAN_BACKSPACE => String::from("Backspace"),
+            SCAN_TAB => String::from("Tab"),
+            SCAN_UP => String::from("ArrowUp"),
+            SCAN_DOWN => String::from("ArrowDown"),
+            SCAN_LEFT => String::from("ArrowLeft"),
+            SCAN_RIGHT => String::from("ArrowRight"),
+            _ => match key.character() {
+                Some(c) if !c.is_control() => {
+                    let mut text = String::new();
+                    text.push(c);
+                    text
+                }
+                _ => return true,
+            },
+        };
+        let ctrl = key.has(KeyEvent::MOD_CTRL);
+        let shift = key.has(KeyEvent::MOD_SHIFT);
+        let current = self.current;
+        let Some(view) = self.tabs[current].view.as_mut() else {
+            return true;
+        };
+        let node = target.and_then(|index| view.controls.get(index)).map(|c| c.node);
+        let Some(page) = view.script.as_mut() else {
+            return true;
+        };
+        let mut allowed = true;
+        let outcome = page.run(|ctx| {
+            let target = node.or_else(|| ctx.realm.dom.focused).or_else(|| ctx.doc.preorder(0).into_iter().find(|n| ctx.doc.tag(*n) == Some("body"))).unwrap_or(0);
+            let event = crate::web::js::dom::events::key_event(ctx, "keydown", &name, ctrl, shift);
+            if let Ok(go_on) = crate::web::js::dom::events::dispatch(ctx, target, &event) {
+                allowed = go_on;
+            }
+            let _ = ctx.run_jobs();
+        });
+        self.apply(outcome);
+        allowed
+    }
+
+    /// After the user changed a control: the page's value, and `input`.
+    fn script_typed(&mut self, index: usize, event: &str) {
+        let current = self.current;
+        let Some(view) = self.tabs[current].view.as_mut() else {
+            return;
+        };
+        let Some(control) = view.controls.get(index) else {
+            return;
+        };
+        let (node, value, checked, kind) = (control.node, control.value.clone(), control.checked, control.kind);
+        let value = if kind == ControlKind::Select { control.options.get(control.selected).map(|(v, _)| v.clone()).unwrap_or_default() } else { value };
+        let Some(page) = view.script.as_mut() else {
+            return;
+        };
+        if matches!(kind, ControlKind::Checkbox | ControlKind::Radio) {
+            page.toggled(node, checked);
+        }
+        let outcome = page.typed(node, &value, event);
+        self.apply(outcome);
+    }
+
+    // --------------------------------------------------------
     //  Forms
     // --------------------------------------------------------
 
@@ -736,6 +949,26 @@ impl Browser {
     /// A file field names a file of the account's home; it is read here
     /// and sent as a part of a multipart body.
     fn submit(&mut self, index: usize, submitter: Option<usize>) {
+        // The page's `submit` listeners first; one may cancel.
+        let form_node = self.tab().view.as_ref().and_then(|view| {
+            let form = view.controls.get(index)?.form?;
+            view.laid.forms.get(form).map(|f| f.node)
+        });
+        if let Some(form_node) = form_node {
+            let current = self.current;
+            if let Some(page) = self.tabs[current].view.as_mut().and_then(|view| view.script.as_mut()) {
+                let (allowed, outcome) = page.submitting(form_node);
+                if !allowed {
+                    self.apply(outcome);
+                    return;
+                }
+            }
+        }
+        self.send_form(index, submitter);
+    }
+
+    /// Sends a form, with no event: what `form.submit()` does.
+    fn send_form(&mut self, index: usize, submitter: Option<usize>) {
         let Some(view) = &self.tab().view else {
             return;
         };
@@ -980,7 +1213,10 @@ impl Browser {
                 self.caret = control.value.chars().count();
                 self.focus = Focus::Control(index);
             }
-            ControlKind::Checkbox => control.checked = !control.checked,
+            ControlKind::Checkbox => {
+                control.checked = !control.checked;
+                self.script_typed(index, "change");
+            }
             ControlKind::Radio => {
                 let (form, name) = (control.form, control.name.clone());
                 for (position, other) in view.controls.iter_mut().enumerate() {
@@ -988,11 +1224,13 @@ impl Browser {
                         other.checked = position == index;
                     }
                 }
+                self.script_typed(index, "change");
             }
             ControlKind::Select => {
                 if !control.options.is_empty() {
                     control.selected = (control.selected + 1) % control.options.len();
                 }
+                self.script_typed(index, "change");
             }
             ControlKind::Submit => self.submit(index, Some(index)),
             ControlKind::Button | ControlKind::Hidden => {}
@@ -1371,6 +1609,7 @@ impl App for Browser {
                 }
                 (Some('r'), _) => self.reload_current(true),
                 (Some('h'), _) => self.open("about:historique", false),
+                (Some('j'), _) => self.open("about:console", true),
                 (_, SCAN_TAB) => {
                     let count = self.tabs.len();
                     let next = if key.has(KeyEvent::MOD_SHIFT) { (self.current + count - 1) % count } else { (self.current + 1) % count };
@@ -1409,17 +1648,33 @@ impl App for Browser {
                     Self::edit(&mut self.address, &mut self.caret, key);
                 }
             },
-            Focus::Control(index) => match key.scancode {
-                SCAN_ENTER => self.submit(index, None),
-                SCAN_ESCAPE | SCAN_TAB => self.focus = Focus::Page,
-                _ => {
-                    let current = self.current;
-                    if let Some(control) = self.tabs[current].view.as_mut().and_then(|view| view.controls.get_mut(index)) {
-                        Self::edit(&mut control.value, &mut self.caret, key);
+            Focus::Control(index) => {
+                if !self.script_key(key, Some(index)) {
+                    self.dirty = true;
+                    return false;
+                }
+                match key.scancode {
+                    SCAN_ENTER => self.submit(index, None),
+                    SCAN_ESCAPE | SCAN_TAB => self.focus = Focus::Page,
+                    _ => {
+                        let current = self.current;
+                        let mut changed = false;
+                        if let Some(control) = self.tabs[current].view.as_mut().and_then(|view| view.controls.get_mut(index)) {
+                            let before = control.value.clone();
+                            Self::edit(&mut control.value, &mut self.caret, key);
+                            changed = control.value != before;
+                        }
+                        if changed {
+                            self.script_typed(index, "input");
+                        }
                     }
                 }
-            },
+            }
             Focus::Page => {
+                if !self.script_key(key, None) {
+                    self.dirty = true;
+                    return false;
+                }
                 let page = self.content_height() - 40;
                 match key.scancode {
                     SCAN_DOWN => self.scroll_by(40),
@@ -1458,6 +1713,21 @@ impl App for Browser {
         if press.pressed {
             self.message.clear();
             let new_tab = self.ctrl_held;
+            // In the page, its scripts see the click first: a listener
+            // may cancel what the click would do, or change the page
+            // under it.
+            let in_page = matches!(hit, Hit::Link(_) | Hit::Control(_) | Hit::Nothing)
+                && y >= self.content_top()
+                && y < self.height - STATUS_H
+                && x < self.width - SCROLLBAR_W;
+            let allowed = !in_page || self.script_click(x, y);
+            let hit = if !allowed {
+                Hit::Nothing
+            } else if in_page {
+                self.hit(x, y)
+            } else {
+                hit.clone()
+            };
             match hit.clone() {
                 Hit::Tab(index) => self.switch_to(index),
                 Hit::CloseTab(index) => self.close_tab(index),
@@ -1513,6 +1783,17 @@ impl App for Browser {
 
     fn tick(&mut self) -> bool {
         self.collect();
+        // The timers of the page shown; a tab in the background waits,
+        // as browsers slow theirs down.
+        let current = self.current;
+        if let Some(page) = self.tabs[current].view.as_mut().and_then(|view| view.script.as_mut())
+            && !page.realm.timers.is_empty()
+        {
+            let outcome = page.timers();
+            if !outcome.is_empty() {
+                self.apply(outcome);
+            }
+        }
         // The progress text of a load changes as it goes.
         if self.tab().job.is_some() {
             self.laps += 1;

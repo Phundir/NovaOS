@@ -161,6 +161,10 @@ pub struct Page {
     pub controls: Vec<Control>,
     /// `id` and `name` targets, for `#fragment` links.
     pub anchors: Vec<(String, i32)>,
+    /// The box of each element laid out, and of each run of text: (node,
+    /// x, y, width, height), in painting order. What a page's scripts
+    /// measure (`getBoundingClientRect`) and what a click lands on.
+    pub boxes: Vec<(NodeId, i32, i32, i32, i32)>,
     pub height: i32,
 }
 
@@ -200,6 +204,9 @@ impl Page {
         }
         for (name, y) in other.anchors {
             self.anchors.push((name, y + dy));
+        }
+        for (node, x, y, w, h) in other.boxes {
+            self.boxes.push((node, x + dx, y + dy, w, h));
         }
     }
 }
@@ -745,7 +752,7 @@ impl<'a> Engine<'a> {
     }
 
     /// Shifts what was painted since the marks: `position: relative`.
-    fn shift_since(&mut self, marks: (usize, usize, usize, usize), dx: i32, dy: i32) {
+    fn shift_since(&mut self, marks: (usize, usize, usize, usize, usize), dx: i32, dy: i32) {
         if dx == 0 && dy == 0 {
             return;
         }
@@ -762,6 +769,7 @@ impl<'a> Engine<'a> {
             links: self.page.links.split_off(marks.1),
             controls: self.page.controls.split_off(marks.2),
             anchors: self.page.anchors.split_off(marks.3),
+            boxes: self.page.boxes.split_off(marks.4),
             height: 0,
         };
         self.page.place(tail, dx, dy);
@@ -786,6 +794,7 @@ impl<'a> Engine<'a> {
             self.page.links.len(),
             self.page.controls.len(),
             self.page.anchors.len(),
+            self.page.boxes.len(),
         );
         let floats_before = self.floats.len();
         let positioned = style.position != Position::Static;
@@ -920,6 +929,10 @@ impl<'a> Engine<'a> {
         };
         let box_width = content_width + frame;
         let box_height = content_height + padding[0] + padding[2] + border[0] + border[2];
+        // Before its children's boxes: in painting order, a box comes
+        // before what is drawn over it.
+        let at = marks.4.min(self.page.boxes.len());
+        self.page.boxes.insert(at, (node, box_x, box_y, box_width, box_height));
         if style.clip && clip_slot < self.page.paints.len() {
             self.page.paints[clip_slot] = Paint::Clip {
                 x: box_x + border[3],
@@ -1366,6 +1379,8 @@ impl<'a> Engine<'a> {
         if let Some((width, height)) = self.replaced_size(node, tag) {
             let width = width.min(available.max(8));
             let mut fragment = Page::default();
+            // Its box, for a click and for `getBoundingClientRect`.
+            fragment.boxes.push((node, margin_left, 0, width, height));
             match tag {
                 "img" => {
                     if width > 0 && height > 0 {
@@ -1479,6 +1494,7 @@ impl<'a> Engine<'a> {
         let style = self.style(node);
         let top = y + line_height - height + (height - 16 * style.scale()) / 2;
         let left = x + offset;
+        self.page.boxes.push((node, left, y + line_height - height, width, height));
         if let Some(link) = link {
             self.page.links.push(Link {
                 x: left,

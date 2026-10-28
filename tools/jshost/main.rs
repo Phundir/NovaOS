@@ -40,6 +40,10 @@ pub mod scheduler {
     }
 }
 
+pub mod version {
+    pub const VERSION: &str = "hote";
+}
+
 pub mod heap {
     pub fn room_for(_bytes: usize) -> bool {
         true

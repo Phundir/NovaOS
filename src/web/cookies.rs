@@ -221,6 +221,41 @@ impl Jar {
         Some(parts.join("; "))
     }
 
+    /// `document.cookie` read by a page at `url`: the cookies a request
+    /// would carry, but never the `HttpOnly` ones -- that is what the
+    /// attribute is for.
+    pub fn for_script(&mut self, url: &Url, now: u64) -> String {
+        if now != 0 {
+            self.cookies.retain(|cookie| cookie.expires == 0 || cookie.expires > now);
+        }
+        let mut matching: Vec<&Cookie> = self
+            .cookies
+            .iter()
+            .filter(|cookie| {
+                !cookie.http_only
+                    && domain_matches(&url.host, cookie)
+                    && path_matches(&url.path, &cookie.path)
+                    && (!cookie.secure || url.is_secure())
+            })
+            .collect();
+        matching.sort_by(|a, b| b.path.len().cmp(&a.path.len()));
+        let parts: Vec<String> = matching.iter().map(|cookie| format!("{}={}", cookie.name, cookie.value)).collect();
+        parts.join("; ")
+    }
+
+    /// `document.cookie = line`: as a `Set-Cookie` header, except that a
+    /// page cannot make an `HttpOnly` cookie, nor replace one.
+    pub fn store_from_script(&mut self, url: &Url, line: &str, now: u64) {
+        if line.split(';').skip(1).any(|attribute| attribute.trim().eq_ignore_ascii_case("httponly")) {
+            return;
+        }
+        let name = line.split(';').next().and_then(|pair| pair.split_once('=')).map(|(n, _)| n.trim()).unwrap_or("");
+        if self.cookies.iter().any(|c| c.http_only && c.name == name && domain_matches(&url.host, c)) {
+            return;
+        }
+        self.store(url, line, now);
+    }
+
     /// Forgets every cookie of a domain and its subdomains.
     pub fn clear_domain(&mut self, domain: &str) {
         self.cookies

@@ -8,8 +8,12 @@
 //! `@media` depends on the width: a window resized is laid out again from
 //! them.
 //!
-//! No script runs. `<noscript>` content is therefore shown, as it would be
-//! in a browser with scripts disabled -- which is what this is.
+//! The scripts are gathered here too -- inline ones as written, external
+//! ones fetched with the sheets, by the loading task -- and handed over
+//! in document order; they run in the browser's task (`web::js`), which
+//! owns the page once it has arrived. `<noscript>` is still shown: the
+//! engine covers a part of what pages expect, and a page that falls back
+//! on it says more than one that silently half works.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -26,6 +30,9 @@ use super::url::Url;
 /// Style sheets fetched per page at most, and their size.
 pub const MAX_SHEETS: usize = 16;
 pub const MAX_SHEET_BYTES: usize = 1024 * 1024;
+/// External scripts fetched per page at most, and their size.
+pub const MAX_SCRIPTS: usize = 32;
+pub const MAX_SCRIPT_BYTES: usize = 2 * 1024 * 1024;
 
 pub struct Loaded {
     pub url: Url,
@@ -33,6 +40,13 @@ pub struct Loaded {
     pub document: Document,
     /// CSS sources, in cascade order.
     pub sheets: Vec<String>,
+    /// The `<style>` or `<link>` element each sheet came from.
+    pub sheet_nodes: Vec<html::NodeId>,
+    /// JavaScript sources, in document order.
+    pub scripts: Vec<String>,
+    /// Scripts left out, and why (modules, sources too large): for the
+    /// page's console.
+    pub skipped_scripts: Vec<String>,
     pub security: String,
     pub status: u16,
     pub from_cache: bool,
@@ -72,16 +86,16 @@ pub fn escape(text: &str) -> String {
 /// Builds a page from HTML already in hand (the browser's own pages).
 pub fn from_html(url: Url, source: &str) -> Loaded {
     let document = html::parse(source);
-    let sheets = document
-        .elements("style")
-        .iter()
-        .map(|id| document.text_content_raw(*id))
-        .collect();
+    let sheet_nodes = document.elements("style");
+    let sheets = sheet_nodes.iter().map(|id| document.text_content_raw(*id)).collect();
     Loaded {
+        sheet_nodes,
         title: document.title(),
         url,
         document,
         sheets,
+        scripts: Vec::new(),
+        skipped_scripts: Vec::new(),
         security: String::from("page interne du navigateur"),
         status: 200,
         from_cache: false,
@@ -114,6 +128,7 @@ pub fn load<N: Net, S: Store>(net: &mut N, store: &mut S, request: Request, widt
     // Style sheets, in document order: `<style>` and `<link>` interleave
     // in the cascade exactly as they appear.
     let mut sheets: Vec<String> = Vec::new();
+    let mut sheet_nodes: Vec<html::NodeId> = Vec::new();
     let mut fetched = 0;
     for id in 0..document.nodes.len() {
         match document.tag(id) {
@@ -148,18 +163,80 @@ pub fn load<N: Net, S: Store>(net: &mut N, store: &mut S, request: Request, widt
             }
             _ => {}
         }
+        sheet_nodes.resize(sheets.len(), id);
     }
+
+    let (scripts, skipped_scripts) = gather_scripts(net, store, &document, &base);
 
     Ok(Outcome::Page(Loaded {
         title: document.title(),
         url: response.url.clone(),
         document,
         sheets,
+        sheet_nodes,
+        scripts,
+        skipped_scripts,
         security: response.security.clone(),
         status: response.status,
         from_cache: response.from_cache,
         tls: response.tls.clone(),
     }))
+}
+
+/// Is this `type` of `<script>` JavaScript? The empty type and the
+/// historical names are; `module`, JSON and templates are not run.
+fn is_classic_script(kind: &str) -> bool {
+    let kind = kind.trim().to_ascii_lowercase();
+    kind.is_empty()
+        || matches!(
+            kind.as_str(),
+            "text/javascript" | "application/javascript" | "application/x-javascript" | "text/ecmascript" | "application/ecmascript" | "text/jscript"
+        )
+}
+
+/// The page's scripts, in document order: inline text, or the fetched
+/// file of `src`. Returns them, and what was left out.
+fn gather_scripts<N: Net, S: Store>(net: &mut N, store: &mut S, document: &Document, base: &Url) -> (Vec<String>, Vec<String>) {
+    let mut scripts = Vec::new();
+    let mut skipped = Vec::new();
+    let mut fetched = 0;
+    for id in document.elements("script") {
+        let kind = document.attribute(id, "type").unwrap_or("");
+        if !is_classic_script(kind) {
+            if kind.eq_ignore_ascii_case("module") {
+                skipped.push(String::from("script de type module ignore (modules ES non pris en charge)"));
+            }
+            continue;
+        }
+        match document.attribute(id, "src") {
+            None => scripts.push(document.text_content_raw(id)),
+            Some(src) => {
+                let Some(url) = base.join(src) else {
+                    continue;
+                };
+                if fetched >= MAX_SCRIPTS {
+                    skipped.push(alloc::format!("{} : trop de scripts", url));
+                    continue;
+                }
+                fetched += 1;
+                match fetch_text(net, store, url.clone(), MAX_SCRIPT_BYTES) {
+                    Some(source) => scripts.push(source),
+                    None => skipped.push(alloc::format!("{} : script non charge", url)),
+                }
+            }
+        }
+    }
+    (scripts, skipped)
+}
+
+/// A text file, if it comes back 200 and within `limit` bytes.
+fn fetch_text<N: Net, S: Store>(net: &mut N, store: &mut S, url: Url, limit: usize) -> Option<String> {
+    let request = Request::new(Method::Get, url);
+    let response = http::fetch(net, store, request).ok()?;
+    if response.status != 200 || response.body.len() > limit {
+        return None;
+    }
+    Some(text::decode(&response.body, response.charset().as_deref()))
 }
 
 fn fetch_sheet<N: Net, S: Store>(net: &mut N, store: &mut S, url: Url) -> Option<String> {
@@ -189,6 +266,41 @@ fn import_into<N: Net, S: Store>(net: &mut N, store: &mut S, base: &Url, content
         }
     }
     count
+}
+
+/// The sheets of a page whose scripts changed it: in tree order, a
+/// `<style>`'s current text, and what a `<link>` brought at loading.
+/// A `<style>` added by a script counts; a removed one no longer does.
+pub fn current_sheets(loaded: &Loaded) -> Vec<String> {
+    let mut out = Vec::new();
+    for node in loaded.document.preorder(0) {
+        match loaded.document.tag(node) {
+            Some("style") => {
+                // Its `@import`s, fetched at loading, then its text now.
+                let own: Vec<usize> = (0..loaded.sheets.len()).filter(|i| loaded.sheet_nodes.get(*i) == Some(&node)).collect();
+                for index in own.iter().take(own.len().saturating_sub(1)) {
+                    out.push(loaded.sheets[*index].clone());
+                }
+                out.push(loaded.document.text_content_raw(node));
+            }
+            Some("link") => {
+                for (index, origin) in loaded.sheet_nodes.iter().enumerate() {
+                    if *origin == node {
+                        out.push(loaded.sheets[index].clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Lays out a page its scripts have changed.
+pub fn render_live(loaded: &Loaded, width: i32, viewport_height: i32, headroom: &dyn Fn() -> usize) -> Laid {
+    let sheets: Vec<css::Stylesheet> = current_sheets(loaded).iter().map(|source| css::parse(source, width)).collect();
+    let styles = style::compute(&loaded.document, &sheets, (width, viewport_height));
+    layout::layout(&loaded.document, &styles, width, viewport_height, headroom)
 }
 
 /// Lays a loaded page out at `width`.

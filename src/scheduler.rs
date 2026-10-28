@@ -12,7 +12,7 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::fs::perm::{Credentials, Gid, Role, Uid};
 use crate::gdt::MAX_CPUS;
@@ -640,6 +640,34 @@ pub mod wake_latency {
 }
 
 /// Yields the CPU voluntarily. Basis of SYS_PROC_YIELD.
+/// Per core, the task it is leaving (index in the table, plus one): set
+/// under the lock when the core elects another task, cleared by the
+/// incoming one once `switch_context` has stopped writing.
+///
+/// Between the two, the core still writes the outgoing task's registers
+/// on its stack and its stack pointer in its slot -- after the lock is
+/// released, since the switch must not hold it. `current[cpu]` already
+/// names the incoming task there: a dead outgoing task looked reapable,
+/// another core freed its stack and gave its slot to a new task, and the
+/// switch wrote 576 bytes into the new owner's stack and its `rsp` into
+/// the new task's slot. Seen once in some forty boots: a kernel jump to
+/// address 0 on the core of two ring 3 tasks just killed by a fault.
+static LEAVING: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(0) }; MAX_CPUS];
+
+/// The incoming task has its stack: the outgoing one is left. Called
+/// right after `switch_context` returns, and by `task_trampoline` for a
+/// task's first run.
+#[unsafe(no_mangle)]
+pub extern "C" fn switched_in() {
+    let cpu = crate::smp::current_cpu_id().min(MAX_CPUS - 1);
+    LEAVING[cpu].store(0, Ordering::Release);
+}
+
+/// Is a core still leaving the task at `index`?
+fn being_left(index: usize) -> bool {
+    LEAVING.iter().any(|slot| slot.load(Ordering::Acquire) == index + 1)
+}
+
 pub fn yield_now() {
     let cpu = crate::smp::current_cpu_id();
     let now = crate::idt::ticks();
@@ -694,6 +722,8 @@ pub fn yield_now() {
         sched.tasks[next].run_since = tsc;
 
         sched.current[cpu] = Some(next);
+        // Still ours to write until the switch is done (`LEAVING`).
+        LEAVING[cpu].store(previous + 1, Ordering::Release);
         CURRENT_PID[cpu].store(sched.tasks[next].pid as u64, Ordering::Relaxed);
         sched.switches += 1;
 
@@ -727,6 +757,8 @@ pub fn yield_now() {
     TOTAL_SWITCHES.fetch_add(1, Ordering::Relaxed);
 
     unsafe { switch_context(old_rsp_ptr, new_rsp) };
+    // Back on this task's own stack: whatever this core left is left.
+    switched_in();
 }
 
 /// Loads the address space and TLS base of the incoming task (11.3).
@@ -1376,6 +1408,11 @@ pub fn try_reap(pid: Pid) -> Option<i64> {
         // a core names it as current, it is not reapable.
         let index = sched.tasks.iter().position(|t| t.pid == pid)?;
         if sched.current.iter().any(|slot| *slot == Some(index)) {
+            return None;
+        }
+        // Nor while a core is still switching away from it: it writes
+        // the task's stack and slot until the switch is over.
+        if being_left(index) {
             return None;
         }
 

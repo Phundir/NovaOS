@@ -185,6 +185,8 @@ nova-os/
 │   │   ├── window.rs          Boucle commune des fenetres a horloge
 │   │   └── browser/           navigateur.cus : le navigateur web
 │   │       ├── mod.rs         Fenetre, onglets, barre d'adresse, historique
+│   │       ├── script.rs      Scripts de la page : royaume par onglet,
+│   │       │                  hote, relayout, clics, minuteries (16.2)
 │   │       ├── net.rs         Connexions, DNS en cache, tache de chargement
 │   │       ├── certs.rs       Magasin de certificats par compte
 │   │       └── pages.rs       Pages about: internes
@@ -201,6 +203,8 @@ nova-os/
 │   │   ├── roots.rs           Ancres de confiance (GENERE)
 │   │   ├── text.rs            Jeux de caracteres, entites
 │   │   ├── html.rs            Jetons puis arbre
+│   │   ├── tree.rs            L'arbre que les scripts changent ; ordre de
+│   │   │                      l'arbre (preorder) et non de l'arène
 │   │   ├── css.rs / style.rs  Analyse CSS, selecteurs, cascade
 │   │   ├── layout.rs          Boites positionnees (CSS 2.1)
 │   │   ├── paint.rs           Rendu dans un tampon de pixels
@@ -217,8 +221,9 @@ nova-os/
 │   │   │   ├── builtins/      Object, Function, Array, String, Number,
 │   │   │   │                  Boolean, Symbol, Math, JSON, Date, RegExp,
 │   │   │   │                  Map/Set/Weak*, Promise, console, minuteries
-│   │   │   ├── dom.rs         (16.2) liaisons DOM
-│   │   │   └── selftest.rs    Corpus de 94 cas, vérifié contre Node 22
+│   │   │   ├── dom/           (16.2) Node, Element, Document, événements,
+│   │   │   │                  window, location, storage, fetch, XHR
+│   │   │   └── selftest.rs    94 cas (Node 22) + 30 cas DOM (jsdom)
 │   │   └── selftest.rs        Autotest hors reseau
 │   │
 │   ├── vm/                    Espaces d'adressage prives (11.3)
@@ -2402,6 +2407,31 @@ n'écrit rien tant qu'on ne tape rien, et `make run-nogui` a un shell.
 recovery, et tape des commandes sur la console série (`--type` de
 `tools/boot-test.py`), chaque réponse attendue avant la commande
 suivante.
+
+## 11 quaterdecies. Scripts des pages (phase 16.2)
+
+```
+tâche de chargement (net.rs)            tâche de la fenêtre (mod.rs)
+  page::load : HTML, feuilles,     -->   collect : ScriptPage::start
+  scripts (en ligne, src=...)            royaume + DomState + BrowserHost
+  page::render (premier essai)           builtins::install, dom::install
+                                         dom::start_page : scripts dans
+                                         l'ordre, DOMContentLoaded, load
+                                         ctx.dirty ? page::render_live
+                                         boîtes -> realm.dom.boxes
+clic (x, y) -> element_at(boîtes) -> mousedown/up/click -> défaut ?
+touche -> keydown (annulable) -> édition -> input ; Entrée -> submit
+tick -> ScriptPage::timers -> apply(Outcome) : relayout, navigation,
+        dialogue, défilement, history, form.submit()
+```
+
+| Où | Quoi |
+|---|---|
+| `Page::boxes` | (nœud, x, y, l, h) de chaque bloc, contrôle, image et passage de texte, dans l'ordre de peinture |
+| `DomState::values` / `checked` | état des contrôles vu par la page ; la fenêtre le pousse à chaque frappe et le relit après chaque relayout |
+| `DomState::wrappers` | l'objet de chaque nœud vu par un script (identité, propriétés ajoutées) |
+| `net::fetch_now` | requête d'un script, dans la tâche de la fenêtre (entrée de job pour la progression) |
+| `stockage-local.txt` | `localStorage` par origine, enregistré avec les cookies |
 
 ## 12. Points d'extension immédiats
 
