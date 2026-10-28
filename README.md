@@ -178,6 +178,20 @@ commande s'exécute avec les droits du compte de la session (ROOT sur la
 console de recovery) : le shell n'accorde rien que le système de fichiers
 refuserait.
 
+Exécuter et déboguer :
+
+```text
+root:/$ dev interpret main.ts              # JavaScript / TypeScript (Node, Bun)
+root:/$ dev run --debug --projet mon-app   # le programme s'arrete a son entree
+(ndb) arret calcule                        # point d'arret sur une fonction
+(ndb) continuer
+(ndb) registres
+(ndb) pile
+(ndb) ecrire rdi 10
+(ndb) pas
+(ndb) continuer                            # jusqu'a la fin : code de sortie
+```
+
 ---
 
 ## Commandes
@@ -232,6 +246,7 @@ autotest qui imprime un **verdict** sur la console série.
 [test] phase 16.1 validee - 95 cas du moteur JavaScript (2270 ms)
 [test] phase 16.2 validee - 30 cas du DOM, 12 verifications du navigateur
 [test] phase 16.3 validee - 30 verifications de dev interpret (Node, Bun), 8 cas de modules et TypeScript
+[test] phase 16.4 validee - 25 verifications du debogueur (9 arrets en ring 3)
 ```
 
 `make test` démarre l'ISO sans fenêtre (`tools/boot-test.py`), arrête
@@ -364,7 +379,8 @@ en rendu logiciel.
   sur la console série et mode recovery.
 - **SDK `dev`** : gabarits, `dev.toml`, bac à sable, assembleur x86_64,
   compilateur d'un sous-ensemble de **Rust** vers x86_64, interprète Nova
-  Script, convertisseur Electron → natif (ETR).
+  Script, convertisseur Electron → natif (ETR), **débogueur** (`dev run
+  --debug` : points d'arrêt, pas à pas, registres, mémoire, pile).
 
 ---
 
@@ -459,7 +475,7 @@ d'interruption, appels système, invariants — est dans
 | 13 | Pile graphique Nova et GPU | 🔧 à valider |
 | 14 | LIFS et partitions | 🔧 à valider |
 | 15 | Mises à jour atomiques des applications, Ed25519 | ✅ |
-| 16 | Langages et outils : shell et terminal ✅, JavaScript et TypeScript (navigateur et `dev interpret`) ✅ ; débogueur, Python, C, Java | 🔄 |
+| 16 | Langages et outils : shell et terminal ✅, JavaScript et TypeScript (navigateur et `dev interpret`) ✅, débogueur ✅ ; Python, C, Java | 🔄 |
 | 17 | Reliquats système de fichiers et POSIX | 📝 |
 | 18 | Firefox sur la pile Nova (machine de l'auteur) | ⏸ |
 

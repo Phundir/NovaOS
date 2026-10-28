@@ -15,6 +15,7 @@ pub mod binfmt;
 pub mod compat;
 pub mod config;
 pub mod crypto;
+pub mod debug;
 pub mod drivers;
 pub mod fpu;
 pub mod frame;
@@ -807,6 +808,18 @@ fn task_phase16_selftest() -> ! {
         );
     } else {
         serial_println!("[test] phase 16.0 ECHEC - {} cas incorrects sur {}", failed, passed + failed);
+    }
+    // 16.4: a debugging session typed into a shell, on a program in ring 3.
+    let traps_before = debug::traps();
+    let (passed, failed) = sdk::debug::selftest::run();
+    if failed == 0 {
+        serial_println!(
+            "[test] phase 16.4 validee - {} verifications du debogueur ({} arrets en ring 3)",
+            passed,
+            debug::traps() - traps_before
+        );
+    } else {
+        serial_println!("[test] phase 16.4 ECHEC - {} verifications incorrectes sur {}", failed, passed + failed);
     }
     selftest_done()
 }

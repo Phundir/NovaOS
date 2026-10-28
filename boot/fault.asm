@@ -20,6 +20,10 @@
 ;  * enter_user: first entry into ring 3 with a complete register set,
 ;    for threads born from `clone` (every register of the parent, RAX 0)
 ;    and for processes whose ABI wants values in registers at start.
+;
+;  * debug_trap_entry / breakpoint_entry (16.4): #DB and #BP, which the
+;    debugger needs to read *and change* -- the same frame as a page
+;    fault, the vector in the error slot.
 ; ============================================================
 
 section .text
@@ -30,7 +34,10 @@ global user_copy
 global user_copy_end
 global user_copy_fixup
 global enter_user
+global debug_trap_entry
+global breakpoint_entry
 extern page_fault_handler
+extern debug_trap_handler
 
 ; ------------------------------------------------------------
 ;  page_fault_entry
@@ -105,6 +112,76 @@ page_fault_entry:
     pop rax
     add rsp, 8                  ; error code
     test qword [rsp + 8], 3     ; CS of the interrupted code
+    jz .to_kernel
+    swapgs
+.to_kernel:
+    iretq
+
+; ------------------------------------------------------------
+;  debug_trap_entry (#DB, vector 1) / breakpoint_entry (#BP, vector 3)
+;
+;  Neither pushes an error code: the entry pushes the vector in its
+;  place, which gives `vm::FaultFrame` again (the handler reads the
+;  vector in `error`). Alignment as for the page fault: 40 bytes of
+;  hardware frame on a 16-aligned stack, one word, 15 registers, one
+;  more word before the call.
+;
+;  The handler may sleep (a traced program waits there for its
+;  debugger) and may end the task: hence swapgs on the way in from ring
+;  3, as for the page fault. It returns with interrupts masked, so that
+;  nothing comes between the swapgs back and iretq.
+; ------------------------------------------------------------
+debug_trap_entry:
+    push 1
+    jmp debug_common
+
+breakpoint_entry:
+    push 3
+
+debug_common:
+    test qword [rsp + 16], 3
+    jz .kernel_gs
+    swapgs
+.kernel_gs:
+    cld
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov rdi, rsp
+    sub rsp, 8
+    call debug_trap_handler
+    add rsp, 8
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    add rsp, 8                  ; vector
+    test qword [rsp + 8], 3
     jz .to_kernel
     swapgs
 .to_kernel:

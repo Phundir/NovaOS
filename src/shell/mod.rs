@@ -65,6 +65,19 @@ pub struct Shell {
     pub user: String,
     pub who: Credentials,
     pub history: Vec<String>,
+    /// The program `dev run --debug` stopped (16.4): while it is set,
+    /// lines go to the debugger, and the prompt says so.
+    pub debugging: Option<crate::process::Pid>,
+}
+
+impl Drop for Shell {
+    /// A terminal closed on a stopped program: the program ends with it,
+    /// rather than sleep in its trap for good.
+    fn drop(&mut self) {
+        if let Some(pid) = self.debugging.take() {
+            crate::sdk::debug::close(pid);
+        }
+    }
 }
 
 /// Longest history kept.
@@ -75,7 +88,7 @@ impl Shell {
     pub fn new(user: &str, who: Credentials) -> Shell {
         let home = alloc::format!("/users/{}/home", user);
         let cwd = if crate::fs::stat(&home, who).is_ok() { home } else { String::from("/") };
-        Shell { cwd, user: String::from(user), who, history: Vec::new() }
+        Shell { cwd, user: String::from(user), who, history: Vec::new(), debugging: None }
     }
 
     /// The shell of the session, or ROOT's when there is none.
@@ -87,6 +100,9 @@ impl Shell {
     }
 
     pub fn prompt(&self) -> String {
+        if self.debugging.is_some() {
+            return String::from("(ndb) ");
+        }
         alloc::format!("{}:{}$ ", self.user, self.cwd)
     }
 
@@ -118,6 +134,13 @@ impl Shell {
             if self.history.len() > HISTORY {
                 self.history.remove(0);
             }
+        }
+        if let Some(pid) = self.debugging {
+            let (lines, ended) = crate::sdk::debug::command(pid, line);
+            if ended {
+                self.debugging = None;
+            }
+            return Output::lines(lines);
         }
         let words = match split(line) {
             Ok(words) => words,

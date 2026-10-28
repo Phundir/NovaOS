@@ -94,7 +94,7 @@ pub fn run(shell: &mut Shell, line: &str, words: &[String]) -> Output {
         Some("effacer") => Output { clear: true, ..Output::default() },
         Some("quitter") => Output { exit: true, ..Output::default() },
         Some("spm") => spm(line, now),
-        Some("dev") => dev(line, now),
+        Some("dev") => dev(shell, line, now),
         _ => Output::error(alloc::format!("{} : commande inconnue - \"aide\" les liste", first)),
     }
 }
@@ -571,8 +571,16 @@ fn spm(line: &str, now: u64) -> Output {
     }
 }
 
-fn dev(line: &str, now: u64) -> Output {
+fn dev(shell: &mut Shell, line: &str, now: u64) -> Output {
     match crate::sdk::cli::execute(line, now) {
+        Ok(crate::sdk::cli::Output::Debugging(started)) => {
+            // The program waits on its entry: the next lines are the
+            // debugger's (16.4).
+            if crate::sdk::debug::is_open(started.pid) {
+                shell.debugging = Some(started.pid);
+            }
+            Output::lines(started.lines)
+        }
         Ok(output) => Output::lines(output.lines()),
         Err(error) => Output::error(alloc::format!("dev : {}", error.message())),
     }

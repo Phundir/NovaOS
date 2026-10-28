@@ -36,11 +36,13 @@
 //!
 //! ## What `--debug` changes, exactly
 //!
-//! There is **no debugger** -- no breakpoint, no register inspection.
-//! `--debug` does two real things: it traces the launch life cycle on the
-//! serial console, and it **keeps the sandbox** after the program ends
-//! instead of destroying it, so that its content can be inspected.
-//! Cleanup then becomes explicit, and `dev nettoyer` takes care of it.
+//! Since 16.4, the program runs under the debugger (`sdk::debug`): it is
+//! traced before its first instruction, stopped on its entry, and the
+//! command returns a session the shell hands the next lines to --
+//! breakpoints, steps, registers, memory, call stack. When the program
+//! ends, the sandbox is **kept** instead of destroyed, so that its content
+//! can be inspected; cleanup is explicit, and `dev nettoyer` takes care
+//! of it.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -220,6 +222,9 @@ pub enum Output {
     InterpretedRust(rustc::Interpreted),
     /// `dev interpret` on a `.js`: Nova's JavaScript engine (16.3).
     InterpretedJs(super::js::JsRun),
+    /// `dev run --debug` (16.4): the program stopped on its entry, a
+    /// debugging session open on it (`sdk::debug`).
+    Debugging(super::debug::Started),
     Packaged(PackageReport),
     Converted(ConvertReport),
     Cleaned {
@@ -335,6 +340,7 @@ impl Output {
                 ));
                 lines
             }
+            Output::Debugging(started) => started.lines.clone(),
             Output::InterpretedJs(run) => {
                 let mut lines: Vec<String> = run.output.iter().map(|line| alloc::format!("  {}", line)).collect();
                 if let Some(error) = &run.error {
@@ -479,7 +485,7 @@ pub fn execute(line: &str, now: u64) -> Result<Output, DevError> {
     match command.verb {
         "new" => new_project(&command, now),
         "build" => build(&command, now).map(Output::Built),
-        "run" => run(&command, now).map(Output::Ran),
+        "run" => run(&command, now),
         "interpret" => interpret(&command),
         "package" => package(&command, now).map(Output::Packaged),
         "convert" => convert(&command, now).map(Output::Converted),
@@ -860,7 +866,7 @@ fn build(command: &Command, now: u64) -> Result<BuildReport, DevError> {
 // ============================================================
 
 /// 9.1.3 -- `dev run [--debug]`, in a sandbox of 15.4.
-fn run(command: &Command, now: u64) -> Result<RunReport, DevError> {
+fn run(command: &Command, now: u64) -> Result<Output, DevError> {
     let project = resolve_project(command)?;
     let manifest = load_manifest(&project)?;
     let debug = command.has("debug");
@@ -929,6 +935,8 @@ fn run(command: &Command, now: u64) -> Result<RunReport, DevError> {
             id,
             pages
         );
+        STATE.lock().runs += 1;
+        return debug_run(&object, &image, &manifest.app_id, id, now);
     }
 
     let (loaded, pid) = match binfmt::loader::load_and_spawn(&image) {
@@ -967,7 +975,7 @@ fn run(command: &Command, now: u64) -> Result<RunReport, DevError> {
 
     STATE.lock().runs += 1;
 
-    Ok(RunReport {
+    Ok(Output::Ran(RunReport {
         sandbox: id,
         pid,
         exit_code,
@@ -977,7 +985,54 @@ fn run(command: &Command, now: u64) -> Result<RunReport, DevError> {
         pages,
         kept: debug,
         loopback_refused: refused,
-    })
+    }))
+}
+
+/// 16.4 -- the program under the debugger: loaded, traced before it
+/// first runs, stopped on its entry. Its symbols go to the session at
+/// their run-time addresses (the image may have moved: `base`).
+fn debug_run(object: &Object, image: &[u8], app_id: &str, sandbox_id: u32, now: u64) -> Result<Output, DevError> {
+    let loaded = match binfmt::loader::load(image) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            let _ = sandbox::destroy(sandbox_id, now);
+            return Err(DevError::LoadRefused(String::from(error.message())));
+        }
+    };
+    let layout = emit::Layout::of(object);
+    let base = loaded.base;
+    let data = base + layout.text_span as u64;
+    let bss = data + layout.data_span as u64;
+    let symbols: Vec<(String, u64)> = object
+        .symbols
+        .iter()
+        .map(|symbol| {
+            let section = match symbol.section {
+                asm::Section::Text => base,
+                asm::Section::Data => data,
+                asm::Section::Bss => bss,
+            };
+            (symbol.name.clone(), section + symbol.offset)
+        })
+        .collect();
+    let entry = loaded.entry_point;
+    let debugger = crate::scheduler::current_pid();
+    let pid = binfmt::loader::spawn_with(&loaded, |pid| {
+        crate::debug::attach(pid, debugger);
+        if let Err(reason) = crate::debug::set_breakpoint(pid, entry) {
+            crate::serial_println!("[dev] point d'arret d'entree impossible : {}", reason);
+        }
+    });
+    // As in `run`: the image is the kernel's to release when the task is
+    // reaped.
+    binfmt::loader::keep(pid, loaded);
+    let started = super::debug::open(pid, sandbox_id, app_id, symbols, (base, data), entry);
+    Ok(Output::Debugging(started))
+}
+
+/// A sandbox the debugger leaves behind, for `dev nettoyer`.
+pub(super) fn keep_sandbox(id: u32) {
+    STATE.lock().kept.push(id);
 }
 
 /// Purges the sandboxes kept by `--debug`.

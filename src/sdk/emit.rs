@@ -119,7 +119,7 @@ pub struct Layout {
 }
 
 impl Layout {
-    fn of(object: &Object) -> Layout {
+    pub fn of(object: &Object) -> Layout {
         Layout {
             text_span: align_up(object.text.len().max(1), PAGE),
             // A program with no initialised data occupies no page for

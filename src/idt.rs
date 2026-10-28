@@ -56,6 +56,13 @@ impl Entry {
         self.options = 0x8E00;
     }
 
+    /// A gate ring 3 may raise itself with `int n` -- `int3` for the
+    /// debugger's breakpoints. Any other gate answers `int n` from ring 3
+    /// with #GP, which is what the others want.
+    fn set_user_callable(&mut self) {
+        self.options |= 3 << 13;
+    }
+
     /// The IST index is stored one-based; 0 means "no dedicated stack".
     fn set_stack_index(&mut self, index: u16) {
         self.options = (self.options & !0b111) | (index + 1);
@@ -83,6 +90,9 @@ pub struct InterruptStackFrame {
 unsafe extern "C" {
     /// boot/fault.asm
     fn page_fault_entry();
+    /// boot/fault.asm, 16.4: #DB and #BP with every register saved.
+    fn debug_trap_entry();
+    fn breakpoint_entry();
 }
 
 // ============================================================
@@ -266,7 +276,6 @@ pub fn kernel_page_fault(rip: u64, rsp: u64, error: u64, cr2: u64) -> ! {
 }
 
 handler!(divide_error, 0, "Division par zero");
-handler!(debug_exception, 1, "Debug");
 handler!(non_maskable_interrupt, 2, "Interruption non masquable");
 handler!(overflow, 4, "Depassement de capacite");
 handler!(bound_range_exceeded, 5, "Bornes depassees");
@@ -287,15 +296,28 @@ handler_with_code!(control_protection, 21, "Protection de flot de controle");
 handler_with_code!(vmm_communication, 29, "Communication VMM");
 handler_with_code!(security_exception, 30, "Exception de securite");
 
-/// Breakpoint: the only non-fatal exception. `int3` resumes execution
-/// normally -- that is what serves as our IDT test.
-extern "x86-interrupt" fn breakpoint(frame: InterruptStackFrame) {
+/// Breakpoint in ring 0: the only non-fatal exception. `int3` resumes
+/// execution normally -- that is what serves as our IDT test. Reached
+/// through `breakpoint_entry` and `debug::debug_trap_handler`, which
+/// keep ring 3 traps for the debugger (16.4).
+pub fn kernel_breakpoint(rip: u64) {
     crate::vga::set_color(Color::LightCyan, Color::Black);
-    crate::kprintln!(
-        "[idt] breakpoint atteint - RIP 0x{:016x}",
-        frame.instruction_pointer
-    );
+    crate::kprintln!("[idt] breakpoint atteint - RIP 0x{:016x}", rip);
     crate::vga::set_color(Color::LightGray, Color::Black);
+}
+
+/// A debug exception in ring 0: nothing in the kernel sets TF or a debug
+/// register, so this is a bug -- reported, and the core stops.
+pub fn kernel_debug_exception(rip: u64, rsp: u64, rflags: u64) -> ! {
+    let frame = InterruptStackFrame {
+        instruction_pointer: rip,
+        code_segment: 0x08,
+        cpu_flags: rflags,
+        stack_pointer: rsp,
+        stack_segment: 0x10,
+    };
+    report(1, "Debug", &frame, None);
+    crate::halt_loop()
 }
 
 /// Raised when the CPU cannot invoke a handler. Runs on the IST stack
@@ -545,9 +567,10 @@ pub fn init() {
         let idt = &raw mut IDT;
 
         (*idt)[0].set_handler(divide_error as *const ());
-        (*idt)[1].set_handler(debug_exception as *const ());
+        (*idt)[1].set_handler(debug_trap_entry as *const ());
         (*idt)[2].set_handler(non_maskable_interrupt as *const ());
-        (*idt)[3].set_handler(breakpoint as *const ());
+        (*idt)[3].set_handler(breakpoint_entry as *const ());
+        (*idt)[3].set_user_callable();
         (*idt)[4].set_handler(overflow as *const ());
         (*idt)[5].set_handler(bound_range_exceeded as *const ());
         (*idt)[6].set_handler(invalid_opcode as *const ());

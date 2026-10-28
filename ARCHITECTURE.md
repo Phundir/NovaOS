@@ -27,7 +27,8 @@ nova-os/
 │   ├── trampoline.asm         Démarrage des cœurs secondaires (16→64 bits)
 │   ├── syscall_entry.asm      Point d'entrée syscall/sysret
 │   ├── usermode.asm           Programme de démonstration ring 3
-│   ├── fault.asm              Faute de page, copies utilisateur, entrée ring 3
+│   ├── fault.asm              Faute de page, copies utilisateur, entrée ring 3,
+│   │                          #DB et #BP avec tous les registres (16.4)
 │   └── vmtest.asm             Programme d'essai des espaces privés (11.3)
 │
 ├── iso/boot/grub/grub.cfg     Menu GRUB, 4 entrées
@@ -281,6 +282,9 @@ nova-os/
 │   │   │                      paquets, modules, manifestes (phase 15)
 │   │   ├── rsa.rs bignum.rs   Verification RSA PKCS #1 v1.5 et PSS
 │   │   └── selftest.rs        Vecteurs publies, au demarrage
+│   ├── debug.rs               Traçage d'un programme ring 3 (16.4) :
+│   │                          points d'arret int3, pas TF, registres,
+│   │                          memoire par la fenetre physique
 │   ├── process.rs             Process, BinaryType, State, affinité
 │   ├── scheduler.rs           Ordonnancement multi-cœurs
 │   ├── ipc.rs                 Boîtes aux lettres, canaux nommés, §12.1
@@ -425,6 +429,9 @@ nova-os/
 │   │   ├── etr.rs             AST JavaScript, correspondances, seuil 70 % (9.6)
 │   │   ├── libdev.rs          Catalogue des abstractions (9.4.3)
 │   │   ├── cli.rs             Les six verbes du §15.2 (9.1)
+│   │   ├── debug/             dev run --debug (16.4) : session,
+│   │   │   │                  commandes (ndb), symboles, pile
+│   │   │   └── selftest.rs    Session tapee dans un shell
 │   │   ├── js/                dev interpret main.js / main.ts (16.3)
 │   │   │   ├── mod.rs         Hote, require, import (ESM, CJS, JSON),
 │   │   │   │                  detection du genre, tache dev-js, droits

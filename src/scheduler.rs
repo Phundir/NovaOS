@@ -475,6 +475,13 @@ pub fn preempt_if_needed() {
 /// Masking interrupts does not close that window: it is opened by
 /// parallelism, not by preemption. Two cores are enough, and the symptom
 /// is a sleeping task that only wakes on the next message -- or never.
+///
+/// A task killed while it runs (`kill` from another core marks it `Dead`
+/// and lets its core notice at the next election) must stay dead here:
+/// writing `Sleeping` over `Dead` brought it back, and the next `wake`
+/// made it eligible again -- a killed program that went on sleeping and
+/// waking, found by the 15.6.1 self-test (a program looping on
+/// `SYS_TIME_SLEEP_MS`, killed while inside the call).
 pub fn arm_sleep() {
     let cpu = crate::smp::current_cpu_id();
     let mut sched = SCHEDULER.lock();
@@ -482,7 +489,9 @@ pub fn arm_sleep() {
         return;
     }
     if let Some(index) = sched.current[cpu] {
-        sched.tasks[index].state = State::Sleeping;
+        if sched.tasks[index].state != State::Dead {
+            sched.tasks[index].state = State::Sleeping;
+        }
     }
 }
 
@@ -510,7 +519,10 @@ pub fn block_current() {
             return;
         }
         if let Some(index) = sched.current[cpu] {
-            sched.tasks[index].state = State::Sleeping;
+            // Killed meanwhile: stays dead (see `arm_sleep`).
+            if sched.tasks[index].state != State::Dead {
+                sched.tasks[index].state = State::Sleeping;
+            }
         }
     }
     yield_now();
@@ -1500,6 +1512,52 @@ pub fn wait_for(pid: Pid) -> Option<i64> {
         yield_now();
     };
 
+    WAITERS.lock().retain(|(waiter, _)| *waiter != me);
+    result
+}
+
+/// What `wait_for_or` saw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitOutcome {
+    /// The task ended, with this code.
+    Exited(i64),
+    /// The condition came true first.
+    Condition,
+    /// No such task (any more).
+    Gone,
+}
+
+/// `wait_for`, but also back as soon as `condition` holds -- the
+/// debugger waits for its program to stop *or* to end (16.4). Whoever
+/// makes the condition true must `wake` the waiter; the end of the task
+/// wakes it as it wakes any `wait_for`.
+pub fn wait_for_or(pid: Pid, condition: &dyn Fn() -> bool) -> WaitOutcome {
+    let me = current_pid();
+    if pid == me || pid == 0 {
+        return WaitOutcome::Gone;
+    }
+    WAITERS.lock().push((me, pid));
+    let result = loop {
+        arm_sleep();
+        if condition() {
+            cancel_sleep();
+            break WaitOutcome::Condition;
+        }
+        if let Some(code) = try_reap(pid) {
+            cancel_sleep();
+            break WaitOutcome::Exited(code);
+        }
+        if !exists(pid) {
+            cancel_sleep();
+            break WaitOutcome::Gone;
+        }
+        if is_dying(pid) {
+            cancel_sleep();
+            yield_now();
+            continue;
+        }
+        yield_now();
+    };
     WAITERS.lock().retain(|(waiter, _)| *waiter != me);
     result
 }

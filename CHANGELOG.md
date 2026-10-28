@@ -8,6 +8,38 @@ a été observé, reste dans `ROADMAP.md` ; les décisions dans `DECISIONS.md`.
 Schéma de version : `0.{phase}.{correctif}` — la phase est la dernière de
 la roadmap dont le code est complet.
 
+## [0.15.6] — 2026-10-28
+
+Phase 16.4 : un débogueur pour `dev run --debug`.
+
+### Ajouté
+
+- **Débogueur** : `dev run --debug` arrête le programme du bac à sable
+  sur son entrée et ouvre une session dans le shell (invite `(ndb)`) :
+  `continuer`, `pas [n]`, `suivant`, `arret <symbole|adresse>`,
+  `effacer`, `points`, `registres`, `memoire <cible> [n]`,
+  `ecrire <registre> <valeur>`, `pile`, `symboles`, `quitter` (alias gdb
+  : c, s, n, b, d, r, x, set, bt, q).
+- **Noyau** (`crate::debug`) : points d'arrêt `int3` et pas à pas (TF)
+  transmis au débogueur, la tâche tracée endormie dans son exception ;
+  registres lus et **écrits** ; mémoire du programme lue et écrite (code
+  en lecture seule compris) ; passage d'un point d'arrêt invisible.
+- Autotest 16.4 : une session tapée dans un shell, jusqu'à changer un
+  registre et constater le code de sortie qu'il explique
+  (`[test] phase 16.4 validee`).
+
+### Modifié
+
+- La porte du vecteur 3 est appelable du ring 3 : un `int3` d'un
+  programme donne #3 (et non plus #GP).
+- IA32_FMASK masque TF à l'entrée de `syscall`.
+
+### Corrigé
+
+- **Ordonnanceur** : une tâche tuée pendant qu'elle tournait pouvait
+  revenir à la vie si elle s'endormait juste après (`arm_sleep` et
+  `block_current` écrasaient l'état `Dead`).
+
 ## [0.15.5] — 2026-10-28
 
 Phase 16.3.2 : modules ES et TypeScript, dans `dev interpret` comme dans

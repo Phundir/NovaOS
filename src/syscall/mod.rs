@@ -668,8 +668,12 @@ pub unsafe fn init(cpu_id: usize) {
 
         // FMASK: bits of RFLAGS cleared on entry. Masking IF guarantees
         // that no interrupt occurs during the swapgs and the stack
-        // switch, a window where the kernel has no valid stack.
-        write_msr(IA32_FMASK, RFLAGS_IF | RFLAGS_DF | RFLAGS_AC);
+        // switch, a window where the kernel has no valid stack. TF too
+        // (16.4): a program single-stepped by the debugger that executes
+        // `syscall` would otherwise trap on the first instruction of the
+        // entry -- in ring 0, before `swapgs`, with the user's GS base.
+        // `sysret` gives the program its TF back.
+        write_msr(IA32_FMASK, RFLAGS_IF | RFLAGS_TF | RFLAGS_DF | RFLAGS_AC);
 
         // --- GS invariant ---
         //
@@ -703,6 +707,7 @@ pub unsafe fn init(cpu_id: usize) {
 const KERNEL_BASE_SELECTOR_U64: u64 = crate::gdt::KERNEL_CODE_SELECTOR as u64;
 const USER_BASE_SELECTOR_U64: u64 = crate::gdt::USER_BASE_SELECTOR as u64;
 
+const RFLAGS_TF: u64 = 1 << 8;
 const RFLAGS_IF: u64 = 1 << 9;
 const RFLAGS_DF: u64 = 1 << 10;
 const RFLAGS_AC: u64 = 1 << 18;
@@ -732,7 +737,7 @@ pub fn dump_state() {
         syscall_entry as *const () as u64
     );
     crate::serial_println!(
-        "[syscall] STAR 0x{:016x} - LSTAR arme - FMASK masque IF/DF/AC",
+        "[syscall] STAR 0x{:016x} - LSTAR arme - FMASK masque IF/TF/DF/AC",
         ((USER_BASE_SELECTOR_U64) << 48) | ((KERNEL_BASE_SELECTOR_U64) << 32)
     );
     table::dump();

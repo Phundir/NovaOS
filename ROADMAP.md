@@ -21,14 +21,14 @@ x86_64, GRUB/Multiboot2.
 | Phase 6 — Couche OS | ✅ terminée | 6.1 → 6.5, 120 ou 121 vérifications selon le matériel présent |
 | Phase 7 — Système graphique | ✅ terminée | 7.1 → 7.7, 13 + 140 vérifications ; le tableau visuel se confirme à l'écran, pas en série |
 | Phase 8 — SPM & mises à jour | ✅ terminée | 8.1 → 8.5, 224 vérifications |
-| Phase 9 — SDK & langages | 🔄 en cours | 21 cases sur 27 ; 433 vérifications au 5 septembre, **à relever** depuis le retrait de devstudio (ses quatre contrôles sont partis avec lui) ; les 6 restantes attendent une toolchain et un débogueur |
+| Phase 9 — SDK & langages | 🔄 en cours | 23 cases sur 27 ; 425 vérifications ; 9.1.3 (débogueur) fermée par 16.4 et 9.5.6 (Node/Bun) par 16.3 ; les 4 restantes (C, C#, Java, Python) sont les étapes 16.5 à 16.8 |
 | Phase 10 — Finitions | ✅ terminée | 10.1 → 10.4, 340 vérifications |
 | Phase 11 — Navigateur Web Browser (fork de Firefox) | ✅ close (24 septembre 2026) | Close sur décision de l'utilisateur ; 11.5 et 11.15 cochées sur les relevés série des 22-23 septembre ; quatre cases non faites, reportées : 11.10.1 (→ 12.8.2), retrait de `navigateur.cus` (11.10.2), GPU (11.12.6 → phase 13), rectangle de `PRESENT` (11.13.6) |
 | Phase 12 — Navigateur natif (libc Nova) | 🔧 implémentée, à valider | Navigateur en `.cus` sur la libc Nova ; objets du noyau sortis de `src/linux/` vers `src/posix/` (23 septembre, soir) ; aucune case cochée |
 | Phase 13 — Pile graphique Nova et accélération GPU | 🔧 faite hors Firefox, à valider | Spec acceptée (24 septembre) ; pilote virtio-gpu 3D, anneau Venus, encodeur généré et vérifié (68 commandes), cœur GPU, écran et plan curseur au cœur, compositeur sur le GPU (égal au pixel près au processeur), `SYS_GPU_*`, bibliothèques C et Rust, modules `.kmd` signés, délai de garde éprouvé ; 75 vérifications ; aucune case cochée (validation de l'utilisateur attendue) ; Firefox (13.0, 13.9-13.10, 13.11.1) reporté par l'utilisateur |
 | Phase 14 — LIFS (nouveau type de partition, liens CoW et Tag) | 🔧 implémentée, à valider | Décisions 14.1 prises (24 septembre) ; GPT/MBR, partitions montées une lettre chacune, racine LIFS, plus aucun formatage implicite ; LIFS (arbres B+, étendues, clones CoW, Tag, index inverse, journal) ; `SYS_FS_NODE_*` ; `tools/lifs.py` et reprise NovaFS → LIFS ; 81 vérifications LIFS dont 32 coupures simulées ; aucune case cochée (validation de l'utilisateur attendue) |
 | Phase 15 — Mises à jour atomiques des applications | ✅ faite (28 octobre 2026) | Proposition de l'utilisateur du 24 septembre 2026 ; points 15.1 tranchés sous mandat d'autonomie ; JSON, Ed25519 (ENTERPRISE enfin signé), HTTPS en flux, pointeur atomique, registre signé, versions à part, lancement par le pointeur, nettoyage différé, `spm.dsa` ; 70 vérifications ; reste 15.6.2 (canal par application dans l'interface) et 15.7.3 partiel |
-| Phase 16 — Langages et outils (fin de la phase 9) | 🔄 en cours | 16.0 (shell, terminal, recovery), 16.1 (moteur JavaScript, 95 cas vérifiés contre Node 22) et 16.2 (DOM et scripts du navigateur, 30 cas vérifiés contre jsdom + 12 vérifications du navigateur) et 16.3 (`dev interpret` pour Node et Bun, modules ES, TypeScript, sorties comparées à Node 22 et Bun) faites le 28 octobre 2026 ; restent le débogueur de `dev run --debug`, Python, C, Java |
+| Phase 16 — Langages et outils (fin de la phase 9) | 🔄 en cours | 16.0 (shell, terminal, recovery), 16.1 (moteur JavaScript, 95 cas vérifiés contre Node 22) et 16.2 (DOM et scripts du navigateur, 30 cas vérifiés contre jsdom + 12 vérifications du navigateur) et 16.3 (`dev interpret` pour Node et Bun, modules ES, TypeScript, sorties comparées à Node 22 et Bun) et 16.4 (débogueur de `dev run --debug`) faites le 28 octobre 2026 ; restent Python, C, Java, C# |
 | Phase 17 — Reliquats système de fichiers et POSIX | 📝 planifiée | Ce que les phases 12 et 14 ont laissé ouvert hors Firefox : page de temps, autotest appel par appel, `copy_file_range`/clonage, Tag dans l'explorateur, GPT de secours, partitionneur |
 | Phase 18 — Firefox sur la pile Nova | ⏸ chez l'auteur | 12.5, 12.7, 12.8, 13.0, 13.9, 13.10, 13.11.1 : demandent la construction du fork et le GPU de la machine de l'auteur |
 
@@ -46,10 +46,10 @@ cochées sur 229.** Les sept restantes sont toutes en phase 9, et elles
 sont nommées juste en dessous. Il ne reste donc **plus de case à ouvrir**
 — seulement des limites à lever, listées phase par phase plus bas.
 
-**Prochaine étape : 16.4, débogueur de `dev run --debug`** ; la phase 15
-et les étapes 16.0 (shell, terminal, recovery), 16.1 (moteur
-JavaScript), 16.2 (scripts du navigateur intégré) et 16.3 (`dev
-interpret` pour Node et Bun, modules ES, TypeScript) sont faites (28
+**Prochaine étape : 16.5, interprète Python** ; la phase 15 et les
+étapes 16.0 (shell, terminal, recovery), 16.1 (moteur JavaScript), 16.2
+(scripts du navigateur intégré), 16.3 (`dev interpret` pour Node et
+Bun, modules ES, TypeScript) et 16.4 (débogueur) sont faites (28
 octobre 2026).
 (L'ancien choix « un espace d'adressage par processus » ou « élargir le
 sous-ensemble Rust » est derrière nous : les espaces privés sont faits
@@ -179,12 +179,12 @@ Sous quatre cœurs (`make run-smp`), les mêmes huit verdicts, avec
 nombre de cœurs. Celui de la phase 6 varie lui aussi, mais pour deux
 autres raisons, détaillées à la fin de « Comment valider la phase 10 ».
 
-Toutes les cases sont cochées **sauf six**, toutes en phase 9 :
+Toutes les cases sont cochées **sauf quatre**, toutes en phase 9 (9.1.3
+est fermée par 16.4, 9.5.6 par 16.3) :
 
 | Case | Ce qui manque |
 |---|---|
-| 9.1.3 `dev run --debug` | le bac à sable existe et se conserve ; il n'y a pas de débogueur |
-| 9.5.2 à 9.5.6 | C/C++, C#, Java, Python, Node/Bun : la table du §13.2 est en données et la résolution refuse nommément, mais aucune toolchain ne tourne |
+| 9.5.2 à 9.5.5 | C/C++, C#, Java, Python : la table du §13.2 est en données et la résolution refuse nommément ; ce sont les étapes 16.5 à 16.8 |
 
 **9.5.1 est fermée depuis le 5 septembre 2026** : `sdk::rustc` compile un
 sous-ensemble défini de Rust en x86_64 qui s'exécute en ring 3, et
@@ -1325,7 +1325,7 @@ Deux configurations supplémentaires doivent passer :
 ### 9.1 CLI `dev`
 - [x] 9.1.1 `dev new` (templates : blank, gui-app, service, game, cli-tool) — *les cinq gabarits sont créés, construits, et le binaire produit est relu par `binfmt::parse`*
 - [x] 9.1.2 `dev build --release` — *incrémente le numéro de construction et le réécrit dans le manifest*
-- [ ] 9.1.3 `dev run --debug` (sandbox + débogueur) — *le bac à sable est fait et conservé pour inspection ; **le débogueur n'existe pas** : pas de point d'arrêt, pas de lecture de registre*
+- [x] 9.1.3 `dev run --debug` (sandbox + débogueur) — *fermée par 16.4 (28 octobre 2026) : points d'arrêt, pas à pas, registres lus et écrits, mémoire, pile d'appels*
 - [x] 9.1.4 `dev interpret` — *le verbe fonctionne sur Nova Script (`.ns`) ; les langages du §13.2 relèvent du 9.5*
 - [x] 9.1.5 `dev package --sign` — *le `.spm` produit est relu du volume et accepté par la vérification de la phase 8*
 - [x] 9.1.6 `dev convert --from electron` (appel à ETR)
@@ -1357,7 +1357,7 @@ Deux configurations supplémentaires doivent passer :
 - [ ] 9.5.3 C# (Mono allégé + transpilation) — *idem*
 - [ ] 9.5.4 Java (JVM maison minimale) — *idem*
 - [ ] 9.5.5 Python (rustpython) — *idem*
-- [ ] 9.5.6 Node.js / Bun (moteurs JS/TS → Rust) — *idem*
+- [x] 9.5.6 Node.js / Bun (moteurs JS/TS → Rust) — *colonne interprète fermée par 16.3 (moteur de Nova, TypeScript à types effacés) ; la colonne compilateur est l'ETR du 9.6*
 - [x] 9.5.7 ASM x86_64 (émulateur sandboxé) — *chaîne complète : `dev build` assemble, édite les liens et produit un binaire qui **s'exécute en ring 3**. Ce que le §13.2 appelle « émulateur sandboxé » est ici le bac à sable du 9.3, qui fait tourner le vrai code au lieu de l'émuler*
 - [x] 9.5.8 Emplacements runtimes (`/sys/runtimes/` vs `/users/{user}/runtimes/`) — *la priorité du §13.3 est éprouvée : un descripteur posé chez un compte masque celui du système, un autre compte ne le voit pas, son retrait rend la main*
 
@@ -1556,11 +1556,9 @@ lisant. C'est le propre d'un compilateur : ses erreurs ne font pas
   bibliothèque ; ce qui existe est son **contrat** — la table des
   abstractions et de leur traduction, vérifiée contre la table d'appels de
   la phase 5. Le code, lui, demanderait un compilateur.
-- **Il n'y a pas de débogueur.** `dev run --debug` trace le cycle de vie
-  et conserve le bac à sable pour inspection. Pas de point d'arrêt, pas de
-  lecture de registre. Un vrai débogueur suppose `int3` géré comme un
-  événement transmis à un processus superviseur, et donc un protocole que
-  la phase 5 n'a pas.
+- ~~**Il n'y a pas de débogueur.**~~ Fermé par 16.4 : `int3` et TF sont
+  gérés comme des événements transmis au débogueur (`crate::debug`), la
+  tâche tracée dort dans son exception le temps de l'inspection.
 - **L'assembleur n'émet que du code position-indépendant.** Pas de
   relocation absolue, pas d'adressage indexé (`[rax + 8]`), pas de
   registres 8/16/32 bits, pas de flottant. C'est délibéré pour les trois
@@ -4181,8 +4179,66 @@ Relevés de `make test` (4 cœurs, deux démarrages), `make test-smp1`,
 - Le répertoire courant du script est celui du programme, pas celui du
   shell.
 #### 16.4 Débogueur (9.1.3)
-- [ ] 16.4.1 `dev run --debug` : points d'arrêt (`int3`), pas à pas (TF),
+- [x] 16.4.1 `dev run --debug` : points d'arrêt (`int3`), pas à pas (TF),
   registres, mémoire, pile d'appels, sur le programme du bac à sable
+
+**Validation de 16.4 (28 octobre 2026, sous mandat d'autonomie).**
+Relevés de `make test` (4 cœurs, deux démarrages), `make test-smp1`,
+`make test-novga`, `make test-recovery` et de quatre démarrages de
+contrainte supplémentaires, tous verts :
+
+```
+[test] phase 16.4 validee - 25 verifications du debogueur (9 arrets en ring 3)
+```
+
+- **Noyau** (`src/debug.rs`, `boot/fault.asm`) : #DB et #BP entrent par
+  `debug_trap_entry`/`breakpoint_entry`, qui sauvent tous les registres
+  dans un `FaultFrame` que le gestionnaire peut **modifier**. La porte du
+  vecteur 3 passe en DPL 3 (un `int3` en ring 3 donnait #GP). Une tâche
+  tracée qui piège enregistre son arrêt, réveille son débogueur et dort
+  **dans son exception** jusqu'à l'ordre suivant (continuer, pas,
+  terminer) ; une tâche non tracée meurt de son `int3` comme avant (code
+  -131). Passer un point d'arrêt : l'octet d'origine revient le temps
+  d'un pas sous TF, le #DB qui suit remet l'`int3`, invisible pour
+  l'utilisateur. La mémoire du programme se lit et s'écrit par la fenêtre
+  physique après un parcours de table (le code en lecture seule aussi),
+  les `int3` du débogueur masqués à la lecture.
+- **IA32_FMASK masque désormais TF** : un pas à pas sur `syscall`
+  piégeait sinon à la première instruction de l'entrée, en ring 0, avant
+  `swapgs`.
+- **SDK** (`sdk/debug/`) : `dev run --debug` charge, trace avant la
+  première instruction (`loader::spawn_with`), arrête le programme sur
+  son entrée et ouvre une session ; le shell passe à l'invite `(ndb)` et
+  lui confie chaque ligne : `continuer`, `pas [n]`, `suivant` (par-dessus
+  un `call`), `arret`, `effacer`, `points`, `registres`, `memoire`,
+  `ecrire`, `pile`, `symboles`, `quitter` (alias gdb). Symboles de
+  l'objet assemblé à leur adresse d'exécution ; pile par les pointeurs de
+  cadre, premier appelant lu sur la pile quand l'arrêt est sur
+  l'instruction d'entrée d'une fonction. Fermer le shell termine le
+  programme arrêté.
+- L'autotest tape une session dans un shell : arrêt à l'entrée, point
+  d'arrêt sur `carre`, `rdi` = 3, pile `carre`/`somme`/`main`, **`rdi`
+  changé à 10** : le programme sort avec 105 au lieu de 14, nombre que
+  seul le registre changé explique ; `int3` masqué à la lecture, `pas 3`,
+  `quitter` (la tâche n'existe plus), `int3` écrit dans le programme
+  (arrêt puis reprise ; sans débogueur, mort par #3).
+- **Bug de l'ordonnanceur trouvé en route** (antérieur) : `kill` marque
+  `Dead` une tâche qui tourne encore ailleurs ; `arm_sleep` (et
+  `block_current`) écrivaient `Sleeping` par-dessus, et le réveil suivant
+  ressuscitait la tâche tuée. Révélé par l'autotest 15.6.1 (un programme
+  qui dort en boucle dans `SYS_TIME_SLEEP_MS`). Corrigé : un mort reste
+  mort.
+
+**Ce qui reste ouvert dans la 16.4**
+- Pas de désassembleur : l'arrêt montre les octets de l'instruction et
+  le symbole, pas sa mnémonique.
+- La pile suit les pointeurs de cadre : un assembleur écrit sans cadre
+  donne une chaîne plus courte (aucune table de déroulement).
+- Points d'arrêt logiciels seulement (pas de registres DR0-DR3, donc pas
+  de point d'observation sur une donnée).
+- Un programme à la fois par session, et seulement ceux du bac à sable
+  (`binfmt::loader`) ; pas d'attache à un processus Linux (11.5) ni à un
+  thread déjà en cours.
 #### 16.5 Python (9.5.5)
 - [ ] 16.5.1 Interprète d'un sous-ensemble défini de Python 3 (indentation,
   entiers illimités, `str`, `list`, `dict`, `tuple`, fonctions, classes,

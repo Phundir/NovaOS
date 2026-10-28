@@ -4571,6 +4571,54 @@ Chromium (Playwright) avant d'être confronté au moteur.
 TypeScript), découpage fait seul et vérifié par le banc hôte (125/125)
 avant tout ajout.
 
+## Débogueur de `dev run --debug` (phase 16.4) — décisions
+
+### La tâche tracée dort dans son exception
+
+Un débogueur a besoin que le programme s'arrête **sans exécuter une
+instruction de plus** et qu'on puisse lire et changer ses registres. Le
+plus simple qui le garantisse : le gestionnaire de #BP/#DB, entré par une
+entrée assembleur qui sauve tous les registres dans un `FaultFrame`
+modifiable (comme la faute de page de 11.3), enregistre l'arrêt,
+réveille le débogueur et **endort la tâche sur place**, interruptions
+rétablies, jusqu'à l'ordre suivant. Il recopie alors les registres
+(éventuellement changés) dans le cadre et retourne par `iretq`, les
+interruptions masquées entre le `swapgs` du retour et `iretq`. Pas de
+protocole entre processus à inventer : le débogueur est une tâche du
+noyau (le shell), et la session vit dans `sdk::debug`.
+
+### Passer un point d'arrêt sans le perdre
+
+Reprendre sur une adresse qui porte un `int3` piégerait aussitôt. L'octet
+d'origine revient, la tâche exécute une instruction sous TF, et le #DB
+qui suit remet l'`int3` ; si l'ordre était « continuer », la tâche
+repart sans s'arrêter, et le débogueur ne voit rien de ce pas. Les
+`int3` du débogueur sont masqués quand il lit la mémoire.
+
+### `int3` en ring 3 : DPL 3 sur le vecteur 3
+
+Sans cela, `int3` exécuté en ring 3 donnait #GP (la porte n'était
+appelable que du ring 0) : un programme de l'utilisateur qui contient
+`int3` mourait d'une faute de protection. Il meurt désormais de #3, ou
+s'arrête sous le débogueur. Les autres vecteurs restent en DPL 0.
+
+### TF masqué à l'entrée de `syscall`
+
+IA32_FMASK ne masquait que IF, DF et AC. Un programme en pas à pas qui
+exécute `syscall` aurait piégé à la première instruction de l'entrée du
+noyau, en ring 0, **avant** `swapgs` — un #DB avec le GS de
+l'utilisateur. TF est masqué comme sous Linux ; `sysret` le rend.
+
+### Bug corrigé : un mort qui se rendormait
+
+`kill` marque `Dead` une tâche qui peut encore tourner sur un autre cœur
+(elle s'en aperçoit à la prochaine élection). `arm_sleep` et
+`block_current` écrivaient `Sleeping` sans regarder : une tâche tuée
+dans un appel système qui s'endort revenait à la vie au réveil suivant.
+L'autotest 15.6.1 l'a attrapé une fois sur une dizaine de démarrages (un
+programme qui dort par tranches de 20 ms). **À ne pas réintroduire** :
+aucun changement d'état ne doit écraser `Dead`.
+
 ---
 
 ## 4. Invariants à ne jamais casser

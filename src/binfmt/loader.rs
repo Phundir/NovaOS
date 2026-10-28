@@ -584,6 +584,12 @@ pub unsafe fn unload(image: LoadedImage) {
 /// 3.4.1 and 3.4.2: priority and core follow from the format alone, with
 /// no possible intervention by the caller -- spec 7.1 declares them fixed.
 pub fn spawn(image: &LoadedImage) -> Pid {
+    spawn_with(image, |_| {})
+}
+
+/// `spawn`, with `before` called on the new PID before the task can run
+/// -- the debugger attaches there, so the first trap finds it (16.4).
+pub fn spawn_with(image: &LoadedImage, before: impl FnOnce(Pid)) -> Pid {
     let name = task_name(&image.identity.app_id);
 
     // 3.2.4: rules proper to the type, applied before the task can be
@@ -639,6 +645,7 @@ pub fn spawn(image: &LoadedImage) -> Pid {
         scheduler::set_foreground(pid, true);
     }
 
+    before(pid);
     scheduler::resume(pid);
     pid
 }

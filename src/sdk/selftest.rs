@@ -2459,11 +2459,16 @@ fn check_run_and_convert(report: &mut Report, now: u64) {
         ),
     }
 
-    // `--debug` keeps the sandbox; `dev nettoyer` purges it.
+    // `--debug` stops the program on its entry (16.4); once it is let go
+    // to its end, the sandbox is kept, and `dev nettoyer` purges it.
     match cli::execute(&alloc::format!("dev run --debug --projet {}", project), now) {
-        Ok(Output::Ran(run)) => {
-            report.check("--debug conserve le bac a sable", run.kept);
-            let root = alloc::format!("{}/{}", sandbox::OVERLAY_ROOT, run.sandbox);
+        Ok(Output::Debugging(started)) => {
+            let (lines, ended) = crate::sdk::debug::command(started.pid, "continuer");
+            report.check(
+                "--debug arrete a l'entree puis mene le programme a sa fin",
+                ended && lines.iter().any(|l| l.contains("code de sortie 0")),
+            );
+            let root = alloc::format!("{}/{}", sandbox::OVERLAY_ROOT, started.sandbox);
             report.check(
                 "le bac conserve existe encore",
                 crate::fs::stat(&root, Credentials::kernel()).is_ok(),
