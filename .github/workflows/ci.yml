@@ -1,0 +1,103 @@
+# Nova OS -- continuous integration.
+#
+# Every push and every pull request: the full build (assembly, Rust,
+# link, ISO) must pass with zero warning, the displayed strings must be
+# ASCII, the kernel must resolve every symbol, and the ISO must boot under
+# QEMU with every self-test verdict green -- on four cores, on one core,
+# and without a screen, twice each on the same disk (the second boot must
+# find the volume, not recreate it). See CLAUDE.md, section 2.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-boot:
+    name: Construction et demarrage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Sources
+        uses: actions/checkout@v4
+
+      - name: Outils de l'hote
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            nasm lld grub-pc-bin grub-common xorriso mtools \
+            qemu-system-x86 xz-utils python3
+
+      - name: KVM pour QEMU (repli TCG sinon)
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+              | sudo tee /etc/udev/rules.d/99-kvm4all.rules > /dev/null
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+            echo "KVM disponible"
+          else
+            echo "pas de KVM : emulation TCG"
+          fi
+
+      - name: Toolchain Rust (rust-toolchain.toml)
+        run: |
+          rustup toolchain install || rustup show
+          rustc --version
+
+      - name: Cache de compilation
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'x86_64-nova_os.json', '.cargo/config.toml') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'x86_64-nova_os.json', '.cargo/config.toml') }}-
+
+      - name: Compilation (aucun avertissement)
+        run: |
+          make 2>&1 | tee build-output.log
+          # The only tolerated line is the toolchain's own notice about
+          # core (stdarch), which is not our code (DECISIONS.md).
+          if grep -E '(^|: )warning' build-output.log \
+               | grep -v 'future version of Rust: core'; then
+            echo "::error::avertissement de compilation"
+            exit 1
+          fi
+
+      - name: Controles statiques
+        run: |
+          make check-ascii
+          test -z "$(nm -u build/nova-os.bin)" || { nm -u build/nova-os.bin; exit 1; }
+
+      - name: Demarrage - 4 coeurs, deux fois sur le meme disque
+        run: make test
+
+      - name: Demarrage - un seul coeur
+        run: make test-smp1
+
+      - name: Demarrage - sans ecran (-vga none)
+        run: make test-novga
+
+      - name: Journaux serie
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: journaux-serie
+          path: build/test/*.log
+          if-no-files-found: ignore
+
+      - name: ISO de developpement
+        uses: actions/upload-artifact@v4
+        with:
+          name: nova-os-iso
+          path: build/nova-os.iso
+          retention-days: 7

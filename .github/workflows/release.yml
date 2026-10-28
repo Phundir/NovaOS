@@ -1,0 +1,131 @@
+# Nova OS -- automatic release on every version change.
+#
+# The version lives in one place, `Cargo.toml` (src/version.rs reads it
+# into the kernel). When a push changes that file and the tag
+# `v{version}` does not exist yet, this workflow builds the distribution
+# (`make dist`: stripped kernel, ISO, blank system disk), boots the very
+# ISO it is about to publish under QEMU (`make test`), and only then
+# creates the tag and the GitHub release, with the notes of that version
+# taken from CHANGELOG.md. A version with a suffix (`0.16.0-rc1`) is
+# published as a pre-release. Pushing the same version again does
+# nothing: the tag already exists.
+name: Release
+
+on:
+  push:
+    branches: ["**"]
+    paths: ["Cargo.toml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publication
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Sources
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Version et tag
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "v$version est deja publiee : rien a faire"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "nouvelle version : v$version"
+          fi
+
+      - name: Outils de l'hote
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            nasm lld grub-pc-bin grub-common xorriso mtools \
+            qemu-system-x86 xz-utils python3
+
+      - name: KVM pour QEMU (repli TCG sinon)
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+              | sudo tee /etc/udev/rules.d/99-kvm4all.rules > /dev/null
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
+
+      - name: Toolchain Rust (rust-toolchain.toml)
+        if: steps.version.outputs.exists == 'false'
+        run: rustup toolchain install || rustup show
+
+      - name: Distribution
+        if: steps.version.outputs.exists == 'false'
+        run: make dist
+
+      - name: Demarrage de l'ISO publiee
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          make test TEST_ISO=build/dist/nova-os-${{ steps.version.outputs.version }}.iso
+          make test-smp1 TEST_ISO=build/dist/nova-os-${{ steps.version.outputs.version }}.iso
+
+      - name: Notes de version (CHANGELOG.md)
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          version='${{ steps.version.outputs.version }}'
+          # The section "## [version]" up to the next "## [".
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "Nova OS $version." > notes.md
+          fi
+          {
+            echo
+            echo "---"
+            echo
+            echo "**Fichiers**"
+            echo
+            echo "| Fichier | Contenu |"
+            echo "|---|---|"
+            echo "| \`nova-os-$version.iso\` | ISO amorcable (GRUB, Multiboot2) |"
+            echo "| \`nova-os-$version-kernel.bin\` | Noyau seul, sans informations de debogage |"
+            echo "| \`nova-os-$version-disk.img.xz\` | Disque systeme vierge (GPT + LIFS, 2 Gio), a decompresser |"
+            echo "| \`SHA256SUMS\` | Empreintes SHA-256 |"
+            echo
+            echo "Demarrage rapide : voir la section \"Essayer une release\" du README."
+            echo
+            echo "Construit depuis \`${GITHUB_SHA::7}\` et demarre sous QEMU avant publication."
+          } >> notes.md
+          cat notes.md
+
+      - name: Release GitHub
+        if: steps.version.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version='${{ steps.version.outputs.version }}'
+          flags=""
+          case "$version" in *-*) flags="--prerelease" ;; esac
+          gh release create "v$version" \
+            build/dist/nova-os-$version.iso \
+            build/dist/nova-os-$version-kernel.bin \
+            build/dist/nova-os-$version-disk.img.xz \
+            build/dist/SHA256SUMS \
+            --target "$GITHUB_SHA" \
+            --title "Nova OS $version" \
+            --notes-file notes.md \
+            $flags
