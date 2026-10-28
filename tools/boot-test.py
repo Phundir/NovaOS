@@ -46,6 +46,7 @@ DEFAULT_VERDICTS = [
     (r"\[test\] phase 12 (validee|non eprouvee)", "12 programmes natifs"),
     (r"\[test\] phase 13 validee", "13 pile graphique"),
     (r"\[test\] phase 15 validee", "15 mises a jour atomiques"),
+    (r"\[test\] phase 16\.0 validee", "16.0 shell et terminal"),
 ]
 
 # Verdicts that only exist when a framebuffer does (-vga none drops them).
@@ -70,6 +71,10 @@ def main():
                         help="extra regular expression a line must match")
     parser.add_argument("--no-screen", action="store_true",
                         help="boot without framebuffer: skip 7.1 and 7")
+    parser.add_argument("--no-default", action="store_true",
+                        help="expect only the --expect lines (recovery boot)")
+    parser.add_argument("--type", action="append", default=[], metavar="REGEX=>TEXT",
+                        help="when a line matches REGEX, type TEXT and Enter on the serial console")
     parser.add_argument("--linger", type=float, default=3,
                         help="seconds to keep reading after a failure")
     parser.add_argument("qemu", nargs=argparse.REMAINDER,
@@ -80,10 +85,15 @@ def main():
     if not command:
         parser.error("no QEMU command given (after --)")
 
-    expected = [(re.compile(p), name) for p, name in DEFAULT_VERDICTS
-                if not (args.no_screen and name in SCREEN_VERDICTS)]
+    expected = [] if args.no_default else [
+        (re.compile(p), name) for p, name in DEFAULT_VERDICTS
+        if not (args.no_screen and name in SCREEN_VERDICTS)]
     expected += [(re.compile(p), p) for p in args.expect]
     pending = list(expected)
+    typing = []
+    for item in args.type:
+        pattern, _, text = item.partition("=>")
+        typing.append([re.compile(pattern), text, False])
 
     os.makedirs(os.path.dirname(os.path.abspath(args.log)), exist_ok=True)
     log = open(args.log, "w", encoding="utf-8", errors="replace")
@@ -91,7 +101,7 @@ def main():
     print("[boot-test] " + " ".join(command), flush=True)
     start = time.monotonic()
     qemu = subprocess.Popen(command + ["-serial", "stdio"],
-                            stdin=subprocess.DEVNULL,
+                            stdin=subprocess.PIPE if typing else subprocess.DEVNULL,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT)
     selector = selectors.DefaultSelector()
@@ -111,10 +121,19 @@ def main():
                 if fail_deadline is None:
                     fail_deadline = time.monotonic() + args.linger
         for item in list(pending):
-            if item[0].match(line):
+            if item[0].search(line):
                 pending.remove(item)
                 elapsed = time.monotonic() - start
                 print("[boot-test] %6.1f s  %s" % (elapsed, line), flush=True)
+        for item in typing:
+            if not item[2] and item[0].search(line):
+                item[2] = True
+                print("[boot-test]          tape : " + item[1], flush=True)
+                # Slowly, as a person would: the shell polls the UART.
+                for char in (item[1] + "\r").encode():
+                    qemu.stdin.write(bytes([char]))
+                    qemu.stdin.flush()
+                    time.sleep(0.01)
 
     while True:
         now = time.monotonic()

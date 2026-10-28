@@ -20,6 +20,7 @@ const MODEM_CTRL: u16 = 4;
 const LINE_STATUS: u16 = 5;
 
 const LINE_STATUS_THR_EMPTY: u8 = 1 << 5;
+const LINE_STATUS_DATA_READY: u8 = 1 << 0;
 
 pub struct SerialPort {
     base: u16,
@@ -68,6 +69,25 @@ impl SerialPort {
     }
 }
 
+impl SerialPort {
+    /// A byte received, if one is waiting (polled: the boot never arms
+    /// the UART's interrupt).
+    pub fn read_byte(&mut self) -> Option<u8> {
+        if !self.initialized {
+            return None;
+        }
+        // SAFETY: the base port is COM1's, programmed by `init`; reading
+        // the line status and the data register has no other effect than
+        // consuming the received byte.
+        unsafe {
+            if inb(self.base + LINE_STATUS) & LINE_STATUS_DATA_READY == 0 {
+                return None;
+            }
+            Some(inb(self.base + DATA))
+        }
+    }
+}
+
 impl fmt::Write for SerialPort {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for byte in s.bytes() {
@@ -81,6 +101,19 @@ pub static SERIAL1: SpinLock<SerialPort> = SpinLock::new(SerialPort::new(COM1));
 
 pub fn init() {
     SERIAL1.lock().init();
+}
+
+/// A byte typed on the serial console, if any (the shell, spec 2.2).
+pub fn try_read() -> Option<u8> {
+    SERIAL1.lock().read_byte()
+}
+
+/// Raw bytes, control characters included (the shell's backspace).
+pub fn write_bytes(bytes: &[u8]) {
+    let mut port = SERIAL1.lock();
+    for byte in bytes {
+        port.write_byte(*byte);
+    }
 }
 
 #[doc(hidden)]

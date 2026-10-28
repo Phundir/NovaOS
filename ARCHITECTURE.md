@@ -180,6 +180,8 @@ nova-os/
 │   │   ├── recorder.rs        magneto.cus : magnetophone
 │   │   ├── playback.rs        Lecture WAV via le mixeur
 │   │   ├── widgets.rs         Controles partages des applications audio
+│   │   ├── terminal.rs        terminal.ss : la fenetre du shell (16.0.2)
+│   │   ├── update_settings.rs mises-a-jour.ss : onglet Mises a jour (15.6)
 │   │   ├── window.rs          Boucle commune des fenetres a horloge
 │   │   └── browser/           navigateur.cus : le navigateur web
 │   │       ├── mod.rs         Fenetre, onglets, barre d'adresse, historique
@@ -357,6 +359,13 @@ nova-os/
 │   │   ├── xhci.rs            Contrôleur xHCI : anneaux, contextes, ports
 │   │   ├── descriptor.rs      Descripteurs USB, décodés champ par champ
 │   │   └── hid.rs             Rapports de pointage, relatif et absolu
+│   │
+│   ├── shell/                 Interprète de commandes (phase 16.0)
+│   │   ├── mod.rs             Shell : dossier courant, compte, historique,
+│   │   │                      découpage en mots, chemins normalisés
+│   │   ├── commands.rs        Les commandes (FR d'abord, alias anglais)
+│   │   ├── serial.rs          Tâche shell-serie : COM1 scruté (recovery)
+│   │   └── selftest.rs        Autotest 16.0 (shell, terminal, droits)
 │   │
 │   ├── spm/                   SPM et mises à jour (phases 8 et 15)
 │   │   ├── mod.rs             Arborescence, dépôt local, démarrage
@@ -2340,6 +2349,48 @@ spm.dsa, toutes les 10 s --> versions::tick : supprime ce qui n'est ni actif,
 | Paquet | en-tête v2 de 320 octets (0xC0 signature, 0x100 clé) | `NOVA-SPM\0` ‖ empreinte |
 | Module `.kmd` | conteneur v2 (144 clé, 176 signature) | `NOVA-KMD\0` ‖ clé ‖ empreinte |
 | Manifeste | membre `signature` | `NOVA-REG\0` ‖ JSON canonique sans `signature` |
+
+## 11 terdecies. Shell, terminal et mode recovery (phase 16.0)
+
+### Un shell, trois portes
+
+```
+                 crate::shell::Shell { cwd, user, who, history }
+                     run(ligne) -> split -> commands::run -> Output
+                       { lines, clear, exit, failed }
+                        |                 |                    |
+  terminal.ss (fenêtre)       shell-serie (COM1)         autotest 16.0
+  Shell::for_session()        Shell::new("root", ROOT)   Shell::new(...)
+  touches -> ligne            octets scrutés -> ligne    lignes écrites
+  lignes coupées à la         écho, retour arrière,      réponses comparées
+  largeur, 2000 en mémoire    Ctrl+C
+```
+
+Le shell est une bibliothèque : il ne lit ni n'écrit rien lui-même, il
+rend des lignes. Chaque commande appelle la couche qui existe déjà
+(`fs::*`, `scheduler::task_list`, `spm::manager::execute`,
+`sdk::cli::execute`) avec les droits du compte du shell ; le système de
+fichiers les vérifie comme pour tout programme.
+
+### Mode recovery (spec §2.2)
+
+`multiboot::parse` lit `nova.mode=` sur la ligne de commande GRUB ;
+`multiboot::is_recovery()` le rend à qui le demande, sans verrou.
+
+| Étape | Normal | Recovery |
+|---|---|---|
+| `kernel_main` : autotests | lancés | omis (`[recovery] autotests omis`) |
+| `init.dsa` : services core | oui | oui |
+| pilotes, réseau, compositeur, session | oui | omis |
+| `shell-serie` | écoute en silence | annonce et invite tout de suite |
+
+La tâche `shell-serie` tourne dans les deux modes : hors recovery, elle
+n'écrit rien tant qu'on ne tape rien, et `make run-nogui` a un shell.
+
+`make test-recovery` construit une ISO dont l'entrée par défaut est la
+recovery, et tape des commandes sur la console série (`--type` de
+`tools/boot-test.py`), chaque réponse attendue avant la commande
+suivante.
 
 ## 12. Points d'extension immédiats
 

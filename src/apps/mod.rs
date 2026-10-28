@@ -35,6 +35,7 @@ pub mod player;
 pub mod playback;
 pub mod recorder;
 pub mod sound_settings;
+pub mod terminal;
 pub mod widgets;
 pub mod window;
 
@@ -328,6 +329,12 @@ pub static NATIVE_APPS: &[NativeApp] = &[
         crate::process::BinaryType::Ss,
         update_settings::task,
     ),
+    (
+        terminal::FILE_NAME,
+        terminal::APP_ID,
+        crate::process::BinaryType::Ss,
+        terminal::task,
+    ),
 ];
 
 /// Registers the settings tabs of the native `.ss`. Called once, at boot.
@@ -370,6 +377,7 @@ pub fn install_native(now: u64) -> usize {
         network_settings::install(now),
         clock_settings::install(now),
         update_settings::install(now),
+        terminal::install(now),
     ] {
         if installed {
             written += 1;

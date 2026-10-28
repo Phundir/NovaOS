@@ -48,6 +48,7 @@ pub mod rtc;
 pub mod scheduler;
 pub mod security;
 pub mod sdk;
+pub mod shell;
 pub mod serial;
 pub mod smp;
 pub mod spm;
@@ -136,6 +137,7 @@ pub extern "C" fn kernel_main(multiboot_phys: u64) -> ! {
     serial::init();
 
     let boot = unsafe { multiboot::parse(multiboot_phys) };
+    multiboot::set_boot_mode(boot.mode);
 
     // 7.1.1 -- The display switches before the first line of the kernel.
     //
@@ -309,77 +311,89 @@ pub extern "C" fn kernel_main(multiboot_phys: u64) -> ! {
     // some too, and making them born last avoids shifting the PIDs of the
     // phase 2 test set. The full detail goes to the serial console; the
     // screen receives only the verdict, for want of room.
-    let (mut passed, mut failed) = binfmt::selftest();
-    let (loaded, refused, rejected) = binfmt::loader::stats();
-
-    if fs::is_ready() {
-        let (p, f) = fs::selftest::run(idt::ticks());
-        passed += p;
-        failed += f;
-    }
-
-    // --- phase 5: system API ---
+    // --- 2.2: recovery mode ---
     //
-    // Its self-test does not run here but in a **scheduled task** (see
-    // `task_api_selftest`). That is not an organisational detail: domain
-    // 0x02 returns the identity of the caller, domain 0x04 drops into its
-    // mailbox, and domain 0x05 reads its account. But `kernel_main` is
-    // not a task -- `current_pid` is zero there, no mailbox exists, and
-    // half the API would have nothing to describe. Exercising it from a
-    // task means exercising it in the conditions where it will really be
-    // used.
-    spawn_selftest("api-autotest", task_api_selftest);
-
-    // --- phase 6: OS layer ---
-    //
-    // `init.dsa` is phase 4 of table 2.1: the first process, the one that
-    // launches and watches everything else. It is created last because
-    // what it orchestrates -- drivers, network, adoption of the orphans
-    // -- assumes the filesystem and the system API are already in place.
-    // The real `init.dsa` will be a binary loaded from /sysapp/; this one
-    // is the same orchestration, written as a kernel task for want of an
-    // SDK to compile it otherwise.
-    scheduler::spawn("init.dsa", BinaryType::Dsa, init::task);
-    spawn_selftest("phase6-autotest", task_phase6_selftest);
-
-    // --- phase 7: graphics system ---
-    //
-    // Same reason as for phase 5: the self-test must run inside a task,
-    // because it talks to the compositor by IPC and `kernel_main` has no
-    // mailbox.
-    spawn_selftest("phase7-autotest", task_phase7_selftest);
-
-    // --- phase 8: SPM and updates ---
-    //
-    // Same reason again: the self-test installs and uninstalls for real,
-    // which assumes a context where `current_credentials` means something
-    // -- 10.4 makes installation depend on the role of the caller, and
-    // `kernel_main` has none.
-    spawn_selftest("phase8-autotest", task_phase8_selftest);
-
-    // --- phase 13: GPU stack ---
-    //
-    // Waits for `gpu::start`, which `init.dsa` calls after the compositor:
-    // the half of the self-test that draws needs the backend up.
-    spawn_selftest("phase13-autotest", task_phase13_selftest);
-
-    if failed == 0 {
-        vga::set_color(Color::LightGreen, Color::Black);
-        kprintln!(
-            "[test] phases 3 et 4 validees - {} verifications conformes aux specs 3 a 5",
-            passed
-        );
+    // "kernel + fs.dsa + shell CLI only": no self-test, no compositor, no
+    // secondary service -- what a machine that does not reach its desktop
+    // still needs to be repaired. `init.dsa` reads the mode and stops
+    // after the core services; the shell listens on the serial console.
+    scheduler::spawn("shell-serie", BinaryType::Dsa, shell::serial::task);
+    if multiboot::is_recovery() {
+        kprintln!("[recovery] autotests omis - noyau, services core et shell serie (spec 2.2)");
+        scheduler::spawn("init.dsa", BinaryType::Dsa, init::task);
     } else {
-        vga::set_color(Color::LightRed, Color::Black);
-        kprintln!("[test] ECHEC - {} cas incorrects sur {}", failed, passed + failed);
+        let (mut passed, mut failed) = binfmt::selftest();
+        let (loaded, refused, rejected) = binfmt::loader::stats();
+
+        if fs::is_ready() {
+            let (p, f) = fs::selftest::run(idt::ticks());
+            passed += p;
+            failed += f;
+        }
+
+        // --- phase 5: system API ---
+        //
+        // Its self-test does not run here but in a **scheduled task** (see
+        // `task_api_selftest`). That is not an organisational detail: domain
+        // 0x02 returns the identity of the caller, domain 0x04 drops into its
+        // mailbox, and domain 0x05 reads its account. But `kernel_main` is
+        // not a task -- `current_pid` is zero there, no mailbox exists, and
+        // half the API would have nothing to describe. Exercising it from a
+        // task means exercising it in the conditions where it will really be
+        // used.
+        spawn_selftest("api-autotest", task_api_selftest);
+
+        // --- phase 6: OS layer ---
+        //
+        // `init.dsa` is phase 4 of table 2.1: the first process, the one that
+        // launches and watches everything else. It is created last because
+        // what it orchestrates -- drivers, network, adoption of the orphans
+        // -- assumes the filesystem and the system API are already in place.
+        // The real `init.dsa` will be a binary loaded from /sysapp/; this one
+        // is the same orchestration, written as a kernel task for want of an
+        // SDK to compile it otherwise.
+        scheduler::spawn("init.dsa", BinaryType::Dsa, init::task);
+        spawn_selftest("phase6-autotest", task_phase6_selftest);
+
+        // --- phase 7: graphics system ---
+        //
+        // Same reason as for phase 5: the self-test must run inside a task,
+        // because it talks to the compositor by IPC and `kernel_main` has no
+        // mailbox.
+        spawn_selftest("phase7-autotest", task_phase7_selftest);
+
+        // --- phase 8: SPM and updates ---
+        //
+        // Same reason again: the self-test installs and uninstalls for real,
+        // which assumes a context where `current_credentials` means something
+        // -- 10.4 makes installation depend on the role of the caller, and
+        // `kernel_main` has none.
+        spawn_selftest("phase8-autotest", task_phase8_selftest);
+
+        // --- phase 13: GPU stack ---
+        //
+        // Waits for `gpu::start`, which `init.dsa` calls after the compositor:
+        // the half of the self-test that draws needs the backend up.
+        spawn_selftest("phase13-autotest", task_phase13_selftest);
+
+        if failed == 0 {
+            vga::set_color(Color::LightGreen, Color::Black);
+            kprintln!(
+                "[test] phases 3 et 4 validees - {} verifications conformes aux specs 3 a 5",
+                passed
+            );
+        } else {
+            vga::set_color(Color::LightRed, Color::Black);
+            kprintln!("[test] ECHEC - {} cas incorrects sur {}", failed, passed + failed);
+        }
+        vga::set_color(Color::LightGray, Color::Black);
+        kprintln!(
+            "[load] {} images installees - {} refusees, {} rejetees",
+            loaded,
+            refused,
+            rejected
+        );
     }
-    vga::set_color(Color::LightGray, Color::Black);
-    kprintln!(
-        "[load] {} images installees - {} refusees, {} rejetees",
-        loaded,
-        refused,
-        rejected
-    );
 
     vga::set_color(Color::LightGreen, Color::Black);
     kprintln!("[sched] {} taches creees - demarrage", scheduler::stats().0);
@@ -768,6 +782,22 @@ fn task_phase15_selftest() -> ! {
         );
     } else {
         serial_println!("[test] phase 15 ECHEC - {} cas incorrects sur {}", failed, passed + failed);
+    }
+    // --- phase 16: languages and tools of the developer ---
+    spawn_selftest("phase16-autotest", task_phase16_selftest);
+    selftest_done()
+}
+
+/// Self-test of phase 16: the shell and the terminal (16.0).
+fn task_phase16_selftest() -> ! {
+    let (passed, failed) = shell::selftest::run();
+    if failed == 0 {
+        serial_println!(
+            "[test] phase 16.0 validee - {} verifications du shell et du terminal (spec 1.1, 2.2)",
+            passed
+        );
+    } else {
+        serial_println!("[test] phase 16.0 ECHEC - {} cas incorrects sur {}", failed, passed + failed);
     }
     selftest_done()
 }

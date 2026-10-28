@@ -325,8 +325,14 @@ pub fn task() -> ! {
     // once everything has started shows nothing. The compositor depends
     // on no core service -- it needs the framebuffer and the filesystem,
     // both ready.
-    crate::gui::start(crate::idt::ticks());
-    crate::gui::splash::set_progress(0, 10);
+    // 2.2 -- the recovery mode has no interface: a machine whose desktop
+    // fails must still be reachable, and the compositor is one of the
+    // things that may be failing.
+    let recovery = crate::multiboot::is_recovery();
+    if !recovery {
+        crate::gui::start(crate::idt::ticks());
+        crate::gui::splash::set_progress(0, 10);
+    }
 
     // --- 6.5.2: core services ---
     crate::scheduler::spawn("fs.dsa", BinaryType::Dsa, service_fs);
@@ -355,6 +361,12 @@ pub fn task() -> ! {
         crate::vga::set_color(Color::LightGray, Color::Black);
     }
 
+    if recovery {
+        // "kernel + fs.dsa + shell CLI only" (spec 2.2): the core services
+        // are up, the shell listens on the serial console.
+        crate::serial_println!("[init] mode recovery - pilotes, reseau, interface et session omis ; shell sur la console serie");
+        reaper()
+    }
     crate::gui::splash::set_progress(1, 40);
 
     // --- 6.5.4: secondary services ---

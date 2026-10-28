@@ -27,6 +27,34 @@ impl BootMode {
     }
 }
 
+/// The mode the kernel booted in, for the code that runs long after
+/// `kernel_main` read the command line (init.dsa, the serial shell).
+static BOOT_MODE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// Records the boot mode. Called once, by `kernel_main`.
+pub fn set_boot_mode(mode: BootMode) {
+    let code = match mode {
+        BootMode::Normal => 1,
+        BootMode::Recovery => 2,
+        BootMode::Debug => 3,
+    };
+    BOOT_MODE.store(code, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// The boot mode, once `kernel_main` has recorded it.
+pub fn boot_mode() -> Option<BootMode> {
+    match BOOT_MODE.load(core::sync::atomic::Ordering::Relaxed) {
+        1 => Some(BootMode::Normal),
+        2 => Some(BootMode::Recovery),
+        3 => Some(BootMode::Debug),
+        _ => None,
+    }
+}
+
+pub fn is_recovery() -> bool {
+    boot_mode() == Some(BootMode::Recovery)
+}
+
 // ============================================================
 //  2.2.1 -- Memory map (tag 6)
 // ============================================================

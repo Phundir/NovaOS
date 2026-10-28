@@ -8,6 +8,38 @@ a été observé, reste dans `ROADMAP.md` ; les décisions dans `DECISIONS.md`.
 Schéma de version : `0.{phase}.{correctif}` — la phase est la dernière de
 la roadmap dont le code est complet.
 
+## [0.15.1] — 2026-10-28
+
+Première étape de la phase 16 : Nova a un shell.
+
+### Ajouté
+
+- **Shell** (spec §1.1 « Shell / CLI ») : `aide`, `liste`, `va`, `ici`,
+  `lire`, `ecrire`, `dossier`, `supprimer [-r]`, `copier`, `deplacer`,
+  `lier`, `info`, `arbre`, `disques`, `taches`, `tuer`, `lance`,
+  `memoire`, `date`, `depuis`, `systeme`, `qui`, `historique`, `effacer`,
+  `quitter`, et `spm …`, `dev …` enfin tapables. Noms français, alias
+  usuels (`ls`, `cd`, `cat`, `rm`, `cp`, `mv`, `ps`, `kill`, `df`,
+  `uname`…). Droits du compte de la session : le shell n'accorde rien.
+- **Terminal** (`terminal.ss`) : fenêtre, historique aux flèches, édition
+  de la ligne, défilement (Page préc./suiv., molette), Ctrl+C, Ctrl+L,
+  Ctrl+U, lignes coupées à la largeur.
+- **Mode recovery** (spec §2.2) : l'entrée « recovery » de GRUB démarre le
+  noyau, les services core et un shell sur la console série, sans
+  autotests, pilotes, réseau ni interface.
+- Shell série aussi en démarrage normal : silencieux tant qu'on ne tape
+  rien.
+- `make test-recovery` : démarrage en recovery, commandes tapées sur la
+  console série et réponses jugées ; dans `make test-all` et la CI.
+- Autotest 16.0 : 60 vérifications (shell, droits, terminal au clavier
+  synthétique, fenêtre réelle ouverte puis fermée).
+
+### Limites connues
+
+- Pas de tubes, redirections, jokers ni scripts.
+- Une commande longue fige la fenêtre du terminal le temps qu'elle dure.
+- La console de recovery tourne en ROOT (choix à confirmer).
+
 ## [0.15.0] — 2026-10-28
 
 Phase 15 : mises à jour atomiques des applications (proposition de

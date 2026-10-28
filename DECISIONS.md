@@ -4225,6 +4225,85 @@ compressé, et décoder en flux serait un analyseur de plus.
   HTTPS l'est sur une connexion scriptée, le cycle complet sur un registre
   `file:`.
 
+## Shell, terminal et mode recovery (phase 16.0) — décisions
+
+### Le shell est une bibliothèque, pas un programme
+
+`crate::shell::Shell` ne lit rien et n'écrit rien : `run(ligne)` rend des
+lignes (`Output { lines, clear, exit, failed }`). La fenêtre
+(`terminal.ss`), la console série (`shell-serie`) et l'autotest s'en
+servent chacun à sa façon. Un shell qui écrirait lui-même aurait demandé
+trois copies des commandes, ou une abstraction de terminal pour un seul
+usage.
+
+### Les commandes sont françaises, les noms usuels sont des alias
+
+`liste`, `va`, `lire`, `ecrire`… parce que le système parle français
+(14.1) ; `ls`, `cd`, `cat`, `rm`… parce que ses utilisateurs les tapent.
+Une seule table (`commands::COMMANDS`) sert à la fois à `aide` et à
+l'aiguillage : une commande ne peut pas exister sans son aide.
+
+### Le shell n'accorde rien
+
+Chaque commande appelle la couche existante (`fs::*`, `scheduler`,
+`spm::manager::execute`, `sdk::cli::execute`) avec les droits du compte
+du shell. `tuer` reprend la règle de `SYS_PROC_KILL` (ROOT et ADMIN
+partout, les autres sur leurs tâches). L'autotest vérifie qu'un compte
+ordinaire se voit refuser `/sys` et le fichier privé de ROOT.
+
+### Recovery : ROOT sur la console série — choix pris sous mandat d'autonomie
+
+Le §2.2 dit « kernel + fs.dsa + shell CLI uniquement » sans dire sous quel
+compte. La console série d'un mode recovery n'a pas de session à ouvrir
+(pas de compositeur, donc pas d'écran de connexion) et sert à réparer ce
+qui empêche la session de démarrer : elle tourne en ROOT, comme le mode
+mono-utilisateur d'Unix. Qui choisit l'entrée recovery de GRUB a la
+machine sous la main. **À confirmer par l'auteur** : un mot de passe ROOT
+demandé sur la console serait l'alternative.
+
+### COM1 est scruté, pas servi par interruption
+
+Le démarrage n'arme pas l'IRQ 4 et une personne tape lentement : 50 ms
+entre deux lectures au repos, 5 ms quand des octets arrivent. Hors
+recovery, la tâche ne dit rien tant qu'on ne tape rien — le journal de
+démarrage reste le journal — et `make run-nogui` a un shell sans rien
+changer.
+
+### Le mode recovery omet les autotests et s'arrête aux services core
+
+`kernel_main` lit le mode avant de lancer les autotests ; `init.dsa`
+s'arrête après `fs.dsa`, `ipc.dsa`, `hw.dsa` et passe à l'adoption des
+orphelines. Lancer les autotests en recovery écrirait sur le volume
+qu'on cherche à réparer.
+
+### Le terminal s'éprouve sans fenêtre, puis avec
+
+L'édition (curseur, historique, coupure des lignes, défilement, Ctrl+C,
+Ctrl+L, `quitter`) est jouée par des `KeyEvent` synthétiques sur un
+`Terminal` sans fenêtre (`terminal::exercise`). Puis la vraie fenêtre est
+lancée comme le menu la lance, doit obtenir sa surface et la renommer
+(`Terminal - <dossier>`, au tour qui peint le premier), puis se fermer
+sur le signal d'arrêt des modules et rendre sa surface. Sans compositeur
+(`-vga none`), cette seconde partie est omise.
+
+### `make test-recovery` tape sur la console série
+
+`tools/boot-test.py --type 'REGEX=>TEXTE'` écrit une commande sur
+l'entrée standard de QEMU (`-serial stdio`) quand une ligne attendue
+apparaît : chaque réponse est attendue avant la commande suivante. L'ISO
+de recovery est la même, `grub.cfg` réécrit avec `set default=1`.
+
+### Limites de la 16.0, connues
+
+- Pas de tubes, de redirections, de jokers (`*`), de variables ni de
+  scripts : une ligne, une commande.
+- Une commande tourne dans la tâche du terminal : un `spm install` qui
+  télécharge fige la fenêtre le temps du transfert.
+- Console série : pas d'historique aux flèches (les séquences
+  d'échappement sont ignorées), pas de complétion.
+- Terminal : pas de sélection ni de copier-coller ; un caractère hors
+  ASCII s'affiche `?` (la police n'a que l'ASCII).
+
 ---
 
 ## 4. Invariants à ne jamais casser

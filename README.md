@@ -153,6 +153,31 @@ d'un disque neuf.
 
 Sortir de QEMU lancé avec `-serial stdio` : **Ctrl+A** puis **X**.
 
+### Le shell
+
+Nova a un shell (phase 16.0), à trois endroits : l'application
+**Terminal** du menu, la **console série** (taper une ligne dans le
+terminal de `make run` ou `make run-nogui` suffit à le réveiller), et
+l'entrée **recovery** du menu GRUB, qui ne démarre que le noyau, les
+services core et ce shell — de quoi réparer une machine dont la session
+graphique ne démarre plus.
+
+```text
+root:/$ aide
+root:/$ liste -l /sys/config
+root:/$ ecrire /cache/note.txt "bonjour"
+root:/$ lire /cache/note.txt
+root:/$ taches
+root:/$ spm update
+root:/$ dev new org.exemple.essai --type cus --lang rust
+```
+
+Les commandes sont en français, avec les noms usuels en alias (`ls`,
+`cd`, `cat`, `rm`, `cp`, `mv`, `ps`, `kill`, `df`, `uname`…). Chaque
+commande s'exécute avec les droits du compte de la session (ROOT sur la
+console de recovery) : le shell n'accorde rien que le système de fichiers
+refuserait.
+
 ---
 
 ## Commandes
@@ -168,7 +193,8 @@ Sortir de QEMU lancé avec `-serial stdio` : **Ctrl+A** puis **X**.
 | `make run-nonet` | Sans carte réseau ni son : un pilote absent doit se déclarer absent |
 | `make log` | Démarrage complet redirigé vers `build/boot.log` |
 | `make test` | Démarrage sans fenêtre, verdicts d'autotest jugés automatiquement |
-| `make test-all` | `test` + monocœur + sans écran |
+| `make test-recovery` | Démarrage en mode recovery, commandes tapées sur la console série |
+| `make test-all` | `test` + monocœur + sans écran + recovery (ce que fait la CI) |
 | `make dist` | Ce que publie une release (`build/dist/`) |
 | `make check` | Chaînes ASCII, symboles non résolus, instructions SSE, segments |
 | `make debug` | QEMU en attente de GDB sur `:1234` |
@@ -200,6 +226,8 @@ autotest qui imprime un **verdict** sur la console série.
 [test] phase 9 validee - 425 verifications du SDK (spec 13 et 15)
 [test] phase 10 validee - 340 verifications des finitions (spec 12, 14 et 16)
 [test] phase 13 validee - 37 verifications de la pile graphique, sans GPU (absent)
+[test] phase 15 validee - 70 verifications des mises a jour atomiques (spec 10.5)
+[test] phase 16.0 validee - 60 verifications du shell et du terminal (spec 1.1, 2.2)
 ```
 
 `make test` démarre l'ISO sans fenêtre (`tools/boot-test.py`), arrête
@@ -207,7 +235,9 @@ QEMU dès que le dernier verdict est imprimé et échoue à la première
 panique, au premier `ECHEC` ou `BOOT_ERR_`. Il démarre **deux fois** sur
 le même disque : le second démarrage doit retrouver le volume, pas le
 recréer. La CI le fait à chaque push, sur quatre cœurs, sur un cœur et
-sans écran.
+sans écran ; puis elle démarre en mode recovery et tape des commandes sur
+la console série (`make test-recovery`), chaque réponse attendue avant la
+commande suivante.
 
 Les variantes qui ont déjà attrapé des bugs, et qu'il vaut mieux éprouver
 avant de considérer un changement comme fini :
@@ -218,6 +248,7 @@ avant de considérer un changement comme fini :
 | `make test` (4 cœurs) | courses entre cœurs, invalidation de TLB |
 | `make test` (deux démarrages) | installation idempotente |
 | `make test-novga` | ce qui dépend du compositeur sans le dire |
+| `make test-recovery` | ce qui suppose l'interface ou les pilotes sans le dire |
 | `make run-nonet` | un pilote absent doit se déclarer absent, pas échouer |
 
 ---
@@ -314,6 +345,9 @@ en rendu logiciel.
   JSON signés (GitHub, serveur ou dossier), canaux `release`/`beta`/`test`,
   chaque version dans son dossier, bascule par un pointeur remplacé en une
   opération, ancienne version gardée tant qu'elle tourne, retour arrière.
+- **Shell** : interprète de commandes (fichiers, tâches, mémoire, disques,
+  `spm`, `dev`), fenêtre **Terminal** avec historique et défilement, shell
+  sur la console série et mode recovery.
 - **SDK `dev`** : gabarits, `dev.toml`, bac à sable, assembleur x86_64,
   compilateur d'un sous-ensemble de **Rust** vers x86_64, interprète Nova
   Script, convertisseur Electron → natif (ETR).
@@ -348,8 +382,7 @@ tools/novasign.py keygen registre.seed          # une fois : la clé du registre
 tools/novasign.py sign-manifest registre.seed org.exemple.monapp.json
 ```
 
-Côté Nova, une fois (dans un terminal, phase 16 ; d'ici là la même ligne
-passe par `spm::manager::execute`) :
+Côté Nova, une fois, dans le Terminal (ou sur la console série) :
 
 ```text
 spm registry add exemple https://raw.githubusercontent.com/<compte>/<depot>/main <cle publique>
@@ -412,7 +445,7 @@ d'interruption, appels système, invariants — est dans
 | 13 | Pile graphique Nova et GPU | 🔧 à valider |
 | 14 | LIFS et partitions | 🔧 à valider |
 | 15 | Mises à jour atomiques des applications, Ed25519 | ✅ |
-| 16 | Langages et outils (JavaScript, Python, C, Java, débogueur) | 📝 |
+| 16 | Langages et outils : shell et terminal ✅ ; JavaScript, Python, C, Java, débogueur | 🔄 |
 | 17 | Reliquats système de fichiers et POSIX | 📝 |
 | 18 | Firefox sur la pile Nova (machine de l'auteur) | ⏸ |
 

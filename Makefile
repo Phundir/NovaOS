@@ -202,7 +202,7 @@ BENCH_MIB   ?= 512
 BENCH_ACCEL ?=
 BENCH_PORT  ?= 8000
 
-.PHONY: test test-smp1 test-novga test-all dist version venus venus-check shaders kmd-test webroot nova-libc disk-migrate disk-lifs print-qemu-flags print-qemu-headless bench-net all kernel iso audio-devices run run-full run-smp run-nogui log debug debug-int clean check check-ascii police racines re prev unprev cargo-build disk disk-reset check-export run-netdump run-nonet
+.PHONY: test test-smp1 test-novga test-recovery test-all dist version venus venus-check shaders kmd-test webroot nova-libc disk-migrate disk-lifs print-qemu-flags print-qemu-headless bench-net all kernel iso audio-devices run run-full run-smp run-nogui log debug debug-int clean check check-ascii police racines re prev unprev cargo-build disk disk-reset check-export run-netdump run-nonet
 
 all: iso
 
@@ -507,7 +507,30 @@ test-smp1:
 test-novga:
 	$(MAKE) --no-print-directory test TEST_VGA="-vga none" TEST_EXTRA=--no-screen
 
-test-all: test test-smp1 test-novga
+# Le mode recovery (spec 2.2) : une ISO dont l'entree par defaut est la
+# deuxieme du menu, et des commandes tapees sur la console serie, dont on
+# attend la reponse du shell.
+RECOVERY_ISO := $(TEST_DIR)/nova-os-recovery.iso
+$(RECOVERY_ISO): $(TEST_ISO) $(ISO_DIR)/boot/grub/grub.cfg
+	@mkdir -p $(TEST_DIR)/iso-recovery/boot/grub
+	cp $(ISO_DIR)/boot/nova-os.bin $(TEST_DIR)/iso-recovery/boot/nova-os.bin
+	sed 's/^set default=0/set default=1/' $(ISO_DIR)/boot/grub/grub.cfg > $(TEST_DIR)/iso-recovery/boot/grub/grub.cfg
+	grub-mkrescue -o $@ $(TEST_DIR)/iso-recovery 2> /dev/null
+
+test-recovery: $(RECOVERY_ISO)
+	@rm -f $(TEST_DISK)
+	@tools/lifs.py create $(TEST_DISK) --size 1024 --data 128 > /dev/null
+	python3 tools/boot-test.py --timeout $(TEST_TIMEOUT) --log $(TEST_DIR)/recovery.log --no-default \
+	  --expect 'autotests omis' --expect 'mode recovery - pilotes' \
+	  --type '"aide" liste les commandes=>systeme' \
+	  --expect 'Nova OS $(VERSION) .* - x86_64' \
+	  --type ' - x86_64 - =>liste /' --expect '^sysapp/' \
+	  --type '^sysapp/=>ecrire /cache/essai.txt bonjour du shell' --expect 'essai.txt : ' \
+	  --type 'essai.txt : =>lire /cache/essai.txt' --expect '^bonjour du shell' \
+	  --type '^bonjour du shell=>aide' --expect 'Commandes' \
+	  -- $(QEMU) $(subst $(TEST_ISO),$(RECOVERY_ISO),$(TEST_FLAGS)) -smp 2
+
+test-all: test test-smp1 test-novga test-recovery
 
 # `make dist` : ce que publie une release (.github/workflows/release.yml).
 # Le noyau y est depouille de ses informations de debogage (92 -> 8 Mio) ;

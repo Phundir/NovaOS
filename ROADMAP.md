@@ -28,7 +28,7 @@ x86_64, GRUB/Multiboot2.
 | Phase 13 — Pile graphique Nova et accélération GPU | 🔧 faite hors Firefox, à valider | Spec acceptée (24 septembre) ; pilote virtio-gpu 3D, anneau Venus, encodeur généré et vérifié (68 commandes), cœur GPU, écran et plan curseur au cœur, compositeur sur le GPU (égal au pixel près au processeur), `SYS_GPU_*`, bibliothèques C et Rust, modules `.kmd` signés, délai de garde éprouvé ; 75 vérifications ; aucune case cochée (validation de l'utilisateur attendue) ; Firefox (13.0, 13.9-13.10, 13.11.1) reporté par l'utilisateur |
 | Phase 14 — LIFS (nouveau type de partition, liens CoW et Tag) | 🔧 implémentée, à valider | Décisions 14.1 prises (24 septembre) ; GPT/MBR, partitions montées une lettre chacune, racine LIFS, plus aucun formatage implicite ; LIFS (arbres B+, étendues, clones CoW, Tag, index inverse, journal) ; `SYS_FS_NODE_*` ; `tools/lifs.py` et reprise NovaFS → LIFS ; 81 vérifications LIFS dont 32 coupures simulées ; aucune case cochée (validation de l'utilisateur attendue) |
 | Phase 15 — Mises à jour atomiques des applications | ✅ faite (28 octobre 2026) | Proposition de l'utilisateur du 24 septembre 2026 ; points 15.1 tranchés sous mandat d'autonomie ; JSON, Ed25519 (ENTERPRISE enfin signé), HTTPS en flux, pointeur atomique, registre signé, versions à part, lancement par le pointeur, nettoyage différé, `spm.dsa` ; 70 vérifications ; reste 15.6.2 (canal par application dans l'interface) et 15.7.3 partiel |
-| Phase 16 — Langages et outils (fin de la phase 9) | 📝 planifiée | Moteur JavaScript complet (navigateur intégré et ligne Node/Bun du §13.2), Python, C, Java, débogueur de `dev run --debug` |
+| Phase 16 — Langages et outils (fin de la phase 9) | 🔄 en cours | 16.0 faite (28 octobre 2026) : shell, `terminal.ss`, shell série et mode recovery, 60 vérifications + `make test-recovery` ; restent le moteur JavaScript complet (navigateur intégré et ligne Node/Bun du §13.2), Python, C, Java, débogueur de `dev run --debug` |
 | Phase 17 — Reliquats système de fichiers et POSIX | 📝 planifiée | Ce que les phases 12 et 14 ont laissé ouvert hors Firefox : page de temps, autotest appel par appel, `copy_file_range`/clonage, Tag dans l'explorateur, GPT de secours, partitionneur |
 | Phase 18 — Firefox sur la pile Nova | ⏸ chez l'auteur | 12.5, 12.7, 12.8, 13.0, 13.9, 13.10, 13.11.1 : demandent la construction du fork et le GPU de la machine de l'auteur |
 
@@ -46,8 +46,8 @@ cochées sur 229.** Les sept restantes sont toutes en phase 9, et elles
 sont nommées juste en dessous. Il ne reste donc **plus de case à ouvrir**
 — seulement des limites à lever, listées phase par phase plus bas.
 
-**Prochaine étape : la phase 16** (langages et outils), dans l'ordre
-réorganisé ci-dessous ; la phase 15 est faite (28 octobre 2026).
+**Prochaine étape : 16.1, le moteur JavaScript** ; la phase 15 et
+l'étape 16.0 (shell, terminal, recovery) sont faites (28 octobre 2026).
 (L'ancien choix « un espace d'adressage par processus » ou « élargir le
 sous-ensemble Rust » est derrière nous : les espaces privés sont faits
 depuis 11.3, et le reste de la phase 9 forme la phase 16.)
@@ -3903,11 +3903,64 @@ Relevé le 28 octobre 2026 : **Nova n'a pas de shell**. `spm` (§10.3) et
 recovery promet « kernel + fs.dsa + shell CLI uniquement » et n'a pas de
 shell. Préalable à tout ce qui suit : `dev interpret`, `dev run --debug`
 ont besoin d'un endroit où taper.
-- [ ] 16.0.1 Interprète de commandes : `spm …`, `dev …`, et les commandes
+- [x] 16.0.1 Interprète de commandes : `spm …`, `dev …`, et les commandes
   de base (`aide`, `ls`, `cd`, `pwd`, `cat`, `mkdir`, `rm`, `cp`, `mv`,
   `ps`, `kill`, `uname`, `date`, `df`, `lance`), droits de la session
-- [ ] 16.0.2 `terminal.ss` : fenêtre, historique, défilement
-- [ ] 16.0.3 Shell sur la console série en mode recovery (spec 2.2)
+- [x] 16.0.2 `terminal.ss` : fenêtre, historique, défilement
+- [x] 16.0.3 Shell sur la console série en mode recovery (spec 2.2)
+
+**Validée le 28 octobre 2026** par l'assistant, sous mandat d'autonomie
+de l'utilisateur, sur les relevés suivants (QEMU TCG, sans KVM) :
+
+`make test` (4 cœurs, deux démarrages sur le même disque), `make
+test-smp1`, `make test-novga` :
+```
+[apps] lancement de "terminal.ss" (os.nova.terminal) - PID 87
+[terminal] surface 12 - 760x460
+[terminal] ferme - surface rendue
+[test] phase 16.0 validee - 60 verifications du shell et du terminal (spec 1.1, 2.2)
+```
+(sans écran, les quatre contrôles de la fenêtre réelle sont omis :
+56 vérifications.)
+
+`make test-recovery` (ISO dont l'entrée par défaut est la recovery, deux
+cœurs ; les commandes sont tapées sur la console série) :
+```
+[recovery] autotests omis - noyau, services core et shell serie (spec 2.2)
+         tape : systeme
+[init] mode recovery - pilotes, reseau, interface et session omis ; shell sur la console serie
+Nova OS 0.15.0 (d80d8c5) - x86_64 - 2 coeur(s)
+         tape : liste /
+sysapp/
+         tape : ecrire /cache/essai.txt bonjour du shell
+/cache/essai.txt : 17 o ecrit(s)
+         tape : lire /cache/essai.txt
+bonjour du shell
+         tape : aide
+Commandes (aide <commande> pour le detail) :
+```
+
+Ce que couvrent les 60 vérifications : découpage en mots et guillemets,
+chemins (relatifs, `..`, lettre de disque), les commandes de fichiers de
+bout en bout (`dossier`, `va`, `ecrire`, `lire`, `cp`, `deplacer`,
+`liste`, `supprimer` avec et sans `-r`), les refus (fichier absent,
+`va` sur un fichier, commande inconnue), `aide` d'un alias, `systeme`,
+`taches`, l'historique ; un compte ordinaire refusé sur `/sys` et sur le
+fichier privé de ROOT ; le terminal joué au clavier synthétique (curseur,
+historique, coupure à la largeur, page précédente, Ctrl+C, Ctrl+U,
+Ctrl+L, erreurs en couleur, `effacer`, `quitter`) ; la vraie fenêtre
+ouverte, titrée, fermée sur signal, surface rendue.
+
+**Ce qui reste ouvert dans la 16.0**
+- Pas de tubes, redirections, jokers, variables ni scripts.
+- Une commande longue (`spm install` qui télécharge) fige la fenêtre.
+- Console série : pas d'historique aux flèches ni de complétion.
+- `spm …` et `dev …` passent par le shell, mais leurs effets sont
+  éprouvés par les autotests des phases 8, 9 et 15, pas tapés ici.
+- ROOT sur la console de recovery : choix à confirmer par l'auteur
+  (DECISIONS, « Recovery : ROOT sur la console série »).
+- La fenêtre du terminal n'a été vue que par la console série
+  (surface créée, titrée, rendue) : son rendu à l'écran reste à regarder.
 
 #### 16.1 Moteur JavaScript
 - [ ] 16.1.1 `src/web/js/` compilé en entier (il ne l'est pas : `mod.rs` ne

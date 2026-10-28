@@ -107,7 +107,8 @@ make run-smp    # QEMU 4 coeurs — obligatoire pour tester le SMP
 make run-nogui  # serie seule, sans fenetre
 make log        # boot complet redirige vers build/boot.log
 make test       # boot sans fenetre, verdicts juges (tools/boot-test.py), deux fois
-make test-all   # test + monocoeur + sans ecran -- ce que fait la CI
+make test-recovery # mode recovery : commandes tapees sur la console serie
+make test-all   # test + monocoeur + sans ecran + recovery -- ce que fait la CI
 make dist       # ISO, noyau depouille, disque vierge : ce que publie une release
 make debug      # QEMU en attente sur gdb :1234
 make debug-int  # trace des interruptions et resets — diagnostic de triple faute

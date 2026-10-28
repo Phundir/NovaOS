@@ -5,7 +5,8 @@
 # ASCII, the kernel must resolve every symbol, and the ISO must boot under
 # QEMU with every self-test verdict green -- on four cores, on one core,
 # and without a screen, twice each on the same disk (the second boot must
-# find the volume, not recreate it). See CLAUDE.md, section 2.
+# find the volume, not recreate it) -- and in recovery mode, where commands
+# are typed on the serial console. See CLAUDE.md, section 2.
 name: CI
 
 on:
@@ -86,6 +87,9 @@ jobs:
 
       - name: Demarrage - sans ecran (-vga none)
         run: make test-novga
+
+      - name: Demarrage - mode recovery, shell sur la console serie
+        run: make test-recovery
 
       - name: Journaux serie
         if: always()

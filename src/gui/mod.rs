@@ -92,6 +92,12 @@ pub fn surface_named(title: &str) -> bool {
     with(|comp| comp.stack.iter().any(|surface| surface.title == title)).unwrap_or(false)
 }
 
+/// Does a surface whose title starts with `prefix` exist? For a window
+/// that names itself after what it shows (`Terminal - /users/...`).
+pub fn surface_titled(prefix: &str) -> bool {
+    with(|comp| comp.stack.iter().any(|surface| surface.title.starts_with(prefix))).unwrap_or(false)
+}
+
 /// Where a surface currently sits on screen.
 ///
 /// Asked for rather than remembered by the application, and that is the
