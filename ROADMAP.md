@@ -3963,14 +3963,54 @@ ouverte, titrée, fermée sur signal, surface rendue.
   (surface créée, titrée, rendue) : son rendu à l'écran reste à regarder.
 
 #### 16.1 Moteur JavaScript
-- [ ] 16.1.1 `src/web/js/` compilé en entier (il ne l'est pas : `mod.rs` ne
+- [x] 16.1.1 `src/web/js/` compilé en entier (il ne l'est pas : `mod.rs` ne
   déclare que `big` et `num`) ; bornes en pas et en pile (piège « un
   interprète de noyau a deux bornes »)
-- [ ] 16.1.2 Bibliothèque standard manquante : `Number`, `Math`, `JSON`
+- [x] 16.1.2 Bibliothèque standard manquante : `Number`, `Math`, `JSON`
   (sur `src/json.rs`), `Date`, `RegExp`, `Map`/`Set`, `Promise` et file de
   microtâches, fonctions globales
-- [ ] 16.1.3 Autotest : un corpus de cas à la manière de test262, verdict
+- [x] 16.1.3 Autotest : un corpus de cas à la manière de test262, verdict
   série
+
+**Validée le 28 octobre 2026** par l'assistant, sous mandat d'autonomie
+de l'utilisateur. `make test` (4 cœurs, deux démarrages), `make
+test-smp1`, `make test-novga`, QEMU TCG :
+```
+[test] phase 16.1 validee - 95 cas du moteur JavaScript (2270 ms)
+```
+Ce qu'il y a derrière :
+- L'existant (lexeur, parseur ES2022, interprète, `Object`, `Function`,
+  `Array`, `String`) compilait à cinq erreurs près : deux signatures, un
+  double emprunt, et `Num::eq` qui masquait `PartialEq::eq` (renommé
+  `equals` : l'égalité IEEE n'est pas l'égalité des bits).
+- Écrits : `Number`, `Boolean`, `Symbol` (registre de `Symbol.for`),
+  `Math` (35 fonctions ; `exp` et `ln` en virgule fixe 116 bits,
+  correctement arrondis — sur 2 000 valeurs, deux écarts avec la libm de
+  l'hôte, où c'est la libm qui se trompe), `JSON` (lecteur de
+  `src/json.rs` en mode tolérant), `Date` (fuseau fixe de l'hôte),
+  `RegExp` (protocole complet autour de `regex.rs`), `Map`/`Set`/`Weak*`
+  et l'algèbre des ensembles ES2025, `Promise` (toutes les combinaisons,
+  rejets non traités signalés), `console`, minuteries, `queueMicrotask`,
+  `structuredClone`, URI, base64, `eval` indirect.
+- Le corpus (94 cas + la boucle infinie arrêtée par le carburant) a été
+  vérifié contre **Node 22** (fuseau UTC+1, horloge figée) : les attentes
+  sont celles du langage, pas celles du moteur. Deux écarts, attendus :
+  Node mesure son horloge réelle là où le moteur a une horloge virtuelle.
+- Bug évité grâce à l'autotest : une chaîne doublée jusqu'à 32 Mio faisait
+  échouer l'allocateur du noyau (`ALLOCATION ECHOUEE`, machine arrêtée).
+  Désormais `ops::reserve` demande à l'hôte (`heap::room_for` : 16 Mio
+  gardés pour le noyau, le plus grand bloc libre une fois et demie la
+  demande) avant toute grosse chaîne ou tout tableau qui grandit, et le
+  script reçoit une `RangeError`.
+
+**Ce qui reste ouvert dans la 16.1**
+- `BigInt` lu comme un nombre ; pas de `Proxy`, pas d'`Intl` (les
+  `toLocaleString` suivent `en-US`), pas de tableaux creux (un trou vaut
+  `undefined`), `eval` direct non pris en charge (indirect seulement).
+- Générateurs exécutés d'un bloc (valeurs envoyées par `next(v)`
+  ignorées) et `await` qui attend sur place : limites de l'interprète
+  d'origine, documentées dans `interp.rs`.
+- Les collections faibles ne sont pas faibles (libérées avec le royaume).
 #### 16.2 Scripts dans le navigateur intégré
 - [ ] 16.2.1 DOM : `document`, éléments, attributs, texte, événements,
   minuteries ; une modification du DOM refait la mise en page

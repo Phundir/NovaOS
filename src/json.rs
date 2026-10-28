@@ -31,6 +31,12 @@
 //! implementations disagree: some keep the first, some the last. For a
 //! signed manifest that is an attack -- the signer reads one value, the
 //! installer another. An object with a repeated name is an error.
+//!
+//! `JSON.parse` of JavaScript has no such choice: the language says the
+//! last one wins, in the place of the first, and a lone surrogate escape
+//! is a string like another. `parse_with(.., &Options::LENIENT)` reads
+//! that way (a lone surrogate becomes U+FFFD: the engine's strings are
+//! UTF-8); `parse` stays strict.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -43,6 +49,24 @@ pub const MAX_INPUT: usize = 16 << 20;
 
 /// Stack the parser keeps free below it before descending a level.
 const STACK_RESERVE: usize = 16 * 1024;
+
+/// How a document is read.
+#[derive(Debug, Clone, Copy)]
+pub struct Options {
+    /// A repeated name replaces the earlier value, in its place.
+    pub last_key_wins: bool,
+    /// A lone surrogate escape reads as U+FFFD instead of failing.
+    pub lone_surrogates: bool,
+    /// Deepest nesting accepted.
+    pub max_depth: usize,
+}
+
+impl Options {
+    /// Manifests and configuration: duplicates refused.
+    pub const STRICT: Options = Options { last_key_wins: false, lone_surrogates: false, max_depth: MAX_DEPTH };
+    /// `JSON.parse`: what the language specifies.
+    pub const LENIENT: Options = Options { last_key_wins: true, lone_surrogates: true, max_depth: 512 };
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
@@ -242,10 +266,15 @@ impl Value {
 
 /// Parses a complete document: one value, surrounded by white space only.
 pub fn parse(text: &[u8]) -> Result<Value, Error> {
+    parse_with(text, &Options::STRICT)
+}
+
+/// Parses a complete document with the given options.
+pub fn parse_with(text: &[u8], options: &Options) -> Result<Value, Error> {
     if text.len() > MAX_INPUT {
         return Err(Error { kind: ErrorKind::TooLarge, offset: 0 });
     }
-    let mut parser = Parser { input: text, pos: 0 };
+    let mut parser = Parser { input: text, pos: 0, options: *options };
     // A byte-order mark is not JSON (RFC 8259, 8.1), but the RFC lets a
     // parser ignore one; files saved by some editors carry it.
     if text.starts_with(&[0xEF, 0xBB, 0xBF]) {
@@ -267,6 +296,7 @@ pub fn parse_str(text: &str) -> Result<Value, Error> {
 struct Parser<'a> {
     input: &'a [u8],
     pos: usize,
+    options: Options,
 }
 
 impl Parser<'_> {
@@ -321,7 +351,7 @@ impl Parser<'_> {
     }
 
     fn descend(&self, depth: usize) -> Result<(), Error> {
-        if depth > MAX_DEPTH || crate::scheduler::stack_headroom() < STACK_RESERVE {
+        if depth > self.options.max_depth || crate::scheduler::stack_headroom() < STACK_RESERVE {
             return Err(self.error(ErrorKind::TooDeep));
         }
         Ok(())
@@ -356,6 +386,9 @@ impl Parser<'_> {
         self.descend(depth)?;
         self.pos += 1; // '{'
         let mut object = Object::new();
+        // Past a few members, names are found through an index rather
+        // than a scan: a large object must not cost the square of its size.
+        let mut index: Option<alloc::collections::BTreeMap<String, usize>> = None;
         self.skip_space();
         if self.peek() == Some(b'}') {
             self.pos += 1;
@@ -371,14 +404,29 @@ impl Parser<'_> {
                 });
             }
             let name = self.string()?;
-            if object.get(&name).is_some() {
+            let existing = match &index {
+                Some(index) => index.get(&name).copied(),
+                None => object.members.iter().position(|(n, _)| *n == name),
+            };
+            if existing.is_some() && !self.options.last_key_wins {
                 return Err(Error { kind: ErrorKind::DuplicateKey, offset: at });
             }
             self.skip_space();
             self.expect(b':')?;
             self.skip_space();
             let value = self.value(depth)?;
-            object.members.push((name, value));
+            match existing {
+                Some(position) => object.members[position].1 = value,
+                None => {
+                    if let Some(index) = &mut index {
+                        index.insert(name.clone(), object.members.len());
+                    }
+                    object.members.push((name, value));
+                    if index.is_none() && object.members.len() > 16 {
+                        index = Some(object.members.iter().enumerate().map(|(i, (n, _))| (n.clone(), i)).collect());
+                    }
+                }
+            }
             self.skip_space();
             match self.peek() {
                 Some(b',') => self.pos += 1,
@@ -454,19 +502,30 @@ impl Parser<'_> {
                         continue;
                     }
                     let first = self.hex4()?;
+                    let lenient = self.options.lone_surrogates;
                     let code = if (0xD800..0xDC00).contains(&first) {
                         // A high surrogate must be followed by a low one.
-                        if !self.input[self.pos..].starts_with(b"\\u") {
+                        let paired = self.input[self.pos..].starts_with(b"\\u")
+                            && self.input.get(self.pos + 2..self.pos + 6).is_some_and(|hex| {
+                                core::str::from_utf8(hex)
+                                    .ok()
+                                    .and_then(|h| u32::from_str_radix(h, 16).ok())
+                                    .is_some_and(|v| (0xDC00..0xE000).contains(&v))
+                            });
+                        if paired {
+                            self.pos += 2;
+                            let second = self.hex4()?;
+                            0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00)
+                        } else if lenient {
+                            0xFFFD
+                        } else {
                             return Err(self.error(ErrorKind::BadUnicode));
                         }
-                        self.pos += 2;
-                        let second = self.hex4()?;
-                        if !(0xDC00..0xE000).contains(&second) {
-                            return Err(self.error(ErrorKind::BadUnicode));
-                        }
-                        0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00)
                     } else if (0xDC00..0xE000).contains(&first) {
-                        return Err(self.error(ErrorKind::BadUnicode));
+                        if !lenient {
+                            return Err(self.error(ErrorKind::BadUnicode));
+                        }
+                        0xFFFD
                     } else {
                         first
                     };
@@ -733,6 +792,29 @@ pub fn selftest() -> (usize, usize) {
         let outcome = parse(input).map_err(|e| e.kind);
         check("entree invalide refusee", outcome == Err(kind));
     }
+
+    // `JSON.parse` reading: the last duplicate wins in the first one's
+    // place; lone surrogates read as U+FFFD; the strict reader is unmoved.
+    let lenient = parse_with(br#"{"a":1,"b":2,"a":3}"#, &Options::LENIENT);
+    check(
+        "lecture tolerante : derniere cle en double, a sa place",
+        lenient.as_ref().ok().and_then(Value::as_object).map(|o| o.iter().map(|(n, v)| (String::from(n), v.as_i64())).collect::<Vec<_>>())
+            == Some(alloc::vec![(String::from("a"), Some(3)), (String::from("b"), Some(2))]),
+    );
+    check(
+        "lecture tolerante : surrogat isole",
+        parse_with(br#""x\ud800y\udc00""#, &Options::LENIENT) == Ok(Value::String(String::from("x\u{fffd}y\u{fffd}"))),
+    );
+    let mut wide = String::from("{");
+    for i in 0..40 {
+        wide.push_str(&alloc::format!("\"k{}\":{},", i, i));
+    }
+    wide.push_str("\"k7\":-1}");
+    check(
+        "objet large : doublon trouve par l'index",
+        parse_str(&wide).map_err(|e| e.kind) == Err(ErrorKind::DuplicateKey)
+            && parse_with(wide.as_bytes(), &Options::LENIENT).ok().and_then(|v| v.get("k7").and_then(Value::as_i64)) == Some(-1),
+    );
 
     // Depth: the limit is reached, then refused, without exhausting the
     // stack.

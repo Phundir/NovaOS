@@ -12,11 +12,13 @@ pub mod date;
 pub mod function;
 pub mod global;
 pub mod json;
+pub mod math;
 pub mod number;
 pub mod object;
 pub mod promise;
 pub mod regexp;
 pub mod string;
+pub mod symbol;
 
 use alloc::vec::Vec;
 
@@ -154,6 +156,8 @@ pub fn install(ctx: &mut Ctx) {
     array::install(ctx);
     string::install(ctx);
     number::install(ctx);
+    math::install(ctx);
+    symbol::install(ctx);
     install_errors(ctx);
     json::install(ctx);
     date::install(ctx);

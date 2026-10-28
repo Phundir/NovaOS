@@ -449,7 +449,7 @@ impl Num {
     }
 
     /// `==` on numbers: NaN is unequal to everything, -0 equals +0.
-    pub fn eq(self, other: Num) -> bool {
+    pub fn equals(self, other: Num) -> bool {
         self.partial_cmp(other) == Some(Ordering::Equal)
     }
 
@@ -769,6 +769,45 @@ impl Num {
         out
     }
 
+    /// `Number.prototype.toExponential(fraction)`: `None` gives as many
+    /// digits as it takes to read the number back.
+    pub fn to_exponential(self, fraction: Option<usize>) -> String {
+        if !self.is_finite() {
+            return self.to_js_string();
+        }
+        let mut out = String::new();
+        if self.is_sign_negative() && !self.is_zero() {
+            out.push('-');
+        }
+        let (mut digits, point) = if self.is_zero() {
+            (alloc::vec![b'0'], 1)
+        } else {
+            match fraction {
+                None => self.abs().shortest(),
+                Some(fraction) => {
+                    let (digits, point) = self.abs().exact_decimal();
+                    Self::round_digits(&digits, point, fraction + 1)
+                }
+            }
+        };
+        if let Some(fraction) = fraction {
+            while digits.len() < fraction + 1 {
+                digits.push(b'0');
+            }
+        }
+        let text = |bytes: &[u8]| String::from(core::str::from_utf8(bytes).unwrap_or(""));
+        out.push_str(&text(&digits[..1]));
+        if digits.len() > 1 {
+            out.push('.');
+            out.push_str(&text(&digits[1..]));
+        }
+        let exponent = point - 1;
+        out.push('e');
+        out.push(if exponent >= 0 { '+' } else { '-' });
+        out.push_str(&alloc::format!("{}", exponent.abs()));
+        out
+    }
+
     /// `Number.prototype.toString(radix)` for radix other than 10.
     pub fn to_radix(self, radix: u32) -> String {
         if !self.is_finite() || radix == 10 {
@@ -901,6 +940,10 @@ impl Num {
         let text = trim_js(text);
         if text.is_empty() {
             return Self::ZERO;
+        }
+        // Numeric separators are source text: `Number("1_0")` is NaN.
+        if text.contains('_') {
+            return Self::NAN;
         }
         let lower = text.as_bytes();
         if lower.len() > 2 && lower[0] == b'0' {
@@ -1043,7 +1086,10 @@ impl Num {
         Self::from_i64(value)
     }
 
-    /// e^x: x = k ln2 + r with |r| <= ln2 / 2, then a Taylor series.
+    /// e^x, correctly rounded but in vanishingly rare cases: x = k ln2 + r
+    /// with r in [0, ln2), both computed in 116-bit fixed point (`wide`),
+    /// then the series of e^r, then one rounding to a double. A series in
+    /// doubles would round at every term: `Math.exp(1)` must be `Math.E`.
     pub fn exp(self) -> Num {
         if self.is_nan() {
             return self;
@@ -1057,19 +1103,16 @@ impl Num {
         if self.lt(Self::lit(-746)) {
             return Self::ZERO;
         }
-        let k = self.div(Self::LN2).round();
-        let r = self.sub(k.mul(Self::LN2));
-        let mut term = Self::ONE;
-        let mut sum = Self::ONE;
-        for index in 1..30 {
-            term = term.mul(r).div(Self::lit(index));
-            let next = sum.add(term);
-            if next.0 == sum.0 {
-                break;
-            }
-            sum = next;
+        if self.is_zero() || self.abs().lt(Self::ONE.scale2(-60)) {
+            // e^x = 1 + x + x^2/2...: past 2^-60 the square cannot move
+            // the rounding of 1 + x.
+            return Self::ONE.add(self);
         }
-        sum.scale2(k.to_i64_saturating() as i32)
+        let x = wide::from_num(self);
+        let k = x.div_euclid(wide::LN2 as i128);
+        let r = (x - k * wide::LN2 as i128) as u128;
+        let sum = wide::exp_reduced(r);
+        Self::pack(false, k as i32 - wide::FRAC as i32, sum)
     }
 
     /// x * 2^n.
@@ -1082,7 +1125,8 @@ impl Num {
     }
 
     /// ln x: x = m * 2^k with m in [sqrt(1/2), sqrt(2)), then the series
-    /// of atanh on (m - 1) / (m + 1).
+    /// of atanh on (m - 1) / (m + 1) -- in 116-bit fixed point, rounded
+    /// once at the end, as `exp`.
     pub fn ln(self) -> Num {
         if self.is_nan() || (self.is_sign_negative() && !self.is_zero()) {
             return Self::NAN;
@@ -1093,29 +1137,20 @@ impl Num {
         if self.is_infinite() {
             return self;
         }
+        if self.equals(Self::ONE) {
+            return Self::ZERO;
+        }
         let p = Self::normalized(self.parts());
         // value = (m / 2^52) * 2^(e + 52), m / 2^52 in [1, 2).
-        let mut k = p.e + 52;
-        let mut m = Self::pack(false, -52, p.m as u128);
-        if m.partial_cmp(Self::SQRT2) == Some(Ordering::Greater) {
-            m = m.div(Self::TWO);
+        let mut k = p.e as i128 + 52;
+        let mut m = (p.m as u128) << (wide::FRAC - 52);
+        // sqrt(2) in the same fixed point: past it, halve.
+        if m > wide::SQRT2 {
+            m >>= 1;
             k += 1;
         }
-        let s = m.sub(Self::ONE).div(m.add(Self::ONE));
-        let s2 = s.mul(s);
-        let mut term = s;
-        let mut sum = s;
-        let mut index = 3;
-        while index < 80 {
-            term = term.mul(s2);
-            let next = sum.add(term.div(Self::lit(index)));
-            if next.0 == sum.0 {
-                break;
-            }
-            sum = next;
-            index += 2;
-        }
-        sum.mul(Self::TWO).add(Self::lit(k as i64).mul(Self::LN2))
+        let total = k * wide::LN2 as i128 + wide::ln_reduced(m);
+        Self::pack(total < 0, -(wide::FRAC as i32), total.unsigned_abs())
     }
 
     pub fn pow(self, exponent: Num) -> Num {
@@ -1143,7 +1178,7 @@ impl Num {
                 return if n < 0 { Self::ONE.div(result) } else { result };
             }
         }
-        if self.abs().eq(Self::ONE) && exponent.is_infinite() {
+        if self.abs().equals(Self::ONE) && exponent.is_infinite() {
             return Self::NAN;
         }
         if self.is_sign_negative() && !self.is_zero() {
@@ -1337,4 +1372,89 @@ fn isqrt_u128(value: u128) -> u128 {
 /// ECMAScript white space and line terminators, trimmed.
 pub fn trim_js(text: &str) -> &str {
     text.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
+}
+
+
+/// Fixed-point arithmetic for `exp` and `ln`: unsigned values with
+/// `FRAC` fraction bits in a `u128`, products through a 256-bit
+/// intermediate. 116 bits leave 63 below the 53 of a double: the series'
+/// truncation errors stay far under the last bit.
+mod wide {
+    use super::Num;
+
+    pub const FRAC: u32 = 116;
+    const ONE: u128 = 1 << FRAC;
+    /// floor(ln 2 * 2^116).
+    pub const LN2: u128 = 0xb17217f7d1cf79abc9e3b39803f2f;
+    /// sqrt(2) * 2^116, rounded up (only compared against).
+    pub const SQRT2: u128 = 0x16a09e667f3bcc908b2fb1366ea958;
+
+    /// (a * b) >> FRAC, for a, b < 2^118.
+    pub fn mul(a: u128, b: u128) -> u128 {
+        let (a1, a0) = (a >> 64, a & u64::MAX as u128);
+        let (b1, b0) = (b >> 64, b & u64::MAX as u128);
+        let p00 = a0 * b0;
+        let mid = a0 * b1 + a1 * b0;
+        let p11 = a1 * b1;
+        let (low, carry) = p00.overflowing_add(mid << 64);
+        let high = p11 + (mid >> 64) + carry as u128;
+        (high << (128 - FRAC)) | (low >> FRAC)
+    }
+
+    /// floor(a / b * 2^FRAC), for a < b < 2^118: long division.
+    fn div(a: u128, b: u128) -> u128 {
+        let mut remainder = a;
+        let mut quotient = 0u128;
+        for _ in 0..FRAC {
+            remainder <<= 1;
+            quotient <<= 1;
+            if remainder >= b {
+                remainder -= b;
+                quotient |= 1;
+            }
+        }
+        quotient
+    }
+
+    /// A finite double, |x| < 2^10, as signed fixed point.
+    pub fn from_num(x: Num) -> i128 {
+        let p = Num::normalized(x.parts());
+        let shift = p.e + FRAC as i32;
+        let magnitude = if shift >= 0 { (p.m as i128) << shift } else { (p.m as i128) >> (-shift) };
+        if p.negative { -magnitude } else { magnitude }
+    }
+
+    /// e^r for r in [0, ln 2): in [1, 2) * 2^FRAC.
+    pub fn exp_reduced(r: u128) -> u128 {
+        let mut sum = ONE;
+        let mut term = ONE;
+        for n in 1..64u128 {
+            term = mul(term, r) / n;
+            if term == 0 {
+                break;
+            }
+            sum += term;
+        }
+        sum
+    }
+
+    /// ln m for m in [sqrt(1/2), sqrt(2)] * 2^FRAC, signed.
+    pub fn ln_reduced(m: u128) -> i128 {
+        let negative = m < ONE;
+        let numerator = if negative { ONE - m } else { m - ONE };
+        let s = div(numerator, m + ONE);
+        let s2 = mul(s, s);
+        let mut power = s;
+        let mut sum = 0u128;
+        for n in 0..80u128 {
+            let term = power / (2 * n + 1);
+            if term == 0 {
+                break;
+            }
+            sum += term;
+            power = mul(power, s2);
+        }
+        let value = (sum << 1) as i128;
+        if negative { -value } else { value }
+    }
 }

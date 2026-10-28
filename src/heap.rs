@@ -187,6 +187,19 @@ impl LinkedListAllocator {
         self.deallocations
     }
 
+    /// Free bytes in all, and the largest single free block.
+    pub fn free_and_largest(&self) -> (usize, usize) {
+        let mut total = 0;
+        let mut largest = 0;
+        let mut current = &self.head;
+        while let Some(ref next) = current.next {
+            total += next.size;
+            largest = largest.max(next.size);
+            current = next;
+        }
+        (total, largest)
+    }
+
     /// Sum of the blocks still free.
     pub fn free_bytes(&self) -> usize {
         let mut total = 0;
@@ -332,6 +345,22 @@ pub fn stats() -> (usize, usize, usize, usize) {
         allocator.allocation_count(),
         allocator.deallocation_count(),
     )
+}
+
+/// What the heap keeps for the kernel when a script asks for memory.
+const SCRIPT_RESERVE: usize = 16 * 1024 * 1024;
+
+/// Can an allocation of `bytes` made on behalf of a script succeed and
+/// leave the kernel its reserve?
+///
+/// The kernel allocator cannot fail gracefully (`alloc_error` halts the
+/// machine), so the JavaScript engine asks before it builds a large
+/// string or array, and throws a `RangeError` instead. The largest free
+/// block must hold the request with half of it to spare: a vector that
+/// grows moves to a new block before freeing the old.
+pub fn room_for(bytes: usize) -> bool {
+    let (free, largest) = ALLOCATOR.0.lock().free_and_largest();
+    free >= bytes.saturating_add(SCRIPT_RESERVE) && largest >= bytes.saturating_add(bytes / 2)
 }
 
 pub fn dump_state() {

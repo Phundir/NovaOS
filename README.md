@@ -194,7 +194,8 @@ refuserait.
 | `make log` | Démarrage complet redirigé vers `build/boot.log` |
 | `make test` | Démarrage sans fenêtre, verdicts d'autotest jugés automatiquement |
 | `make test-recovery` | Démarrage en mode recovery, commandes tapées sur la console série |
-| `make test-all` | `test` + monocœur + sans écran + recovery (ce que fait la CI) |
+| `make js-test` | Le moteur JavaScript compilé pour l'hôte : son corpus en 0,2 s |
+| `make test-all` | `js-test` + `test` + monocœur + sans écran + recovery (ce que fait la CI) |
 | `make dist` | Ce que publie une release (`build/dist/`) |
 | `make check` | Chaînes ASCII, symboles non résolus, instructions SSE, segments |
 | `make debug` | QEMU en attente de GDB sur `:1234` |
@@ -228,6 +229,7 @@ autotest qui imprime un **verdict** sur la console série.
 [test] phase 13 validee - 37 verifications de la pile graphique, sans GPU (absent)
 [test] phase 15 validee - 70 verifications des mises a jour atomiques (spec 10.5)
 [test] phase 16.0 validee - 60 verifications du shell et du terminal (spec 1.1, 2.2)
+[test] phase 16.1 validee - 95 cas du moteur JavaScript (2270 ms)
 ```
 
 `make test` démarre l'ISO sans fenêtre (`tools/boot-test.py`), arrête
@@ -345,6 +347,10 @@ en rendu logiciel.
   JSON signés (GitHub, serveur ou dossier), canaux `release`/`beta`/`test`,
   chaque version dans son dossier, bascule par un pointeur remplacé en une
   opération, ancienne version gardée tant qu'elle tourne, retour arrière.
+- **Moteur JavaScript** (ES2022) : interprète d'arbre borné (pas, pile,
+  mémoire), bibliothèque standard complète hors `Intl`/`Proxy`/`BigInt`,
+  promesses et minuteries ; nombres IEEE 754 calculés en entiers, `exp` et
+  `ln` correctement arrondis.
 - **Shell** : interprète de commandes (fichiers, tâches, mémoire, disques,
   `spm`, `dev`), fenêtre **Terminal** avec historique et défilement, shell
   sur la console série et mode recovery.

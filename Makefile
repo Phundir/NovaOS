@@ -202,7 +202,7 @@ BENCH_MIB   ?= 512
 BENCH_ACCEL ?=
 BENCH_PORT  ?= 8000
 
-.PHONY: test test-smp1 test-novga test-recovery test-all dist version venus venus-check shaders kmd-test webroot nova-libc disk-migrate disk-lifs print-qemu-flags print-qemu-headless bench-net all kernel iso audio-devices run run-full run-smp run-nogui log debug debug-int clean check check-ascii police racines re prev unprev cargo-build disk disk-reset check-export run-netdump run-nonet
+.PHONY: js-test test test-smp1 test-novga test-recovery test-all dist version venus venus-check shaders kmd-test webroot nova-libc disk-migrate disk-lifs print-qemu-flags print-qemu-headless bench-net all kernel iso audio-devices run run-full run-smp run-nogui log debug debug-int clean check check-ascii police racines re prev unprev cargo-build disk disk-reset check-export run-netdump run-nonet
 
 all: iso
 
@@ -530,7 +530,18 @@ test-recovery: $(RECOVERY_ISO)
 	  --type '^bonjour du shell=>aide' --expect 'Commandes' \
 	  -- $(QEMU) $(subst $(TEST_ISO),$(RECOVERY_ISO),$(TEST_FLAGS)) -smp 2
 
-test-all: test test-smp1 test-novga test-recovery
+# Le moteur JavaScript compile pour l'hote : le corpus de l'autotest 16.1
+# en une fraction de seconde, sans demarrer QEMU (tools/jshost/).
+JSHOST := $(BUILD_DIR)/jshost
+
+$(JSHOST): $(wildcard tools/jshost/*.rs tools/jshost/web/*.rs) $(shell find src/web/js -name '*.rs') src/json.rs src/web/html.rs src/web/text.rs
+	@mkdir -p $(BUILD_DIR)
+	rustc --edition 2024 -O -o $@ tools/jshost/main.rs
+
+js-test: $(JSHOST)
+	$(JSHOST)
+
+test-all: js-test test test-smp1 test-novga test-recovery
 
 # `make dist` : ce que publie une release (.github/workflows/release.yml).
 # Le noyau y est depouille de ses informations de debogage (92 -> 8 Mio) ;

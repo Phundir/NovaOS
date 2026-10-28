@@ -8,6 +8,41 @@ a été observé, reste dans `ROADMAP.md` ; les décisions dans `DECISIONS.md`.
 Schéma de version : `0.{phase}.{correctif}` — la phase est la dernière de
 la roadmap dont le code est complet.
 
+## [0.15.2] — 2026-10-28
+
+Phase 16.1 : le moteur JavaScript est compilé, complet et éprouvé.
+
+### Ajouté
+
+- `src/web/js/` compilé en entier : lexeur et parseur ES2022, interprète
+  borné (pas, pile, mémoire), file de tâches et minuteries.
+- Bibliothèque standard : `Number`, `Boolean`, `Symbol`, `Math` (`exp` et
+  `ln` correctement arrondis, en virgule fixe 116 bits), `JSON`, `Date`
+  (fuseau de Nova), `RegExp`, `Map`/`Set` (et l'algèbre des ensembles
+  ES2025), `WeakMap`/`WeakSet`/`WeakRef`, `Promise` (`all`, `allSettled`,
+  `any`, `race`, `withResolvers`, `try`), `console`, minuteries,
+  `queueMicrotask`, `structuredClone`, fonctions URI, `atob`/`btoa`.
+- Autotest 16.1 : 94 cas vérifiés contre Node 22, plus la boucle infinie
+  arrêtée par le carburant (`[test] phase 16.1 validee`).
+- `make js-test` : le moteur compilé pour l'hôte, son corpus en 0,2 s ;
+  dans la CI.
+- `json::Options::LENIENT` : lecture de `JSON.parse` (dernière clé en
+  double gagnante, surrogats isolés), index au-delà de 16 membres.
+
+### Corrigé
+
+- Un script qui construisait une très grande chaîne ou un très grand
+  tableau arrêtait la machine (allocateur du noyau à court) : il reçoit
+  désormais une `RangeError` (`heap::room_for`, `ops::reserve`).
+- `Number("1_0")` valait 10 ; `Math.exp(1)` ne valait pas `Math.E`.
+
+### Limites connues
+
+- Pas encore branché sur le navigateur intégré (16.2) ni sur
+  `dev interpret` (16.3).
+- Ni `BigInt`, ni `Proxy`, ni `Intl` ; tableaux sans trous ; `eval`
+  indirect seulement.
+
 ## [0.15.1] — 2026-10-28
 
 Première étape de la phase 16 : Nova a un shell.

@@ -20,6 +20,56 @@ use super::value::*;
 const DENSE_GAP: usize = 100_000;
 /// Longest string a script may build.
 pub const MAX_STRING: usize = 32 * 1024 * 1024;
+/// Longest array a script may build, in elements.
+pub const MAX_ARRAY: usize = 16 * 1024 * 1024;
+/// Below this, an allocation is not worth asking the host about.
+const RESERVE_FROM: usize = 256 * 1024;
+
+/// Before a large allocation: the host must have room for it. The
+/// kernel's allocator halts the machine when it fails; a script gets a
+/// `RangeError` instead, which it can catch.
+pub fn reserve(ctx: &mut Ctx, bytes: usize, what: &str) -> R<()> {
+    if bytes < RESERVE_FROM || bytes < ctx.reserved_up_to {
+        return Ok(());
+    }
+    if !ctx.host.can_allocate(bytes) {
+        return ctx.throw_range(what);
+    }
+    ctx.reserved_up_to = bytes.saturating_mul(2);
+    Ok(())
+}
+
+/// A string about to reach `length` bytes: within the bound, and room.
+pub fn check_string(ctx: &mut Ctx, length: usize) -> R<()> {
+    if length > MAX_STRING {
+        return ctx.throw_range("Invalid string length");
+    }
+    reserve(ctx, length, "Invalid string length")
+}
+
+/// An array about to reach `length` elements.
+pub fn check_array(ctx: &mut Ctx, length: usize) -> R<()> {
+    if length > MAX_ARRAY {
+        return ctx.throw_range("Invalid array length");
+    }
+    reserve(ctx, length.saturating_mul(core::mem::size_of::<Value>()), "Invalid array length")
+}
+
+/// Before `extra` elements are added to an array: past its capacity the
+/// vector moves to a block twice its size, and that block must exist.
+pub fn check_growth(ctx: &mut Ctx, object: &Obj, extra: usize) -> R<()> {
+    let wanted = match &object.borrow().kind {
+        Kind::Array(items) => {
+            let length = items.len().saturating_add(extra);
+            (length > items.capacity()).then(|| length.max(items.capacity().saturating_mul(2)))
+        }
+        _ => None,
+    };
+    match wanted {
+        Some(length) => check_array(ctx, length),
+        None => Ok(()),
+    }
+}
 
 // ============================================================
 //  Conversions
@@ -410,6 +460,7 @@ pub fn get_value_key(ctx: &mut Ctx, value: &Value, index: &Value) -> R<Value> {
 pub fn set_value_key(ctx: &mut Ctx, target: &Value, index: &Value, value: Value) -> R<()> {
     if let (Value::Obj(object), Value::Num(n)) = (target, index) {
         if let Some(i) = n.to_index() {
+            check_growth(ctx, object, 1)?;
             let mut borrowed = object.borrow_mut();
             if !borrowed.frozen {
                 if let Kind::Array(items) = &mut borrowed.kind {
@@ -445,6 +496,15 @@ pub fn set(ctx: &mut Ctx, target: &Value, key: JsStr, value: Value) -> R<()> {
         _ => return Ok(()),
     };
     // Arrays: length and indices.
+    if let Some(index) = array_index(&key) {
+        let extra = match &object.borrow().kind {
+            Kind::Array(items) if index >= items.len() => index + 1 - items.len(),
+            _ => 0,
+        };
+        if extra > 0 && extra <= DENSE_GAP + 1 {
+            check_growth(ctx, &object, extra)?;
+        }
+    }
     {
         let mut borrowed = object.borrow_mut();
         if borrowed.frozen {
@@ -457,11 +517,17 @@ pub fn set(ctx: &mut Ctx, target: &Value, key: JsStr, value: Value) -> R<()> {
                 let Some(length) = length.to_index().filter(|l| *l <= u32::MAX as usize) else {
                     return ctx.throw_range("Invalid array length");
                 };
-                let mut borrowed = object.borrow_mut();
-                if let Kind::Array(items) = &mut borrowed.kind {
-                    if length > items.len() + DENSE_GAP {
-                        return ctx.throw_range("Invalid array length");
-                    }
+                let current = match &object.borrow().kind {
+                    Kind::Array(items) => items.len(),
+                    _ => return Ok(()),
+                };
+                if length > current + DENSE_GAP {
+                    return ctx.throw_range("Invalid array length");
+                }
+                if length > current {
+                    check_growth(ctx, &object, length - current)?;
+                }
+                if let Kind::Array(items) = &mut object.borrow_mut().kind {
                     items.resize(length, Value::Undefined);
                 }
                 return Ok(());
@@ -850,7 +916,7 @@ pub fn loose_eq(ctx: &mut Ctx, a: &Value, b: &Value) -> R<bool> {
     Ok(match (a, b) {
         (Value::Undefined | Value::Null, Value::Undefined | Value::Null) => true,
         (Value::Undefined | Value::Null, _) | (_, Value::Undefined | Value::Null) => false,
-        (Value::Num(x), Value::Str(s)) | (Value::Str(s), Value::Num(x)) => x.eq(Num::parse(s)),
+        (Value::Num(x), Value::Str(s)) | (Value::Str(s), Value::Num(x)) => x.equals(Num::parse(s)),
         (Value::Bool(x), other) | (other, Value::Bool(x)) => {
             let n = Value::Num(if *x { Num::ONE } else { Num::ZERO });
             return loose_eq(ctx, &n, other);
@@ -929,9 +995,7 @@ pub fn instance_of(ctx: &mut Ctx, value: &Value, constructor: &Value) -> R<bool>
 }
 
 pub fn concat(ctx: &mut Ctx, a: &str, b: &str) -> R<Value> {
-    if a.len() + b.len() > MAX_STRING {
-        return ctx.throw_range("Invalid string length");
-    }
+    check_string(ctx, a.len() + b.len())?;
     let mut text = String::with_capacity(a.len() + b.len());
     text.push_str(a);
     text.push_str(b);
@@ -950,8 +1014,8 @@ pub fn binary(ctx: &mut Ctx, op: BinOp, left: &Value, right: &Value) -> R<Value>
             BinOp::Gt => return Ok(Value::Bool(b.lt(a))),
             BinOp::Le => return Ok(Value::Bool(matches!(a.partial_cmp(b), Some(Ordering::Less | Ordering::Equal)))),
             BinOp::Ge => return Ok(Value::Bool(matches!(a.partial_cmp(b), Some(Ordering::Greater | Ordering::Equal)))),
-            BinOp::StrictEq | BinOp::Eq => return Ok(Value::Bool(a.eq(b))),
-            BinOp::StrictNe | BinOp::Ne => return Ok(Value::Bool(!a.eq(b))),
+            BinOp::StrictEq | BinOp::Eq => return Ok(Value::Bool(a.equals(b))),
+            BinOp::StrictNe | BinOp::Ne => return Ok(Value::Bool(!a.equals(b))),
             _ => {}
         }
     }

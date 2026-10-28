@@ -205,9 +205,20 @@ nova-os/
 │   │   ├── layout.rs          Boites positionnees (CSS 2.1)
 │   │   ├── paint.rs           Rendu dans un tampon de pixels
 │   │   ├── page.rs            Chaine complete d'une page
-│   │   ├── js/                Moteur JavaScript INACHEVE : seuls big.rs et
-│   │   │                      num.rs sont compiles ; lexeur, parseur,
-│   │   │                      interprete et builtins en attente, pas de DOM
+│   │   ├── js/                Moteur JavaScript (16.1), compilé en entier
+│   │   │   ├── lex.rs / parse.rs / ast.rs  ES2022 vers un arbre
+│   │   │   ├── interp.rs      Interprète d'arbre, bornes (pas, pile,
+│   │   │   │                  mémoire), file de tâches, minuteries, Host
+│   │   │   ├── ops.rs         Opérations abstraites, check_string/array
+│   │   │   ├── value.rs       Valeurs, objets, Map/Set, promesses
+│   │   │   ├── num.rs / big.rs  Doubles IEEE 754 en entiers ; exp/ln en
+│   │   │   │                  virgule fixe 116 bits
+│   │   │   ├── regex.rs       Machine de retour arrière bornée
+│   │   │   ├── builtins/      Object, Function, Array, String, Number,
+│   │   │   │                  Boolean, Symbol, Math, JSON, Date, RegExp,
+│   │   │   │                  Map/Set/Weak*, Promise, console, minuteries
+│   │   │   ├── dom.rs         (16.2) liaisons DOM
+│   │   │   └── selftest.rs    Corpus de 94 cas, vérifié contre Node 22
 │   │   └── selftest.rs        Autotest hors reseau
 │   │
 │   ├── vm/                    Espaces d'adressage prives (11.3)

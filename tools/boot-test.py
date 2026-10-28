@@ -47,6 +47,7 @@ DEFAULT_VERDICTS = [
     (r"\[test\] phase 13 validee", "13 pile graphique"),
     (r"\[test\] phase 15 validee", "15 mises a jour atomiques"),
     (r"\[test\] phase 16\.0 validee", "16.0 shell et terminal"),
+    (r"\[test\] phase 16\.1 validee", "16.1 moteur JavaScript"),
 ]
 
 # Verdicts that only exist when a framebuffer does (-vga none drops them).

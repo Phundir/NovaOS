@@ -256,9 +256,7 @@ fn pad(ctx: &mut Ctx, this: &Value, args: &[Value], at_start: bool) -> R<Value> 
     if target <= s.units() || filler.is_empty() {
         return Ok(Value::Str(s));
     }
-    if target > ops::MAX_STRING {
-        return ctx.throw_range("Invalid string length");
-    }
+    ops::check_string(ctx, target)?;
     let missing = target - s.units();
     let mut padding = String::new();
     let filler_chars: Vec<char> = filler.chars().collect();
@@ -286,9 +284,7 @@ fn repeat(ctx: &mut Ctx, this: &Value, args: &[Value], _: &Value) -> R<Value> {
         return ctx.throw_range("Invalid count value");
     }
     let count = count.to_i64_saturating().max(0) as usize;
-    if s.len().saturating_mul(count) > ops::MAX_STRING {
-        return ctx.throw_range("Invalid string length");
-    }
+    ops::check_string(ctx, s.len().saturating_mul(count))?;
     Ok(Value::Str(JsStr::from(s.repeat(count))))
 }
 
@@ -296,9 +292,7 @@ fn concat(ctx: &mut Ctx, this: &Value, args: &[Value], _: &Value) -> R<Value> {
     let mut out = String::from(this_string(ctx, this)?.as_str());
     for value in args {
         out.push_str(&ops::to_string(ctx, value)?);
-        if out.len() > ops::MAX_STRING {
-            return ctx.throw_range("Invalid string length");
-        }
+        ops::check_string(ctx, out.len())?;
     }
     Ok(Value::Str(JsStr::from(out)))
 }
@@ -466,9 +460,7 @@ fn replace_impl(ctx: &mut Ctx, this: &Value, args: &[Value], all: bool) -> R<Val
         };
         out.push_str(&piece);
         last = position + needle.len();
-        if out.len() > ops::MAX_STRING {
-            return ctx.throw_range("Invalid string length");
-        }
+        ops::check_string(ctx, out.len())?;
     }
     out.push_str(&s[last..]);
     Ok(Value::Str(JsStr::from(out)))

@@ -4304,6 +4304,86 @@ de recovery est la même, `grub.cfg` réécrit avec `set default=1`.
 - Terminal : pas de sélection ni de copier-coller ; un caractère hors
   ASCII s'affiche `?` (la police n'a que l'ASCII).
 
+## Moteur JavaScript (phase 16.1) — décisions
+
+### Le moteur se compile aussi pour l'hôte
+
+`src/web/js/` n'utilise que `alloc` : `tools/jshost/` le compile avec
+`std` (`rustc` directement, `.cargo/config.toml` orientant cargo vers la
+cible du noyau) et fait tourner le corpus en 0,2 s, contre un démarrage
+de QEMU. Trois cales seulement : la marge de pile (mesurée sur le fil),
+`heap::room_for` et `serial_println!`. `make js-test`, dans la CI avant
+les démarrages. Un moteur d'un peu moins de dix mille lignes ne se met pas
+au point à vingt secondes l'essai.
+
+### Les attentes du corpus sont celles de Node, pas celles du moteur
+
+Chaque attente de `web::js::selftest` a été vérifiée contre Node 22
+(fuseau UTC+1, horloge figée sur celle de l'hôte de test) avant d'être
+confrontée au moteur. Un corpus écrit en regardant ce que le moteur
+répond ne teste que sa reproductibilité ; c'est la règle des encodages
+de l'assembleur (« se vérifient contre une table écrite à la main »)
+appliquée au langage. Dix attentes fausses écrites de mémoire ont été
+corrigées ainsi : l'auteur d'un test se trompe aussi.
+
+### Un script n'épuise pas le tas du noyau
+
+Le tas fait 64 Mio et l'allocateur arrête la machine quand il échoue
+(`alloc_error`). Un `s += s` en boucle l'a fait dès le premier essai de
+l'autotest. Désormais toute chaîne ou tout tableau qui va dépasser
+256 Kio passe par `ops::reserve`, qui demande à l'hôte
+(`Host::can_allocate` → `heap::room_for` : 16 Mio gardés pour le noyau,
+le plus grand bloc libre une fois et demie la demande, puisqu'un vecteur
+qui grandit déménage avant de libérer) ; le script reçoit une
+`RangeError` qu'il peut rattraper. Les croissances qui n'allouent aucun
+objet sont vues par `tick` toutes les 64 Ki étapes. `MAX_ARRAY` vaut
+16 Mi éléments (l'ancien `new Array(1e7)` demandait 160 Mio d'un coup).
+
+### `exp` et `ln` en virgule fixe 116 bits
+
+Une série de Taylor en doubles arrondit à chaque terme : `Math.exp(1)`
+ne valait pas `Math.E`. La réduction (x = k ln 2 + r) et la série se font
+en virgule fixe sur 116 bits, avec un produit 256 bits, et un seul
+arrondi à la fin (`Num::pack`). Sur 2 000 valeurs tirées au hasard, deux
+écarts avec la libm de l'hôte : vérifiés en précision décimale, c'est la
+libm qui avait tort.
+
+### `Num::eq` masquait `PartialEq::eq`
+
+`Num` dérive `PartialEq` (égalité des bits) et avait une méthode `eq`
+(égalité IEEE : NaN différent de lui-même, -0 égal à +0). Sur un `&Num`,
+la résolution de méthode trouvait d'abord le trait : `a.eq(*b)` ne
+compilait pas, et ailleurs comparait les bits sans le dire. Renommée
+`equals`.
+
+### `JSON.parse` lit avec le lecteur des manifestes, en mode tolérant
+
+`crate::json` refuse les clés en double (un manifeste signé où deux
+lectures diffèrent est une attaque) ; le langage veut que la dernière
+gagne, à la place de la première, et accepte un surrogat isolé.
+`json::Options::LENIENT` le fait, `Options::STRICT` reste le défaut ; un
+index se construit au-delà de 16 membres pour que les doublons ne coûtent
+pas le carré de la taille. Les nombres gardent leur texte et
+`Num::parse` les convertit exactement.
+
+### `Date` : le fuseau fixe de l'hôte
+
+Les fuseaux de Nova sont des décalages fixes (`i18n::tz`), les heures
+d'été listées à part : un seul décalage vaut pour toutes les dates, donné
+par `Host::tz_offset_minutes`. Une page voit l'heure de la barre des
+tâches. `toString` ne nomme pas le fuseau entre parenthèses (le texte est
+laissé à l'implémentation).
+
+### Limites de la 16.1, connues
+
+- `BigInt` lu comme un nombre ; ni `Proxy`, ni `Intl` (`toLocaleString`
+  suit `en-US`) ; tableaux sans trous (un trou vaut `undefined`) ;
+  `eval` indirect seulement.
+- Générateurs exécutés d'un bloc, `await` qui attend sur place (choix de
+  l'interprète d'origine, documentés dans `interp.rs`).
+- `WeakMap`, `WeakSet`, `WeakRef` gardent leurs clés jusqu'à la fin du
+  royaume.
+
 ---
 
 ## 4. Invariants à ne jamais casser

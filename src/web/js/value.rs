@@ -259,7 +259,7 @@ impl Value {
         match (self, other) {
             (Value::Undefined, Value::Undefined) | (Value::Null, Value::Null) => true,
             (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::Num(a), Value::Num(b)) => a.eq(*b),
+            (Value::Num(a), Value::Num(b)) => a.equals(*b),
             (Value::Str(a), Value::Str(b)) | (Value::Sym(a), Value::Sym(b)) => a == b,
             (Value::Obj(a), Value::Obj(b)) => a.ptr_eq(b),
             _ => false,

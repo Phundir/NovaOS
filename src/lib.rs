@@ -110,6 +110,14 @@ fn spawn_selftest(name: &str, entry: fn() -> !) {
     scheduler::spawn(name, BinaryType::Dsa, entry);
 }
 
+/// Same, on a stack of its own size: the JavaScript engine is a tree
+/// walker and keeps 96 KiB of margin below it (`web::js::interp`).
+fn spawn_selftest_with_stack(name: &str, entry: fn() -> !, stack: usize) {
+    SELFTESTS_RUNNING.fetch_add(1, Ordering::SeqCst);
+    SELFTESTS_CREATED.fetch_add(1, Ordering::SeqCst);
+    scheduler::spawn_with_stack(name, BinaryType::Dsa, entry, stack);
+}
+
 /// Last call of a self-test task.
 fn selftest_done() -> ! {
     SELFTESTS_RUNNING.fetch_sub(1, Ordering::SeqCst);
@@ -790,6 +798,7 @@ fn task_phase15_selftest() -> ! {
 
 /// Self-test of phase 16: the shell and the terminal (16.0).
 fn task_phase16_selftest() -> ! {
+    spawn_selftest_with_stack("js-autotest", task_js_selftest, 1024 * 1024);
     let (passed, failed) = shell::selftest::run();
     if failed == 0 {
         serial_println!(
@@ -798,6 +807,24 @@ fn task_phase16_selftest() -> ! {
         );
     } else {
         serial_println!("[test] phase 16.0 ECHEC - {} cas incorrects sur {}", failed, passed + failed);
+    }
+    selftest_done()
+}
+
+/// Self-test of the JavaScript engine (16.1): the corpus of
+/// `web::js::selftest`, one realm per case.
+fn task_js_selftest() -> ! {
+    let started = idt::ticks();
+    let (passed, failed) = web::js::selftest::run(&scheduler::stack_headroom);
+    let elapsed_ms = (idt::ticks() - started) * 1000 / TIMER_HZ as u64;
+    if failed == 0 {
+        serial_println!(
+            "[test] phase 16.1 validee - {} cas du moteur JavaScript ({} ms)",
+            passed,
+            elapsed_ms
+        );
+    } else {
+        serial_println!("[test] phase 16.1 ECHEC - {} cas incorrects sur {}", failed, passed + failed);
     }
     selftest_done()
 }

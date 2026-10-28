@@ -108,6 +108,7 @@ make run-nogui  # serie seule, sans fenetre
 make log        # boot complet redirige vers build/boot.log
 make test       # boot sans fenetre, verdicts juges (tools/boot-test.py), deux fois
 make test-recovery # mode recovery : commandes tapees sur la console serie
+make js-test    # moteur JavaScript compile pour l'hote, corpus 16.1 (0,2 s)
 make test-all   # test + monocoeur + sans ecran + recovery -- ce que fait la CI
 make dist       # ISO, noyau depouille, disque vierge : ce que publie une release
 make debug      # QEMU en attente sur gdb :1234

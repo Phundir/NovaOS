@@ -88,7 +88,10 @@ fn array_constructor(ctx: &mut Ctx, _: &Value, args: &[Value], _: &Value) -> R<V
     let items = if args.len() == 1 {
         if let Value::Num(n) = &args[0] {
             match n.to_index() {
-                Some(length) if length <= 10_000_000 => alloc::vec![Value::Undefined; length],
+                Some(length) if length <= ops::MAX_ARRAY => {
+                    ops::check_array(ctx, length)?;
+                    alloc::vec![Value::Undefined; length]
+                }
                 _ => return ctx.throw_range("Invalid array length"),
             }
         } else {
@@ -137,13 +140,10 @@ fn of(ctx: &mut Ctx, _: &Value, args: &[Value], _: &Value) -> R<Value> {
 
 fn push(ctx: &mut Ctx, this: &Value, args: &[Value], _: &Value) -> R<Value> {
     if let Value::Obj(object) = this {
+        ops::check_growth(ctx, object, args.len())?;
         let mut borrowed = object.borrow_mut();
         if !borrowed.frozen {
             if let Kind::Array(items) = &mut borrowed.kind {
-                if items.len() + args.len() > 50_000_000 {
-                    drop(borrowed);
-                    return ctx.throw_range("Invalid array length");
-                }
                 items.extend_from_slice(args);
                 return Ok(Value::num(items.len() as i64));
             }
@@ -350,7 +350,8 @@ fn with(ctx: &mut Ctx, this: &Value, args: &[Value], _: &Value) -> R<Value> {
 }
 
 fn to_spliced(ctx: &mut Ctx, this: &Value, args: &[Value], _: &Value) -> R<Value> {
-    let copy = Value::Obj(ctx.new_array(elements(ctx, this)?));
+    let list = elements(ctx, this)?;
+    let copy = Value::Obj(ctx.new_array(list));
     splice(ctx, &copy, args, &Value::Undefined)?;
     Ok(copy)
 }
@@ -392,9 +393,7 @@ pub fn join_values(ctx: &mut Ctx, items: &[Value], separator: &str) -> R<JsStr> 
         if !item.is_nullish() {
             let text = ops::to_string(ctx, item)?;
             out.push_str(&text);
-            if out.len() > ops::MAX_STRING {
-                return ctx.throw_range("Invalid string length");
-            }
+            ops::check_string(ctx, out.len())?;
         }
     }
     Ok(JsStr::from(out))

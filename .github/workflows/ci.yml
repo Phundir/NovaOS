@@ -74,6 +74,9 @@ jobs:
             exit 1
           fi
 
+      - name: Moteur JavaScript sur l'hote (corpus 16.1)
+        run: make js-test
+
       - name: Controles statiques
         run: |
           make check-ascii

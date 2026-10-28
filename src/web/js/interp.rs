@@ -237,6 +237,9 @@ pub struct Realm {
     pub console: Vec<String>,
     /// Unhandled rejections and uncaught errors, reported once.
     pub errors: Vec<String>,
+    /// Promises rejected with no handler yet: reported when the job
+    /// queue runs dry if still unhandled then.
+    pub unhandled: Vec<Obj>,
     /// Sources of the scripts, for `Function.prototype.toString`.
     pub sources: Vec<Rc<str>>,
     pub halted: Option<String>,
@@ -246,9 +249,20 @@ pub struct Realm {
 pub trait Host {
     /// Milliseconds since the epoch.
     fn now_ms(&mut self) -> i64;
+    /// Offset of local time from UTC, in minutes (east positive). Nova's
+    /// zones are fixed offsets (`i18n::tz`): one number covers every date.
+    fn tz_offset_minutes(&mut self) -> i32 {
+        0
+    }
     fn random(&mut self) -> u64;
     /// Is there memory left for the page to grow?
     fn memory_ok(&mut self) -> bool {
+        true
+    }
+    /// Can a single allocation of `bytes` be made for the page? Asked
+    /// before large strings and arrays (`ops::reserve`).
+    fn can_allocate(&mut self, bytes: usize) -> bool {
+        let _ = bytes;
         true
     }
     /// A synchronous request: (status, status text, headers, body, final
@@ -293,6 +307,7 @@ impl Realm {
             dom: super::dom::DomState::default(),
             console: Vec::new(),
             errors: Vec::new(),
+            unhandled: Vec::new(),
             sources: Vec::new(),
             halted: None,
         };
@@ -340,6 +355,7 @@ impl Realm {
         self.global.borrow_mut().props.clear();
         self.jobs.clear();
         self.timers.clear();
+        self.unhandled.clear();
         self.dom.clear();
     }
 
@@ -380,6 +396,10 @@ pub struct Ctx<'a> {
     pub base_url: String,
     /// Viewport width and height, for matchMedia and innerWidth.
     pub viewport: (i32, i32),
+    /// Largest single allocation the host last agreed to, doubled: below
+    /// it `ops::reserve` does not ask again (a string grown one piece at
+    /// a time would otherwise ask at every piece).
+    pub reserved_up_to: usize,
 }
 
 impl<'a> Ctx<'a> {
@@ -406,6 +426,7 @@ impl<'a> Ctx<'a> {
             dirty: false,
             base_url,
             viewport,
+            reserved_up_to: 0,
         }
     }
 
@@ -513,6 +534,12 @@ impl<'a> Ctx<'a> {
         if let Some(reason) = &self.realm.halted {
             return Err(Ctrl::Halt(reason.clone()));
         }
+        // Growth that allocates no object (a loop pushing numbers) is
+        // seen here: every 64 Ki steps the host is asked about memory.
+        if self.fuel & 0xFFFF == 0 && !self.host.memory_ok() {
+            self.realm.halted = Some(String::from("memoire epuisee par les scripts de la page"));
+            return Err(Ctrl::Halt(String::from("memoire epuisee par les scripts de la page")));
+        }
         Ok(())
     }
 
@@ -615,6 +642,7 @@ impl<'a> Ctx<'a> {
                 Err(_) => {}
             }
         }
+        super::builtins::promise::report_unhandled(self);
         Ok(())
     }
 
