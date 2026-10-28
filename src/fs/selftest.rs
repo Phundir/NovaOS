@@ -1104,6 +1104,16 @@ fn novafs_in_memory(report: &mut Report, now: u64) {
     report.expect_ok("lien", v.link("/d/f", "/g", kernel, now));
     report.check("relecture par le lien", v.read_file("/g", kernel).ok().as_deref() == Some(&b"novafs"[..]));
     report.expect_error("pas d'appel par identifiant sur NovaFS", v.node_tags(1, kernel), FsError::Unsupported);
+    // 15.0.5 -- the `current` pointer of phase 15, on NovaFS: one link
+    // rewritten in place.
+    report.expect_ok("pointeur actuel", v.write_file("/current", b"un", kernel, Mode::shared_file(), now));
+    report.expect_ok("pointeur suivant", v.write_file("/next", b"deux", kernel, Mode::shared_file(), now));
+    report.expect_ok("pointeur remplace", v.retarget("/current", "/next", kernel, now));
+    report.check("le pointeur designe la version 2", v.read_file("/current", kernel).ok().as_deref() == Some(&b"deux"[..]));
+    report.check("deux liens sur le nouveau pointeur", v.stat("/next", kernel).map(|n| n.links).ok() == Some(2));
+    report.expect_ok("nom temporaire retire", v.delete("/next", kernel, now));
+    report.check("un lien reste", v.stat("/current", kernel).map(|n| n.links).ok() == Some(1));
+    report.expect_error("un dossier ne se designe pas ainsi", v.retarget("/autre", "/d", kernel, now), FsError::IsADirectory);
     report.expect_ok("coherence NovaFS", v.check());
 }
 

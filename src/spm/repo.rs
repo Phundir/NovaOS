@@ -44,11 +44,14 @@
 //!
 //! ## Transport
 //!
-//! Two schemes. `file:` reads a path of the filesystem -- a repository on
-//! a USB stick, on a second volume, or laid down by the installer.
-//! `http://` goes through the phase 6.2 TCP client with a minimal
-//! HTTP/1.0 request. The second is not exercised by the self-test, for
-//! want of a server under QEMU: written, not proven, and that is said.
+//! Three schemes. `file:` reads a path of the filesystem -- a repository
+//! on a USB stick, on a second volume, or laid down by the installer.
+//! `http://` and `https://` go through `spm::fetch`, the HTTP/1.1 and TLS
+//! client of the browser with redirects followed (phase 15; before it, a
+//! hand-made HTTP/1.0 request in clear). The network schemes are not
+//! exercised by the self-test against a real server, for want of one
+//! under QEMU: the transfer itself is, on a scripted connection
+//! (`spm::selftest_atomic`).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -205,7 +208,7 @@ pub enum RepoError {
 impl RepoError {
     pub fn message(&self) -> &'static str {
         match self {
-            RepoError::UnknownScheme => "schema d'URL non gere - file: ou http:// attendus",
+            RepoError::UnknownScheme => "schema d'URL non gere - file:, http:// ou https:// attendus",
             RepoError::NotFound => "ressource introuvable dans le depot",
             RepoError::TooLarge => "ressource plus volumineuse que la limite",
             RepoError::NetworkDown => "aucune interface reseau configuree",
@@ -381,15 +384,28 @@ fn resource_url(base: &str, path: &str) -> String {
     alloc::format!("{}/{}", base, path)
 }
 
-/// Fetches a resource, whatever the scheme.
+/// Fetches a resource, whatever the scheme (`spm::fetch`: `file:`,
+/// `http://`, `https://`).
 pub fn fetch(url: &str, limit: usize) -> Result<Vec<u8>, RepoError> {
     if let Some(path) = url.strip_prefix("file:") {
         return fetch_file(path, limit);
     }
-    if let Some(rest) = url.strip_prefix("http://") {
-        return fetch_http(rest, limit);
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(RepoError::UnknownScheme);
     }
-    Err(RepoError::UnknownScheme)
+    if !crate::net::interface().configured() {
+        return Err(RepoError::NetworkDown);
+    }
+    super::fetch::to_memory(url, limit).map_err(|message| {
+        crate::serial_println!("[spm] {} : {}", url, message);
+        if message.contains("limite") {
+            RepoError::TooLarge
+        } else if message.contains("404") {
+            RepoError::NotFound
+        } else {
+            RepoError::ConnectFailed
+        }
+    })
 }
 
 fn fetch_file(path: &str, limit: usize) -> Result<Vec<u8>, RepoError> {
@@ -399,83 +415,6 @@ fn fetch_file(path: &str, limit: usize) -> Result<Vec<u8>, RepoError> {
         return Err(RepoError::TooLarge);
     }
     Ok(bytes)
-}
-
-/// Minimal HTTP/1.0 request.
-///
-/// HTTP/1.0 and not 1.1: version 1.0 closes the connection at the end of
-/// the answer, which makes the end of the body observable without having
-/// to decode `Content-Length` or the chunking. A repository client needs
-/// nothing more, and every header one does not interpret is a header one
-/// cannot misinterpret.
-fn fetch_http(rest: &str, limit: usize) -> Result<Vec<u8>, RepoError> {
-    use crate::net::{Ipv4, tcp};
-
-    let (authority, path) = match rest.split_once('/') {
-        Some((authority, path)) => (authority, alloc::format!("/{}", path)),
-        None => (rest, String::from("/")),
-    };
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((host, port)) => (host, port.parse().unwrap_or(80)),
-        None => (authority, 80u16),
-    };
-
-    if !crate::net::interface().configured() {
-        return Err(RepoError::NetworkDown);
-    }
-
-    let address = match Ipv4::parse(host) {
-        Some(address) => address,
-        None => crate::net::dns::resolve(host).map_err(|_| RepoError::ConnectFailed)?,
-    };
-
-    let handle = tcp::connect(address, port, 5_000).map_err(|_| RepoError::ConnectFailed)?;
-
-    let request = alloc::format!(
-        "GET {} HTTP/1.0\r\nHost: {}\r\nUser-Agent: nova-spm/1\r\nConnection: close\r\n\r\n",
-        path,
-        host
-    );
-    if tcp::send(handle, request.as_bytes()).is_err() {
-        tcp::close(handle);
-        return Err(RepoError::ConnectFailed);
-    }
-
-    let mut body = Vec::new();
-    loop {
-        match tcp::recv(handle, 4096, 10_000) {
-            // An empty buffer is the end of stream, not an error: it is
-            // exactly what the close by the server produces.
-            Ok(chunk) if chunk.is_empty() => break,
-            Ok(chunk) => {
-                if body.len() + chunk.len() > limit + 8192 {
-                    tcp::close(handle);
-                    return Err(RepoError::TooLarge);
-                }
-                body.extend_from_slice(&chunk);
-            }
-            Err(_) => break,
-        }
-    }
-    tcp::close(handle);
-
-    // Headers / body split. With no empty line, the answer is not a
-    // complete HTTP answer and the body cannot be located.
-    let separator = body
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .ok_or(RepoError::Truncated)?;
-
-    let status_ok = body.starts_with(b"HTTP/1.0 200") || body.starts_with(b"HTTP/1.1 200");
-    if !status_ok {
-        return Err(RepoError::NotFound);
-    }
-
-    let content = body[separator + 4..].to_vec();
-    if content.len() > limit {
-        return Err(RepoError::TooLarge);
-    }
-    Ok(content)
 }
 
 // ============================================================

@@ -621,6 +621,28 @@ pub fn link(from: &str, to: &str, who: Credentials, now: u64) -> Result<NodeId, 
     mount.volume.link(&source, &target, who, now)
 }
 
+/// Makes entry `path` designate the file at `target`, replacing the file
+/// it designated -- atomically, so that a power cut leaves the old
+/// target or the new one (`Filesystem::retarget`). Both must be on the
+/// same volume: an entry names a node of its own table.
+///
+/// It is how phase 15 switches an application's `current` pointer: a
+/// small file naming the active version, written aside then put in
+/// place by this one step.
+pub fn retarget(path: &str, target: &str, who: Credentials, now: u64) -> Result<NodeId, FsError> {
+    let (path_letter, path_rest) = split_disk(path)?;
+    let (target_letter, target_rest) = split_disk(target)?;
+    if path_letter != target_letter {
+        return Err(FsError::InvalidPath);
+    }
+    let path = normalize(path_rest);
+    let target = normalize(target_rest);
+
+    let mut fs = FS.lock();
+    let mount = fs.find(path_letter).ok_or(FsError::NoSuchDisk)?;
+    mount.volume.retarget(&path, &target, who, now)
+}
+
 /// 4.1.3 and 4.1.4 -- Moving.
 ///
 /// Inside a volume, it is a rewriting of links: instantaneous,

@@ -291,11 +291,11 @@ fn chunked_complete(data: &[u8], offset: &mut usize) -> bool {
     }
 }
 
-/// One exchange: no redirect, no cache.
-fn exchange<N: Net>(net: &mut N, request: &Request, cookie: Option<String>, validators: Option<&Entry>) -> Result<Response, Failure> {
-    let url = &request.url;
+/// Opens a connection to the server of `url`, through TLS for `https`.
+/// Returns the stream, the security line, and the TLS session.
+fn open_stream<N: Net>(net: &mut N, url: &Url) -> Result<(Stream<N::Connection>, String, Option<Session>), Failure> {
     let connection = net.connect(&url.host, url.port)?;
-    let mut stream = if url.is_secure() {
+    let stream = if url.is_secure() {
         let now = net.now();
         let trust = net.trust();
         let mut random = |buffer: &mut [u8]| net.random(buffer);
@@ -321,6 +321,49 @@ fn exchange<N: Net>(net: &mut N, request: &Request, cookie: Option<String>, vali
         }
         Stream::Plain(_) => (String::from("connexion NON chiffree (http)"), None),
     };
+    Ok((stream, security, session))
+}
+
+/// Reads a response head: status, reason, headers (lower-case names),
+/// and the bytes of the body already received with it.
+fn read_head<C: Transport>(stream: &mut Stream<C>) -> Result<(u16, String, Vec<(String, String)>, Vec<u8>), Failure> {
+    let mut data: Vec<u8> = Vec::new();
+    let head_end = loop {
+        if let Some(position) = find_subsequence(&data, b"\r\n\r\n") {
+            break position;
+        }
+        if data.len() > 64 * 1024 {
+            return Err(Failure::from("en-tetes de reponse trop longs"));
+        }
+        let chunk = stream.read()?;
+        if chunk.is_empty() {
+            return Err(Failure::from("le serveur a ferme la connexion sans repondre"));
+        }
+        data.extend_from_slice(&chunk);
+    };
+    let head_text = String::from_utf8_lossy(&data[..head_end]).into_owned();
+    let mut lines = head_text.split("\r\n");
+    let status_line = lines.next().unwrap_or("");
+    let mut status_parts = status_line.splitn(3, ' ');
+    let version = status_parts.next().unwrap_or("");
+    if !version.starts_with("HTTP/1.") {
+        return Err(Failure::from("reponse qui n'est pas du HTTP/1.x"));
+    }
+    let status: u16 = status_parts.next().and_then(|code| code.parse().ok()).ok_or(Failure::from("code de statut illisible"))?;
+    let reason = status_parts.next().unwrap_or("").to_string();
+    let mut headers: Vec<(String, String)> = Vec::new();
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
+        }
+    }
+    Ok((status, reason, headers, data[head_end + 4..].to_vec()))
+}
+
+/// One exchange: no redirect, no cache.
+fn exchange<N: Net>(net: &mut N, request: &Request, cookie: Option<String>, validators: Option<&Entry>) -> Result<Response, Failure> {
+    let url = &request.url;
+    let (mut stream, security, session) = open_stream(net, url)?;
 
     let method = request.method.as_str();
     let mut head = format!(
@@ -369,40 +412,10 @@ fn exchange<N: Net>(net: &mut N, request: &Request, cookie: Option<String>, vali
     stream.write(&out)?;
 
     // --- the response head ---
-    let mut data: Vec<u8> = Vec::new();
-    let head_end = loop {
-        if let Some(position) = find_subsequence(&data, b"\r\n\r\n") {
-            break position;
-        }
-        if data.len() > 64 * 1024 {
-            return Err(Failure::from("en-tetes de reponse trop longs"));
-        }
-        let chunk = stream.read()?;
-        if chunk.is_empty() {
-            return Err(Failure::from("le serveur a ferme la connexion sans repondre"));
-        }
-        data.extend_from_slice(&chunk);
-    };
-    let head_text = String::from_utf8_lossy(&data[..head_end]).into_owned();
-    let mut lines = head_text.split("\r\n");
-    let status_line = lines.next().unwrap_or("");
-    let mut status_parts = status_line.splitn(3, ' ');
-    let version = status_parts.next().unwrap_or("");
-    if !version.starts_with("HTTP/1.") {
-        return Err(Failure::from("reponse qui n'est pas du HTTP/1.x"));
-    }
-    let status: u16 = status_parts.next().and_then(|code| code.parse().ok()).ok_or(Failure::from("code de statut illisible"))?;
-    let reason = status_parts.next().unwrap_or("").to_string();
-    let mut headers: Vec<(String, String)> = Vec::new();
-    for line in lines {
-        if let Some((name, value)) = line.split_once(':') {
-            headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
-        }
-    }
+    let (status, reason, headers, mut body) = read_head(&mut stream)?;
     let header = |name: &str| headers.iter().find(|(key, _)| key == name).map(|(_, value)| value.clone());
 
     // --- the body ---
-    let mut body: Vec<u8> = data[head_end + 4..].to_vec();
     let chunked = header("transfer-encoding").is_some_and(|value| value.to_ascii_lowercase().contains("chunked"));
     let length: Option<usize> = header("content-length").and_then(|value| value.parse().ok());
     let mut chunk_offset = 0usize;
@@ -579,4 +592,229 @@ pub fn fetch<N: Net, S: Store>(net: &mut N, store: &mut S, mut request: Request)
         return Ok(response);
     }
     Err(Failure::from("trop de redirections"))
+}
+
+// ============================================================
+//  Streamed download (phase 15)
+// ============================================================
+
+/// Where a streamed body goes, piece by piece.
+///
+/// `begin` is called once the final response is known (after the
+/// redirects), with the offset the body starts at: the `resume` asked
+/// for when the server honoured the range (206), zero when it sent the
+/// whole file again (200) -- the sink must then start over.
+pub trait Sink {
+    fn begin(&mut self, start: u64, total: Option<u64>) -> Result<(), String>;
+    fn write(&mut self, data: &[u8]) -> Result<(), String>;
+}
+
+/// What a download did.
+#[derive(Debug, Clone)]
+pub struct Download {
+    /// The address the body came from, after the redirects.
+    pub url: Url,
+    pub status: u16,
+    /// Where the body started (non-zero when resumed).
+    pub start: u64,
+    /// Bytes written to the sink by this call.
+    pub received: u64,
+    pub security: String,
+}
+
+/// Fetches `url` into `sink` without holding the body in memory: the
+/// way to bring a package of any size onto the disk (`MAX_BODY` bounds
+/// what the browser keeps in the heap, not this).
+///
+/// - redirects followed (GitHub release links redirect twice);
+/// - `resume`: when non-zero, asks for `Range: bytes={resume}-`, so a
+///   transfer cut halfway goes on where it stopped;
+/// - no content coding is accepted (`identity`): a package is already
+///   compressed, and decoding it in a stream would be one more parser;
+/// - `limit` bounds the total size, announced or received.
+pub fn download<N: Net, K: Sink>(net: &mut N, url: Url, resume: u64, limit: u64, sink: &mut K) -> Result<Download, Failure> {
+    let mut url = url;
+    for _ in 0..10 {
+        let (mut stream, security, _) = open_stream(net, &url)?;
+        let mut head = format!(
+            "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
+            url.target(),
+            url.authority(),
+            USER_AGENT
+        );
+        if resume > 0 {
+            head.push_str(&format!("Range: bytes={}-\r\n", resume));
+        }
+        head.push_str("\r\n");
+        stream.write(head.as_bytes())?;
+
+        let (status, _reason, headers, first) = read_head(&mut stream)?;
+        let header = |name: &str| headers.iter().find(|(key, _)| key == name).map(|(_, value)| value.as_str());
+
+        if matches!(status, 301 | 302 | 303 | 307 | 308) {
+            let location = header("location").ok_or(Failure::from("redirection sans adresse"))?;
+            url = url.join(location).ok_or(Failure::from("redirection vers une adresse invalide"))?;
+            continue;
+        }
+        let start = match status {
+            200 => 0,
+            206 if resume > 0 => {
+                // `Content-Range: bytes 1000-1999/2000`: the start must be
+                // the one asked for, or the pieces would not join.
+                let begins = header("content-range")
+                    .and_then(|value| value.strip_prefix("bytes "))
+                    .and_then(|value| value.split('-').next())
+                    .and_then(|value| value.trim().parse::<u64>().ok());
+                if begins != Some(resume) {
+                    return Err(Failure::from("reprise refusee : plage inattendue"));
+                }
+                resume
+            }
+            // The range starts at or beyond the end: nothing is missing.
+            416 if resume > 0 => {
+                if let Stream::Secure(tls) = &mut stream {
+                    tls.close();
+                }
+                return Ok(Download { url, status, start: resume, received: 0, security });
+            }
+            _ => return Err(Failure::from(format!("le serveur repond {}", status))),
+        };
+        if header("content-encoding").is_some_and(|value| !value.eq_ignore_ascii_case("identity")) {
+            return Err(Failure::from("codage de contenu non demande"));
+        }
+        let chunked = header("transfer-encoding").is_some_and(|value| value.to_ascii_lowercase().contains("chunked"));
+        let length: Option<u64> = if chunked { None } else { header("content-length").and_then(|value| value.parse().ok()) };
+        if length.is_some_and(|length| start + length > limit) {
+            return Err(Failure::from("fichier plus grand que la limite"));
+        }
+        sink.begin(start, length.map(|length| start + length))?;
+
+        let mut decoder = Dechunker::new();
+        let mut received = 0u64;
+        let mut pending = first;
+        loop {
+            let piece: Vec<u8> = if chunked {
+                let mut out = Vec::new();
+                decoder.feed(&pending, &mut out).map_err(Failure::from)?;
+                out
+            } else if let Some(length) = length {
+                let room = (length - received.min(length)) as usize;
+                pending.truncate(room);
+                core::mem::take(&mut pending)
+            } else {
+                core::mem::take(&mut pending)
+            };
+            if !piece.is_empty() {
+                if start + received + piece.len() as u64 > limit {
+                    return Err(Failure::from("fichier plus grand que la limite"));
+                }
+                sink.write(&piece)?;
+                received += piece.len() as u64;
+            }
+            let complete = if chunked { decoder.done() } else { length.is_some_and(|length| received >= length) };
+            if complete {
+                break;
+            }
+            if !net.progress(received as usize, length.unwrap_or(0) as usize) {
+                return Err(Failure::from("telechargement interrompu"));
+            }
+            pending = stream.read()?;
+            if pending.is_empty() {
+                // A close before the announced end is a cut: the caller
+                // resumes from what it has.
+                if chunked || length.is_some() {
+                    return Err(Failure::from("connexion coupee avant la fin"));
+                }
+                break;
+            }
+        }
+        if let Stream::Secure(tls) = &mut stream {
+            tls.close();
+        }
+        return Ok(Download { url, status, start, received, security });
+    }
+    Err(Failure::from("trop de redirections"))
+}
+
+/// Incremental decoder of `Transfer-Encoding: chunked` (RFC 9112, 7.1):
+/// fed whatever the network hands over, it keeps its place between calls
+/// -- a chunk header split across two reads included.
+pub struct Dechunker {
+    state: ChunkState,
+    line: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunkState {
+    /// Reading a size line.
+    Size,
+    /// Inside a chunk, this many bytes left.
+    Data(u64),
+    /// The CRLF after a chunk's data.
+    DataEnd,
+    /// Trailer lines after the last chunk, until an empty one.
+    Trailer,
+    Done,
+}
+
+impl Default for Dechunker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Dechunker {
+    pub fn new() -> Dechunker {
+        Dechunker { state: ChunkState::Size, line: Vec::new() }
+    }
+
+    pub fn done(&self) -> bool {
+        self.state == ChunkState::Done
+    }
+
+    /// Decodes `input`, appending the data to `out`. Bytes after the end
+    /// of the body are ignored.
+    pub fn feed(&mut self, input: &[u8], out: &mut Vec<u8>) -> Result<(), &'static str> {
+        let mut at = 0;
+        while at < input.len() && self.state != ChunkState::Done {
+            match self.state {
+                ChunkState::Data(left) => {
+                    let take = (left.min((input.len() - at) as u64)) as usize;
+                    out.extend_from_slice(&input[at..at + take]);
+                    at += take;
+                    let left = left - take as u64;
+                    self.state = if left == 0 { ChunkState::DataEnd } else { ChunkState::Data(left) };
+                }
+                ChunkState::Size | ChunkState::DataEnd | ChunkState::Trailer => {
+                    let byte = input[at];
+                    at += 1;
+                    if byte != b'\n' {
+                        if self.line.len() > 1024 {
+                            return Err("ligne de bloc trop longue");
+                        }
+                        self.line.push(byte);
+                        continue;
+                    }
+                    if self.line.last() == Some(&b'\r') {
+                        self.line.pop();
+                    }
+                    let line = core::mem::take(&mut self.line);
+                    self.state = match self.state {
+                        ChunkState::DataEnd if line.is_empty() => ChunkState::Size,
+                        ChunkState::DataEnd => return Err("bloc mal termine"),
+                        ChunkState::Trailer if line.is_empty() => ChunkState::Done,
+                        ChunkState::Trailer => ChunkState::Trailer,
+                        _ => {
+                            let text = core::str::from_utf8(&line).map_err(|_| "taille de bloc illisible")?;
+                            let size_text = text.split(';').next().unwrap_or("").trim();
+                            let size = u64::from_str_radix(size_text, 16).map_err(|_| "taille de bloc illisible")?;
+                            if size == 0 { ChunkState::Trailer } else { ChunkState::Data(size) }
+                        }
+                    };
+                }
+                ChunkState::Done => {}
+            }
+        }
+        Ok(())
+    }
 }

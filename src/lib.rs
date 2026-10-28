@@ -30,6 +30,7 @@ pub mod idt;
 pub mod init;
 pub mod ioapic;
 pub mod ipc;
+pub mod json;
 pub mod linux;
 pub mod posix;
 pub mod memory;
@@ -282,6 +283,14 @@ pub extern "C" fn kernel_main(multiboot_phys: u64) -> ! {
                 disks.iter().map(|d| d.capacity_mib()).sum::<u64>()
             );
             vga::set_color(Color::LightGray, Color::Black);
+            // 15.0.3 -- the ENTERPRISE authorities an administrator
+            // trusts, before anything signed is loaded.
+            let authorities = binfmt::signature::load_authorities();
+            kprintln!(
+                "[sign] {} autorite(s) ENTERPRISE de confiance ({})",
+                authorities,
+                binfmt::signature::AUTHORITIES_PATH
+            );
         }
         Err(error) => {
             vga::set_color(Color::LightRed, Color::Black);

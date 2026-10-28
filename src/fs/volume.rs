@@ -1307,6 +1307,83 @@ impl Volume {
         Ok(node.id)
     }
 
+    /// Makes entry `path` designate the node at `target` (phase 15).
+    ///
+    /// When the entry exists, its slot is rewritten **in place**: one
+    /// 128-byte link in one block, so the medium holds either the old
+    /// target or the new one -- NovaFS has no journal, and this is the one
+    /// replacement it can make atomic. The link counts follow: +1 on the
+    /// new node, -1 on the old (freed with its last link).
+    pub fn retarget(&mut self, path: &str, target: &str, who: Credentials, now: u64)
+    -> Result<NodeId, FsError> {
+        let node = self.resolve(target, who)?;
+        // Files only, as on LIFS: the two formats answer the same.
+        if node.is_directory() {
+            return Err(FsError::IsADirectory);
+        }
+        self.require(&node, who, Permissions::LINK, target)?;
+
+        let (mut parent, name) = self.resolve_parent(path, who)?;
+        self.require(&parent, who, Permissions::WRITE, path)?;
+
+        let Some(previous) = self.find_link(&parent, &name)? else {
+            self.insert_link(&mut parent, &name, node.id, now)?;
+            let mut node = self.read_node(node.id)?;
+            node.links += 1;
+            self.write_node(&node)?;
+            self.flush()?;
+            return Ok(node.id);
+        };
+        if previous == node.id {
+            return Ok(node.id);
+        }
+        let mut old = self.read_node(previous)?;
+        if old.is_directory() {
+            return Err(FsError::IsADirectory);
+        }
+        self.require(&old, who, Permissions::DELETE, path)?;
+
+        self.set_link_target(&mut parent, &name, node.id, now)?;
+
+        let mut node = self.read_node(node.id)?;
+        node.links += 1;
+        self.write_node(&node)?;
+
+        old.links = old.links.saturating_sub(1);
+        if old.links == 0 {
+            self.release_node(&old)?;
+        } else {
+            self.write_node(&old)?;
+        }
+        self.flush()?;
+        Ok(node.id)
+    }
+
+    /// Rewrites the node field of entry `name`, keeping its slot.
+    fn set_link_target(&mut self, parent: &mut Node, name: &str, target: NodeId, now: u64)
+    -> Result<(), FsError> {
+        for logical in 0..parent.block_count() {
+            let Some(block) = self.map_block(parent, logical)? else {
+                continue;
+            };
+            let found = self.cache.inspect(block, |data| {
+                (0..LINKS_PER_BLOCK).find(|slot| {
+                    slot_named(&data[slot * LINK_SIZE..(slot + 1) * LINK_SIZE], name.as_bytes()).is_some()
+                })
+            })?;
+            if let Some(slot) = found {
+                self.cache.modify(block, |data| {
+                    let at = slot * LINK_SIZE + super::format::NAME_MAX;
+                    data[at..at + 8].copy_from_slice(&target.to_le_bytes());
+                })?;
+                parent.modified = now;
+                self.write_node(parent)?;
+                return Ok(());
+            }
+        }
+        Err(FsError::NotFound)
+    }
+
     /// Copies a file inside the volume.
     ///
     /// 4.1.4 -- It really copies the data, which is only indispensable

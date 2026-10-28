@@ -3735,14 +3735,17 @@ recommandation déjà écrite ici le 24 septembre, et consignés dans
 4. **Emplacement.** `{racine}/{app_id}/versions/{version}/`, où la racine
    est celle du §4.3 pour le type (`/sysapp`, `/apps`, `/games`, `/ras`) ;
    pendant l'installation, `versions/{version}.tmp/`.
-5. **Le pointeur actif est un lien Tag de dossier** : l'entrée
-   `{racine}/{app_id}/current` désigne le nœud du dossier de la version
-   active (le §5.1 permet `link` sur un dossier). Un chemin
-   `.../current/app.cus` se résout sans lire de fichier pointeur. Basculer,
-   c'est **remplacer le nœud désigné par une entrée existante en une
-   opération** (`fs::relink`, 15.0.5) : une transaction du journal sur
+5. **Le pointeur actif est un petit fichier** `{racine}/{app_id}/current`
+   qui nomme la version active. Basculer, c'est écrire le nouveau à côté
+   (`current.nouveau`) puis **remplacer l'entrée `current` en une
+   opération** (`fs::retarget`, 15.0.5) : une transaction du journal sur
    LIFS, l'écriture d'une seule entrée sur NovaFS. L'ancien ou le nouveau,
-   jamais aucun.
+   jamais aucun. Un lien Tag de dossier, envisagé d'abord, a été écarté :
+   un processus de la version 1 qui ouvre encore ses fichiers par
+   `current/...` après la bascule lirait ceux de la version 2 (Firefox
+   charge ses bibliothèques au fil de l'eau) ; avec un pointeur lu au
+   lancement, chaque processus reçoit le chemin absolu de **sa** version.
+   Et LIFS ne nomme un dossier qu'une fois, ce qui l'exempte de cycles.
 6. **Fichiers projetés.** Un processus garde ses fichiers par nœud, pas par
    chemin ; la suppression d'une version attend qu'**aucun processus**
    lancé depuis elle ne vive (tous ses processus, pas un PID).
@@ -3777,8 +3780,9 @@ recommandation déjà écrite ici le 24 septembre, et consignés dans
 - [ ] 15.0.4 Téléchargement HTTPS en flux (`web::http`) : redirections, corps
   écrit par morceaux dans un fichier, sans plafond de 4 Mio, reprise par
   `Range` après coupure
-- [ ] 15.0.5 `fs::relink` : remplacement atomique du nœud désigné par une
-  entrée (LIFS : une transaction ; NovaFS : une entrée) ; coupure simulée
+- [ ] 15.0.5 `fs::retarget` : remplacement atomique du fichier désigné par
+  une entrée (LIFS : une transaction ; NovaFS : une entrée) ; coupure
+  simulée
 
 #### 15.1 Spécification et décisions
 - [x] 15.1.1 Les dix points ci-dessus (mandat d'autonomie du 28 octobre)
@@ -3795,7 +3799,7 @@ recommandation déjà écrite ici le 24 septembre, et consignés dans
 #### 15.3 Installation atomique
 - [ ] 15.3.1 Téléchargement dans `versions/{version}.tmp`, empreinte,
   signature, niveau §10.4, puis renommage en `versions/{version}`
-- [ ] 15.3.2 Bascule de `current` par `fs::relink`
+- [ ] 15.3.2 Bascule de `current` par `fs::retarget`
 - [ ] 15.3.3 Coupure à chaque étape : au redémarrage, l'ancienne version
   active et le `.tmp` purgé, ou la nouvelle active — jamais d'application
   cassée

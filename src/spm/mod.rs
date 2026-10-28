@@ -32,6 +32,7 @@
 //! | `db`      | database of installed packages, file list per package |
 //! | `manager` | 8.2 -- the seven commands of 10.3 |
 //! | `repo`    | 8.3 -- repository index, transport, checking on receipt |
+//! | `fetch`   | 15.0.4 -- `file:`, `http://`, `https://`, to memory or disk |
 //! | `update`  | 8.4 -- 11.1 types, `updater.dsa` service |
 //! | `rollback`| 8.5 -- slots, boot validation, snapshots |
 //!
@@ -44,6 +45,7 @@
 //! `execute` will not change by a line: it already expects a string.
 
 pub mod db;
+pub mod fetch;
 pub mod manager;
 pub mod package;
 pub mod repo;

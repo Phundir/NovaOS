@@ -381,6 +381,44 @@ impl Filesystem for Volume {
         Ok(record.id)
     }
 
+    /// The entry is replaced inside one transaction of the journal: the
+    /// removal of the old entry, the addition of the new one, the link
+    /// counts and the reverse index commit together or not at all (no
+    /// commit happens in the middle of an operation, DECISIONS, phase 14).
+    ///
+    /// Files only, on both sides: a LIFS directory is named exactly once
+    /// (`check_volume`), which is what keeps its tree free of cycles.
+    fn retarget(&mut self, path: &str, target: &str, who: Credentials, now: u64) -> Result<NodeId, FsError> {
+        self.commit_if_full()?;
+        let node = self.walk(target, who)?;
+        if node.is_dir() {
+            return Err(FsError::IsADirectory);
+        }
+        self.require(&node, who, Permissions::LINK, target)?;
+        let (parent, name) = self.walk_parent(path, who)?;
+        self.require(&parent, who, Permissions::WRITE, path)?;
+        let previous = self.lookup(&parent, &name)?.map(|(_, id)| id);
+        if previous == Some(node.id) {
+            return Ok(node.id);
+        }
+        if let Some(previous) = previous {
+            let old = self.load_record(previous)?;
+            if old.is_dir() {
+                return Err(FsError::IsADirectory);
+            }
+            self.require(&old, who, Permissions::DELETE, path)?;
+            self.remove_entry(parent.id, &name, now)?;
+        }
+        self.add_entry(parent.id, &name, node.id, now)?;
+        let mut record = self.load_record(node.id)?;
+        record.links += 1;
+        self.save_record(&record)?;
+        if let Some(previous) = previous {
+            self.unlink_node(previous)?;
+        }
+        Ok(node.id)
+    }
+
     /// Inside a LIFS volume, a copy is a **clone** (spec 4.5): a new node
     /// sharing the extents, in time independent of the size.
     fn copy(&mut self, from: &str, to: &str, who: Credentials, now: u64) -> Result<NodeId, FsError> {

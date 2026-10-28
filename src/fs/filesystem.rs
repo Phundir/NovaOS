@@ -82,6 +82,14 @@ pub trait Filesystem: Send {
     fn move_entry(&mut self, from: &str, to: &str, who: Credentials, now: u64) -> Result<NodeId, FsError>;
     fn move_entries(&mut self, moves: &[(String, String)], who: Credentials, now: u64) -> Result<usize, (usize, FsError)>;
     fn link(&mut self, from: &str, to: &str, who: Credentials, now: u64) -> Result<NodeId, FsError>;
+    /// Makes entry `path` designate the **file** at `target`, in one step:
+    /// created if absent, **replaced** if present -- the previous file
+    /// loses that Tag (and goes with its last). A power cut leaves the old
+    /// target or the new one, never no entry (phase 15: the `current`
+    /// pointer of an application). Rights: `link` on the target, `write`
+    /// on the parent, `delete` on a replaced node. Directories are
+    /// refused on either side (`IsADirectory`).
+    fn retarget(&mut self, path: &str, target: &str, who: Credentials, now: u64) -> Result<NodeId, FsError>;
     fn copy(&mut self, from: &str, to: &str, who: Credentials, now: u64) -> Result<NodeId, FsError>;
     fn stat(&mut self, path: &str, who: Credentials) -> Result<Node, FsError>;
     fn chmod(&mut self, path: &str, mode: Mode, who: Credentials, now: u64) -> Result<(), FsError>;
@@ -236,6 +244,10 @@ impl Filesystem for Volume {
 
     fn link(&mut self, from: &str, to: &str, who: Credentials, now: u64) -> Result<NodeId, FsError> {
         Volume::link(self, from, to, who, now)
+    }
+
+    fn retarget(&mut self, path: &str, target: &str, who: Credentials, now: u64) -> Result<NodeId, FsError> {
+        Volume::retarget(self, path, target, who, now)
     }
 
     fn copy(&mut self, from: &str, to: &str, who: Credentials, now: u64) -> Result<NodeId, FsError> {

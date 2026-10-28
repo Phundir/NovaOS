@@ -443,6 +443,96 @@ fn power_cuts(report: &mut Report, now: u64) {
 }
 
 // ============================================================
+//  15.0.5 -- replacing an entry atomically (the `current` pointer)
+// ============================================================
+
+/// Which version `/current` names: 1, 2, or `None` (no readable entry --
+/// the state a power cut must never leave).
+fn current_version(volume: &mut Volume) -> Option<u8> {
+    match Filesystem::read_file(volume, "/current", KERNEL).ok()?.as_slice() {
+        b"version 1" => Some(1),
+        b"version 2" => Some(2),
+        _ => None,
+    }
+}
+
+/// The switch of phase 15: the new pointer, written aside, takes the
+/// place of the old in one step; its temporary name goes.
+fn switch_pointer(volume: &mut Volume, now: u64) -> Result<(), FsError> {
+    Filesystem::retarget(volume, "/current", "/next", KERNEL, now)?;
+    Filesystem::delete(volume, "/next", KERNEL, now)?;
+    Filesystem::flush(volume)
+}
+
+fn retarget_cuts(report: &mut Report, now: u64) {
+    crate::serial_println!("[lifs] --- pointeur de version remplace atomiquement (15.0.5) ---");
+    let blocks = 4096;
+    let disk = SparseDisk::new(blocks);
+    let Some(mut volume) = report.ok("formatage du volume d'essai", Volume::format(disk.cache(), "pointeur", 0, now)) else {
+        return;
+    };
+    report.ok("pointeur actuel", Filesystem::write_file(&mut volume, "/current", b"version 1", KERNEL, Mode::shared_file(), now));
+    report.ok("pointeur suivant", Filesystem::write_file(&mut volume, "/next", b"version 2", KERNEL, Mode::shared_file(), now));
+    report.ok("dossier", Filesystem::create_path(&mut volume, "/d", KERNEL, Mode::shared_dir(), now));
+    report.check(
+        "un dossier ne se designe pas ainsi",
+        Filesystem::retarget(&mut volume, "/autre", "/d", KERNEL, now) == Err(FsError::IsADirectory),
+    );
+    report.ok("validation", Filesystem::flush(&mut volume));
+    drop(volume);
+    let image = disk.snapshot();
+
+    let whole = SparseDisk::from(image.clone(), blocks);
+    let total = match Volume::mount(whole.cache()) {
+        Ok(mut v) => {
+            let free_before = v.sb.free_blocks;
+            report.ok("bascule sans coupure", switch_pointer(&mut v, now));
+            report.check("le pointeur designe la version 2", current_version(&mut v) == Some(2));
+            report.check("le nom temporaire est parti", Filesystem::stat(&mut v, "/next", KERNEL).is_err());
+            report.check("l'ancien pointeur est libere avec son dernier lien", v.sb.free_blocks >= free_before);
+            whole.writes()
+        }
+        Err(error) => {
+            report.check(error.message(), false);
+            return;
+        }
+    };
+
+    let mut states = [0usize; 2];
+    let mut broken = 0usize;
+    for cut in 0..=total {
+        let trial = SparseDisk::from(image.clone(), blocks);
+        trial.cut_after(cut);
+        if let Ok(mut v) = Volume::mount(trial.cache()) {
+            let _ = switch_pointer(&mut v, now);
+        }
+        trial.restore_power();
+        match Volume::mount(trial.cache()) {
+            Ok(mut v) => match (v.check_volume().is_ok(), current_version(&mut v)) {
+                (true, Some(version)) => states[version as usize - 1] += 1,
+                _ => {
+                    broken += 1;
+                    crate::serial_println!("[lifs] ECHEC : coupure apres {} ecriture(s) - pointeur illisible", cut);
+                }
+            },
+            Err(error) => {
+                broken += 1;
+                crate::serial_println!("[lifs] ECHEC : coupure apres {} ecriture(s) - {}", cut, error.message());
+            }
+        }
+    }
+    crate::serial_println!(
+        "[lifs]   {} coupures pendant la bascule : {} sur l'ancienne version, {} sur la nouvelle, {} sans pointeur",
+        total + 1,
+        states[0],
+        states[1],
+        broken
+    );
+    report.check("une coupure laisse l'ancienne ou la nouvelle version", broken == 0);
+    report.check("les deux issues atteintes", states.iter().all(|n| *n > 0));
+}
+
+// ============================================================
 //  14.0.4 -- writing a GPT, and a LIFS in a partition
 // ============================================================
 
@@ -549,6 +639,7 @@ pub fn run(now: u64) -> (usize, usize) {
     clone_and_tags(&mut report, now);
     grow_and_shrink(&mut report, now);
     power_cuts(&mut report, now);
+    retarget_cuts(&mut report, now);
     partitions(&mut report, now);
     crate::serial_println!("[lifs] autotest termine : {} reussites, {} echecs", report.passed, report.failed);
     (report.passed, report.failed)
