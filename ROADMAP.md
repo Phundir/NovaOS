@@ -28,7 +28,7 @@ x86_64, GRUB/Multiboot2.
 | Phase 13 — Pile graphique Nova et accélération GPU | 🔧 faite hors Firefox, à valider | Spec acceptée (24 septembre) ; pilote virtio-gpu 3D, anneau Venus, encodeur généré et vérifié (68 commandes), cœur GPU, écran et plan curseur au cœur, compositeur sur le GPU (égal au pixel près au processeur), `SYS_GPU_*`, bibliothèques C et Rust, modules `.kmd` signés, délai de garde éprouvé ; 75 vérifications ; aucune case cochée (validation de l'utilisateur attendue) ; Firefox (13.0, 13.9-13.10, 13.11.1) reporté par l'utilisateur |
 | Phase 14 — LIFS (nouveau type de partition, liens CoW et Tag) | 🔧 implémentée, à valider | Décisions 14.1 prises (24 septembre) ; GPT/MBR, partitions montées une lettre chacune, racine LIFS, plus aucun formatage implicite ; LIFS (arbres B+, étendues, clones CoW, Tag, index inverse, journal) ; `SYS_FS_NODE_*` ; `tools/lifs.py` et reprise NovaFS → LIFS ; 81 vérifications LIFS dont 32 coupures simulées ; aucune case cochée (validation de l'utilisateur attendue) |
 | Phase 15 — Mises à jour atomiques des applications | ✅ faite (28 octobre 2026) | Proposition de l'utilisateur du 24 septembre 2026 ; points 15.1 tranchés sous mandat d'autonomie ; JSON, Ed25519 (ENTERPRISE enfin signé), HTTPS en flux, pointeur atomique, registre signé, versions à part, lancement par le pointeur, nettoyage différé, `spm.dsa` ; 70 vérifications ; reste 15.6.2 (canal par application dans l'interface) et 15.7.3 partiel |
-| Phase 16 — Langages et outils (fin de la phase 9) | 🔄 en cours | 16.0 (shell, terminal, recovery), 16.1 (moteur JavaScript, 95 cas vérifiés contre Node 22) et 16.2 (DOM et scripts du navigateur, 30 cas vérifiés contre jsdom + 12 vérifications du navigateur) faites le 28 octobre 2026 ; restent la ligne Node/Bun du §13.2, Python, C, Java, débogueur de `dev run --debug` |
+| Phase 16 — Langages et outils (fin de la phase 9) | 🔄 en cours | 16.0 (shell, terminal, recovery), 16.1 (moteur JavaScript, 95 cas vérifiés contre Node 22) et 16.2 (DOM et scripts du navigateur, 30 cas vérifiés contre jsdom + 12 vérifications du navigateur) et 16.3.1 (`dev interpret main.js`, sorties comparées à Node 22) faites le 28 octobre 2026 ; restent modules ES et TypeScript, Python, C, Java, débogueur de `dev run --debug` |
 | Phase 17 — Reliquats système de fichiers et POSIX | 📝 planifiée | Ce que les phases 12 et 14 ont laissé ouvert hors Firefox : page de temps, autotest appel par appel, `copy_file_range`/clonage, Tag dans l'explorateur, GPT de secours, partitionneur |
 | Phase 18 — Firefox sur la pile Nova | ⏸ chez l'auteur | 12.5, 12.7, 12.8, 13.0, 13.9, 13.10, 13.11.1 : demandent la construction du fork et le GPU de la machine de l'auteur |
 
@@ -46,9 +46,10 @@ cochées sur 229.** Les sept restantes sont toutes en phase 9, et elles
 sont nommées juste en dessous. Il ne reste donc **plus de case à ouvrir**
 — seulement des limites à lever, listées phase par phase plus bas.
 
-**Prochaine étape : 16.3, `dev interpret main.js`** ; la phase 15 et
-les étapes 16.0 (shell, terminal, recovery), 16.1 (moteur JavaScript) et
-16.2 (scripts du navigateur intégré) sont faites (28 octobre 2026).
+**Prochaine étape : 16.3.2, modules ES et TypeScript** ; la phase 15 et
+les étapes 16.0 (shell, terminal, recovery), 16.1 (moteur JavaScript),
+16.2 (scripts du navigateur intégré) et 16.3.1 (`dev interpret main.js`)
+sont faites (28 octobre 2026).
 (L'ancien choix « un espace d'adressage par processus » ou « élargir le
 sous-ensemble Rust » est derrière nous : les espaces privés sont faits
 depuis 11.3, et le reste de la phase 9 forme la phase 16.)
@@ -4073,9 +4074,62 @@ Ce qu'il y a derrière :
   et jette des nœuds sans fin atteint `html::MAX_NODES` (60 000).
 - Les minuteries d'un onglet en arrière-plan attendent qu'il revienne.
 #### 16.3 Node et Bun (§13.2)
-- [ ] 16.3.1 `dev interpret main.js` : le moteur Nova, `console`, `require`
+- [x] 16.3.1 `dev interpret main.js` : le moteur Nova, `console`, `require`
   de modules locaux, `fs` sur `SYS_FS_*` ; la colonne « compilateur »
   reste ETR
+- [ ] 16.3.2 Modules ES (`import`/`export`, `.mjs`) et TypeScript à types
+  effacés (`.ts`, la ligne Bun) sur le même moteur
+
+**Validation de 16.3.1 (28 octobre 2026, sous mandat d'autonomie).**
+Relevés de `make test` (4 cœurs, deux démarrages), `make test-smp1`,
+`make test-novga` et `make test-recovery`, tous verts ; dans chacun des
+journaux de démarrage :
+
+```
+[sched] tache 89 "dev-js" (.cus) assignee au coeur 2 - pile de 1024 Kio
+[test] phase 16.3 validee - 15 verifications de dev interpret (Node)
+```
+
+- `sdk/js/` (nouveau) : `mod.rs` (hôte, `require`, exécution), `node.rs`
+  (`fs`, `path`, `os`, `util`, `events`, `process`), `selftest.rs`.
+  `require` résout comme Node un chemin relatif (fichier, `.js`,
+  `.json`, `index.js`), exécute chaque module une fois dans l'enveloppe
+  `(exports, require, module, __filename, __dirname)`, laisse un cycle
+  voir les exports partiels, retire du cache un module qui a échoué ;
+  `require.main`, `module.id === "."` pour le programme. Un nom nu qui
+  n'est pas intégré est une erreur nommée (pas de npm).
+- Le script tourne dans sa tâche (`dev-js`, pile de 1 Mio), avec les
+  droits que l'appelant donne — ceux de la session pour `dev interpret`,
+  ceux de ROOT sur la console de recovery. Après le programme, la file
+  des tâches puis les minuteries, l'horloge sautant à la suivante :
+  `setTimeout(…, 100)` ne fait pas attendre 100 ms.
+- La ligne Node.js de `sdk::runtime` passe à `Support::Interpreted` ;
+  `dev interpret` affiche la console, l'arrêt éventuel, le code de sortie
+  et le nombre de modules.
+- L'autotest écrit trois programmes sur le volume et compare leur sortie,
+  **ligne à ligne, à celle de Node 22 sur les mêmes fichiers** : modules
+  locaux et JSON, cache, `fs` (écriture, ajout, lecture, `ENOENT`,
+  répertoires), `path`, `EventEmitter`, `argv`, microtâches, minuterie,
+  `process.exit(3)`, cycle de `require`, module qui échoue deux fois,
+  `stdout.write` en morceaux, `setInterval`, `await`, `nextTick`,
+  `process.exitCode`, exception non rattrapée (code 1, la minuterie
+  armée ne part pas). Puis `dev interpret` par la ligne de commande.
+- **Écart trouvé par la comparaison avec Node** : un `nextTick` écrit
+  après une fonction `async` qui attend passait après l'attente. C'est
+  la limite connue de 16.1 (`await` attend sur place) ; le test garde ce
+  que les deux font pareil, et la limite reste ouverte ci-dessous.
+
+**Ce qui reste ouvert dans la 16.3.1**
+- `await` attend sur place et les générateurs s'exécutent d'un bloc
+  (16.1) : le code écrit après l'appel d'une fonction `async` qui attend
+  s'exécute après l'attente, quand Node l'exécute avant.
+- `fs` synchrone seulement (ni rappels, ni promesses, ni flux) ; pas de
+  `child_process`, `net`, `http`, `Buffer` ; `path.join` normalise un
+  chemin relatif qui remonte au-delà de son début (`../x` devient `x`).
+- Une exception dans une minuterie ne termine pas le programme (Node
+  s'arrête) : elle est rapportée et le code de sortie vaut 1.
+- Le répertoire courant du script est celui du programme, pas celui du
+  shell.
 #### 16.4 Débogueur (9.1.3)
 - [ ] 16.4.1 `dev run --debug` : points d'arrêt (`int3`), pas à pas (TF),
   registres, mémoire, pile d'appels, sur le programme du bac à sable

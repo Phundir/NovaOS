@@ -842,6 +842,13 @@ fn task_js_selftest() -> ! {
             dom_passed + dom_failed + browser_passed + browser_failed
         );
     }
+    // 16.3: `dev interpret main.js`, programs checked against Node.
+    let (node_passed, node_failed) = sdk::js::selftest::run();
+    if node_failed == 0 {
+        serial_println!("[test] phase 16.3 validee - {} verifications de dev interpret (Node)", node_passed);
+    } else {
+        serial_println!("[test] phase 16.3 ECHEC - {} verifications incorrectes sur {}", node_failed, node_passed + node_failed);
+    }
     selftest_done()
 }
 

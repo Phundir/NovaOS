@@ -8,6 +8,33 @@ a été observé, reste dans `ROADMAP.md` ; les décisions dans `DECISIONS.md`.
 Schéma de version : `0.{phase}.{correctif}` — la phase est la dernière de
 la roadmap dont le code est complet.
 
+## [0.15.4] — 2026-10-28
+
+Phase 16.3.1 : `dev interpret main.js`, des programmes Node sur le moteur
+de Nova.
+
+### Ajouté
+
+- **`dev interpret` pour JavaScript** (`sdk::js`) : `require` de modules
+  locaux (`.js`, `.json`, `index.js`, cache, cycles, nouvel essai après
+  échec), `module`, `exports`, `require.main`, `__filename`,
+  `__dirname` ; modules intégrés `fs` (synchrone, sur `SYS_FS_*`, avec
+  les droits de la session), `path`, `os`, `util`, `events` ; `process`
+  (`argv`, `env`, `exit`, `exitCode`, `cwd`, `nextTick`,
+  `stdout.write`). Le script tourne dans sa propre tâche (pile de
+  1 Mio) ; les minuteries s'exécutent sans attente réelle.
+- La ligne Node.js du §13.2 passe à « interprété » ; la colonne
+  compilateur reste ETR.
+- Autotest 16.3 : trois programmes dont la sortie est comparée ligne à
+  ligne à celle de Node 22, puis `dev interpret` par la ligne de commande
+  (`[test] phase 16.3 validee`).
+
+### Limites connues
+
+- `await` attend sur place (16.1) : le code écrit après l'appel d'une
+  fonction `async` qui attend s'exécute après l'attente.
+- Ni modules ES (`import`/`export`), ni TypeScript : c'est 16.3.2.
+
 ## [0.15.3] — 2026-10-28
 
 Phase 16.2 : le navigateur intégré exécute les scripts des pages.

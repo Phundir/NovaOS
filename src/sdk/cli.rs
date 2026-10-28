@@ -218,6 +218,8 @@ pub enum Output {
     Interpreted(script::Run),
     /// `dev interpret` on a `.rs`: the Rust interpreter of 9.5.1.
     InterpretedRust(rustc::Interpreted),
+    /// `dev interpret` on a `.js`: Nova's JavaScript engine (16.3).
+    InterpretedJs(super::js::JsRun),
     Packaged(PackageReport),
     Converted(ConvertReport),
     Cleaned {
@@ -331,6 +333,14 @@ impl Output {
                     },
                     run.steps
                 ));
+                lines
+            }
+            Output::InterpretedJs(run) => {
+                let mut lines: Vec<String> = run.output.iter().map(|line| alloc::format!("  {}", line)).collect();
+                if let Some(error) = &run.error {
+                    lines.push(alloc::format!("arret : {}", error));
+                }
+                lines.push(alloc::format!("code de sortie : {} - {} module(s)", run.exit_code, run.modules));
                 lines
             }
             Output::Packaged(report) => alloc::vec![
@@ -1025,8 +1035,15 @@ fn interpret(command: &Command) -> Result<Output, DevError> {
         return Err(DevError::NoInterpreter(language));
     }
 
+    // JavaScript (16.3) reads its own files, its modules with them, in a
+    // task with the stack the engine needs.
+    if language == Language::Node {
+        let arguments: Vec<String> = command.positional.iter().skip(1).map(|a| String::from(*a)).collect();
+        let run = super::js::run_file(&path, &arguments, super::js::session_rights()).map_err(DevError::BadCommand)?;
+        return Ok(Output::InterpretedJs(run));
+    }
     let source = read_text(&path)?;
-    // The two interpreters the SDK carries. Nova Script is the one added
+    // The other interpreters the SDK carries. Nova Script is the one added
     // outside 13.2 in 9.1.4; Rust is the "interpreter" column of 13.2
     // itself, answered by 9.5.1.
     if language == Language::Rust {

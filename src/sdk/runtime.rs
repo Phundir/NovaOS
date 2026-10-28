@@ -278,7 +278,10 @@ pub static TABLE: &[RuntimeSpec] = &[
         targets: APP_ONLY,
         system_required: NONE_FORMATS,
         extensions: &["js", "mjs"],
-        support: Support::Delegated,
+        // The interpreter column, since 16.3: Nova's own engine
+        // (`sdk::js`), not the V8 the table names. The compiler column
+        // stays what ETR does (`dev convertir`).
+        support: Support::Interpreted,
         directory: "node",
     },
     RuntimeSpec {

@@ -4466,6 +4466,46 @@ quittée. **À ne pas réintroduire** : toute libération d'une tâche doit
 attendre que son cœur ait fini de la quitter, pas seulement qu'il en ait
 élu une autre.
 
+## `dev interpret` pour JavaScript (phase 16.3) — décisions
+
+### Le moteur du navigateur, pas un V8
+
+Le §13.2 nomme « V8 allégé » pour la colonne interprète de Node.js. Un V8
+n'existe pas ici et n'y viendra pas sans la chaîne de Firefox (phase
+18) ; le moteur de 16.1, déjà éprouvé contre Node, sert. La ligne de
+`sdk::runtime` dit `Support::Interpreted` et le commentaire dit pourquoi
+le libellé « V8 allege » reste celui de la spec. La colonne compilateur
+reste ETR.
+
+### Les droits viennent de l'appelant
+
+`sdk::js::run_file(chemin, arguments, droits)` : `dev interpret` passe
+ceux de la session (ROOT sur la console de recovery, qui n'en a pas),
+l'autotest ceux du noyau. Un script est du code que l'utilisateur a
+écrit ou téléchargé : il lit et écrit ce que l'utilisateur peut, rien de
+plus. Les droits vivent dans un statique le temps de l'exécution, ce que
+permet `BUSY` (un script à la fois) ; `dev` lit le reste du projet avec
+les droits du noyau, comme avant.
+
+### Une tâche à soi, et l'horloge qui saute
+
+Le moteur garde 96 Kio de pile sous lui ; le shell en a 128 en tout. Le
+script tourne donc dans `dev-js` (1 Mio) et l'appelant attend sa fin.
+Après le programme, la file des tâches puis les minuteries, l'horloge
+virtuelle sautant à la prochaine échéance : un `setTimeout` de dix
+secondes ne fait pas attendre dix secondes, et un `setInterval` jamais
+arrêté finit par une erreur nommée au bout de 100 000 tours au lieu de
+tourner sans fin.
+
+### Node comme témoin, encore
+
+Les attentes de l'autotest sont ce que Node 22 imprime pour les mêmes
+fichiers, ligne à ligne. La comparaison a montré la limite de 16.1 sous
+un jour nouveau : un `process.nextTick` écrit après l'appel d'une
+fonction `async` qui attend passe, ici, après l'attente. Le test ne
+masque pas l'écart, il s'en tient à ce que les deux font pareil ; la
+limite est écrite dans la roadmap.
+
 ---
 
 ## 4. Invariants à ne jamais casser

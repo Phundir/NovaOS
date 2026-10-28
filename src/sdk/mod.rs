@@ -53,6 +53,7 @@ pub mod asm;
 pub mod cli;
 pub mod emit;
 pub mod etr;
+pub mod js;
 pub mod libdev;
 pub mod manifest;
 pub mod runtime;

@@ -414,6 +414,10 @@ nova-os/
 │   │   ├── etr.rs             AST JavaScript, correspondances, seuil 70 % (9.6)
 │   │   ├── libdev.rs          Catalogue des abstractions (9.4.3)
 │   │   ├── cli.rs             Les six verbes du §15.2 (9.1)
+│   │   ├── js/                dev interpret main.js (16.3)
+│   │   │   ├── mod.rs         Hote, require, tache dev-js, droits
+│   │   │   ├── node.rs        fs, path, os, util, events, process
+│   │   │   └── selftest.rs    Trois programmes compares a Node 22
 │   │   ├── rustc/             Compilateur et interprète Rust (9.5.1)
 │   │   │   ├── mod.rs         Sous-ensemble, appels integres, pipeline
 │   │   │   ├── lex.rs         Jetons, lignes portees, refus a vue
@@ -2432,6 +2436,30 @@ tick -> ScriptPage::timers -> apply(Outcome) : relayout, navigation,
 | `DomState::wrappers` | l'objet de chaque nœud vu par un script (identité, propriétés ajoutées) |
 | `net::fetch_now` | requête d'un script, dans la tâche de la fenêtre (entrée de job pour la progression) |
 | `stockage-local.txt` | `localStorage` par origine, enregistré avec les cookies |
+
+## 11 quindecies. `dev interpret main.js` (phase 16.3)
+
+```
+dev interpret a.js x y (cli::interpret, tache du shell, pile 128 Kio)
+  -> js::run_file(chemin, arguments, droits de la session)
+       BUSY (un script a la fois), RIGHTS, JOB
+       spawn "dev-js" (pile 1 Mio) ; wait_for
+  dev-js : run_here
+       royaume neuf, builtins::install, node::install_process
+       load_module(main) : cache["/chemin"] = module, enveloppe
+         (exports, require, module, __filename, __dirname)
+         require -> builtin_module (fs, path, os, util, events)
+                 -> resolve_module (fichier, .js, .json, index.js)
+       drain : file des taches, puis minuteries (l'horloge saute)
+       flush stdout, process.exitCode -> JsRun
+```
+
+| Où | Quoi |
+|---|---|
+| `private_key("modules")` sur le global | le cache des modules : chemins absolus, et `\0builtin:nom` pour les intégrés |
+| `private_key("main")` | le module du programme (`require.main`, `module.id === "."`) |
+| `private_key("stdout")` | ce que `process.stdout.write` a laissé sans fin de ligne |
+| `js::RIGHTS` | les droits des appels `fs` de l'exécution en cours |
 
 ## 12. Points d'extension immédiats
 
