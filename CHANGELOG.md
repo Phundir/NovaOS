@@ -8,6 +8,55 @@ a été observé, reste dans `ROADMAP.md` ; les décisions dans `DECISIONS.md`.
 Schéma de version : `0.{phase}.{correctif}` — la phase est la dernière de
 la roadmap dont le code est complet.
 
+## [0.15.0] — 2026-10-28
+
+Phase 15 : mises à jour atomiques des applications (proposition de
+l'auteur du 24 septembre 2026), et les fondations qu'elle partage avec la
+suite.
+
+### Ajouté
+
+- **Registre de manifestes** (spec §10.5) : un manifeste JSON par
+  application, sur GitHub, un serveur ou un dossier ; canaux `release`,
+  `beta`, `test` ; manifeste **signé Ed25519** par la clé du registre ;
+  paquet téléchargé vérifié (taille, SHA-256) puis contrôlé comme tout
+  paquet. `spm registry add`, `spm install <app> [--canal beta]`,
+  `spm update <app>`, `spm rollback <app>`, `spm canal`.
+- **Installation atomique** : chaque version dans
+  `{racine}/{app}/versions/{v}/`, écrite en `.tmp`, scellée, puis rendue
+  active par le pointeur `current` remplacé en une opération du système
+  de fichiers. Une coupure laisse l'ancienne version ou la nouvelle.
+- **Lancement par le pointeur** : le menu et l'explorateur lancent les
+  applications installées par SPM (binaires Nova et images liées) ; un
+  processus garde sa version après une mise à jour.
+- **Nettoyage** : une version ni active, ni précédente, est supprimée à la
+  fin de son dernier processus ; purge au démarrage.
+- **`spm.dsa`** : seul écrivain des applications ; une application demande
+  `verifier` ou `installer` sur le canal `spm.update`, pour elle-même
+  seulement. `updater.dsa` vérifie aussi les applications (code 2 en
+  silence, les autres notifiés).
+- Onglet **« Mises a jour »** des paramètres : canal par défaut,
+  vérification automatique, applications installées, registres.
+- **Ed25519** (RFC 8032) ; **ENTERPRISE est enfin une vraie signature** :
+  certificats de binaires v2, paquets v2, modules `.kmd` v2, autorités de
+  confiance dans `/sys/config/autorites.cfg`, dates de validité contrôlées.
+  `tools/novasign.py` (clés, signature des manifestes).
+- **JSON** (`src/json.rs`), **téléchargement HTTPS en flux** (redirections,
+  reprise par `Range`, sans limite de 4 Mio) ; les dépôts d'index de la
+  phase 8 passent aussi en HTTPS.
+- `fs::retarget` : remplacement atomique d'une entrée (LIFS et NovaFS).
+
+### Corrigé
+
+- Autotest de la phase 7 : la zone endommagée lue sous le verrou du commit
+  (faux échec un démarrage sur dix).
+
+### Limites connues
+
+- Aucun registre réel éprouvé sous QEMU (cycle complet sur un registre
+  `file:`, transfert HTTPS sur connexion scriptée).
+- Canal par application : par commande seulement.
+
 ## [0.14.0] — 2026-10-28
 
 Première version publiée : l'état du système au terme des phases 1 à 14.

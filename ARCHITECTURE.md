@@ -1,7 +1,7 @@
 # Nova OS — Architecture du code
 
-État au terme de la phase 6 (couche OS : pilotes, réseau, audio, ports
-internes, services de démarrage). Ce document décrit **ce qui existe**,
+État au terme de la phase 15 (mises à jour atomiques des applications),
+le 28 octobre 2026. Ce document décrit **ce qui existe**,
 pas ce qui est prévu — pour cela, voir `ROADMAP.md`.
 
 À mettre à jour quand la structure change : nouveau module, nouvelle région
@@ -40,6 +40,8 @@ nova-os/
 │   │                          import d'une arborescence (mise à jour en place
 │   │                          si elle y est déjà), put d'un fichier, ls, cat,
 │   │                          reprise v1→v2 (volumes NovaFS d'avant la phase 14)
+│   ├── boot-test.py           Démarrage sans fenêtre jugé (make test, CI)
+│   ├── novasign.py            Ed25519 de l'hôte : clés d'autorité, manifestes
 │   ├── lifs.py                LIFS depuis l'hôte : table GPT (create, table),
 │   │                          formatage, import, put, ls, cat, check, reprise
 │   │                          NovaFS → LIFS (from-novafs) ; délègue à nova-fs.py
@@ -65,6 +67,8 @@ nova-os/
 │
 ├── src/
 │   ├── lib.rs                 kernel_main, tâches, orchestration du boot
+│   ├── version.rs             Version unique (Cargo.toml), commit du noyau
+│   ├── json.rs                JSON borné, sans flottant, forme canonique (15.0.1)
 │   │
 │   ├── vga.rs                 Writer VGA 80x25 + SpinLock + aiguillage 7.1
 │   ├── serial.rs              UART 16550 (COM1)
@@ -239,10 +243,13 @@ nova-os/
 │   │
 │   ├── fpu.rs                 SSE en ring 3, image FXSAVE initiale (11.2)
 │   │
-│   ├── crypto/                Primitives du client TLS
+│   ├── crypto/                Primitives du client TLS et des signatures
 │   │   ├── sha2.rs hmac.rs    SHA-256/384/512, HMAC, HKDF
 │   │   ├── aes.rs chacha.rs   AES-GCM, ChaCha20-Poly1305
 │   │   ├── x25519.rs ecc.rs   X25519, P-256/P-384 (ECDH, ECDSA)
+│   │   ├── field25519.rs      GF(2^255-19), partagé par X25519 et Ed25519
+│   │   ├── ed25519.rs         Signatures Ed25519 (RFC 8032) : ENTERPRISE,
+│   │   │                      paquets, modules, manifestes (phase 15)
 │   │   ├── rsa.rs bignum.rs   Verification RSA PKCS #1 v1.5 et PSS
 │   │   └── selftest.rs        Vecteurs publies, au demarrage
 │   ├── process.rs             Process, BinaryType, State, affinité
@@ -351,16 +358,24 @@ nova-os/
 │   │   ├── descriptor.rs      Descripteurs USB, décodés champ par champ
 │   │   └── hid.rs             Rapports de pointage, relatif et absolu
 │   │
-│   ├── spm/                   SPM et mises à jour (phase 8)
+│   ├── spm/                   SPM et mises à jour (phases 8 et 15)
 │   │   ├── mod.rs             Arborescence, dépôt local, démarrage
-│   │   ├── package.rs         Format .spm, manifest, codes 10.2, niveaux 10.4
+│   │   ├── package.rs         Format .spm (v2), manifest, codes 10.2, niveaux 10.4
 │   │   ├── script.rs          Scripts pre/post, confinés au préfixe (8.1.3)
 │   │   ├── db.rs              Base des paquets installés, portées, fichiers
-│   │   ├── manager.rs         Les sept commandes du §10.3 (8.2)
-│   │   ├── repo.rs            Index de dépôt, file:/http://, sceau (8.3)
-│   │   ├── update.rs          Types §11.1, service updater.dsa (8.4)
+│   │   ├── manager.rs         Commandes du §10.3 ; accept / lay_down partagés
+│   │   ├── repo.rs            Index de dépôt (phase 8), sceau (8.3)
+│   │   ├── fetch.rs           file:, http://, https:// vers la mémoire ou un
+│   │   │                      fichier, repris par Range (15.0.4)
+│   │   ├── registry.rs        Manifestes JSON signés, canaux, téléchargement
+│   │   │                      vérifié (15.2)
+│   │   ├── versions.rs        versions/{v}, pointeur current, lancement,
+│   │   │                      suivi des processus, nettoyage (15.3-15.5)
+│   │   ├── service.rs         spm.dsa : canal spm.update, purge (15.6)
+│   │   ├── update.rs          Types §11.1, service updater.dsa (8.4, 15.6.3)
 │   │   ├── rollback.rs        Emplacements, validation 60 s, snapshots (8.5)
-│   │   └── selftest.rs        Autotest de la phase 8
+│   │   ├── selftest.rs        Autotest de la phase 8
+│   │   └── selftest_atomic.rs Autotest de la phase 15
 │   │
 │   ├── sdk/                   SDK et langages (phase 9)
 │   │   ├── mod.rs             Arborescence, purge des bacs à sable, démarrage
@@ -2283,6 +2298,49 @@ fin des autotests du démarrage, charge les modules de
 `/sys/kernel/modules/gpu/`, puis ouvre une session sonde (`nova-sonde`)
 pour décrire la carte, et publie le périphérique.
 
+## 11 duodecies. Mises à jour atomiques des applications (phase 15)
+
+### D'un manifeste à un processus
+
+```
+registre (file:, https://)          spm.dsa / spm update / updater.dsa
+  {app_id}.json  --fetch-->  registry::decode  (Ed25519 de la clé du registre,
+                                               app_id, canal choisi)
+  paquet.spm     --fetch::to_file--> {racine}/{app}/telechargement-{v}.spm
+                                     (repris par Range, empreinte et taille)
+                 --manager::accept--> analyse, signature §3.2, §10.4, dépendances
+                 --manager::lay_down-> versions/{v}.tmp/   (scripts confinés)
+                 --fs::rename-------> versions/{v}/
+                 --versions::switch-> current.nouveau puis fs::retarget(current)
+                                      previous <- l'ancienne
+lanceur / explorateur --apps::launch--> versions::launch_by_name
+                 lit current --> versions/{v}/{binaire} --> loader ou posix
+                 note_launch(pid, racine, v)
+spm.dsa, toutes les 10 s --> versions::tick : supprime ce qui n'est ni actif,
+                 ni précédent, ni exécuté (processus et descendants)
+```
+
+### Disposition d'une application versionnée
+
+| Chemin | Rôle |
+|---|---|
+| `{racine}/{app}/versions/{v}/` | une version complète : binaire, ressources, `manifeste.cfg` |
+| `{racine}/{app}/versions/{v}.tmp/` | une version en cours d'écriture (purgée si elle traîne) |
+| `{racine}/{app}/current` | le pointeur : la version active, en texte |
+| `{racine}/{app}/previous` | la version d'un `spm rollback` |
+| `/sys/tools/spm/registres.cfg` | `nom|url|clé` par registre |
+| `/sys/config/spm-canaux.cfg` | `defaut=release`, `{app}=beta` |
+| `/sys/config/autorites.cfg` | autorités ENTERPRISE de confiance (`nom clé`) |
+
+### Signatures (15.0.3)
+
+| Objet | Format | Message signé |
+|---|---|---|
+| Binaire | certificat v2 (0x78 clé, 0x98 signature) | `NOVA-BIN\0` ‖ champs 0x00..0x98 ‖ empreinte |
+| Paquet | en-tête v2 de 320 octets (0xC0 signature, 0x100 clé) | `NOVA-SPM\0` ‖ empreinte |
+| Module `.kmd` | conteneur v2 (144 clé, 176 signature) | `NOVA-KMD\0` ‖ clé ‖ empreinte |
+| Manifeste | membre `signature` | `NOVA-REG\0` ‖ JSON canonique sans `signature` |
+
 ## 12. Points d'extension immédiats
 
 - `loader::RESIDENT` → `SYS_PROC_WAIT` (5.3.3) y trouvera l'image à libérer
@@ -2290,8 +2348,8 @@ pour décrire la carte, et publie le périphérique.
 - `signature::SYSTEM_DIGESTS` et `ENTERPRISE_ROOTS` → tables vides à la
   compilation, alimentées dynamiquement par l'autotest. La construction de
   l'image système (phase 9.1.5) les remplira réellement.
-- `signature::expected_binding` → à remplacer par une vérification Ed25519 le
-  jour où ENTERPRISE doit devenir une preuve et non une déclaration.
+- ~~`signature::expected_binding`~~ → remplacé en phase 15 par
+  `signature::check_enterprise` (Ed25519).
 - `identity::Permissions::ceiling()` → 10.3.4 s'en servira pour le sandbox
   à l'exécution, pas seulement à l'analyse.
 - `fs::read_file` / `write_file` / `list` / `stat` → base directe du domaine

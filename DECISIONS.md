@@ -4120,6 +4120,111 @@ l'ISO de `build/dist/`** (`TEST_ISO`), puis le tag et la release, notes
 tirées de `CHANGELOG.md`. Une version suffixée part en pré-release. La
 release n'est donc jamais une ISO que personne n'a vue démarrer.
 
+
+## Mises à jour atomiques des applications (phase 15) — décisions
+
+### Les dix points de 15.1 sont tranchés sous mandat d'autonomie (28 octobre 2026)
+
+L'utilisateur a demandé de continuer « en total autonomie ». Chaque point
+prend la recommandation écrite dans la roadmap le 24 septembre ; le
+détail est dans ROADMAP, phase 15, « Points tranchés ». Révisables par
+l'utilisateur. Écart assumé au texte proposé : la version **précédente**
+est gardée pour le retour arrière (le texte supprimait l'ancienne dès la
+fin de son processus), comme le §11.3 le fait pour l'OS.
+
+### Le pointeur actif est un fichier, pas un lien de dossier
+
+Première idée : `current` lien Tag vers le dossier de la version, pour
+que `current/app.cus` se résolve sans rien lire. Écartée pour deux
+raisons. **Un processus de la version 1 qui ouvre encore ses fichiers
+par `current/...` après la bascule lirait ceux de la version 2** (Firefox
+charge ses bibliothèques au fil de l'eau) : mélange de versions dans un
+même processus. Et **LIFS ne nomme un dossier qu'une fois**
+(`check_volume` : « dossier nommé deux fois ») : c'est ce qui garantit
+l'absence de cycles, et le reverse index ne remonte que par le premier
+parent. Le pointeur est donc un petit fichier lu au lancement ;
+`fs::retarget` refuse les dossiers des deux côtés, sur LIFS comme sur
+NovaFS.
+
+### `fs::retarget` : une opération, donc une transaction
+
+Sur LIFS, aucune validation n'a lieu au milieu d'une opération (phase
+14) : retrait de l'ancienne entrée, ajout de la nouvelle, comptes de
+liens et index inverse sont dans la même transaction. Sur NovaFS, sans
+journal, le champ nœud de l'entrée est réécrit **en place** (une entrée
+de 128 octets dans un bloc). Éprouvé : 17 coupures pendant la bascule,
+11 laissent l'ancienne version, 6 la nouvelle, aucune sans pointeur.
+
+### La clé de confiance d'un registre est celle de sa déclaration
+
+Un manifeste porte la clé qui l'a signé ; elle n'est comparée qu'à celle
+enregistrée par `spm registry add`, jamais crue pour elle-même —
+n'importe qui peut signer un manifeste avec sa propre clé. Et un
+manifeste valide d'une autre application est refusé : un registre ne
+peut pas servir le manifeste de A à qui demande B.
+
+### Un JSON aux clés en double est refusé
+
+RFC 8259 laisse leur sens ouvert ; les implémentations divergent (la
+première, la dernière). Pour un document signé, c'est une attaque : le
+signataire lit une valeur, l'installateur une autre. `json::parse`
+refuse. La forme canonique (compacte, membres triés par octets UTF-8)
+est celle de `tools/novasign.py` (`json.dumps(sort_keys=True,
+separators=(",", ":"), ensure_ascii=False)`) ; un flottant y est refusé,
+le noyau gardant le texte des nombres et Python le réécrivant.
+
+### Un registre qui ne connaît pas une application n'est pas un refus
+
+Trouvé par `make test` au second démarrage : un registre resté déclaré
+(voir ci-dessous) sans manifeste pour `test.spm.exemple` faisait échouer
+`spm install test.spm.exemple` de la phase 8, au lieu de passer aux
+dépôts d'index. `registry::resolve` distingue désormais : une lecture
+impossible (absent, réseau) = « inconnu ici », on demande ailleurs ; un
+manifeste présent qui échoue ses contrôles = refus, rapporté.
+
+### Un autotest qui purge doit valider avant son verdict
+
+LIFS valide par groupe toutes les 2 s. `make test` arrête QEMU dès le
+dernier verdict : une purge écrite juste avant n'était pas validée, et le
+démarrage suivant retrouvait le registre de l'autotest. Comportement
+correct du système de fichiers (« une coupure perd au plus les dernières
+secondes ») ; c'est l'autotest qui doit `flush_all` avant d'imprimer.
+
+### ENTERPRISE, version 2 de trois formats
+
+Certificat des binaires (v2, même bloc de 256 octets : clé publique en
+0x78, signature de 64 octets en 0x98), en-tête des paquets (v2 : 320
+octets, signature en 0xC0, clé en 0x100 ; la v1 reste lue pour SELF et
+SYSTEM), conteneur `.kmd` (v2 pour ENTERPRISE seulement : signature en
+176..240, `test-gpu.kmd` SYSTEM inchangé). Étiquettes de domaine
+distinctes pour qu'une signature de binaire ne vaille pas pour un paquet.
+**L'autorité de démonstration** des autotests a une graine tirée à chaque
+démarrage : une graine écrite dans le source aurait recréé, avec une
+vraie signature, l'autorité falsifiable que cette version supprime.
+
+### Le téléchargement va là où il sera repris
+
+Un paquet se télécharge dans la racine de l'application
+(`telechargement-{v}.spm`, hors de `versions/`) quand elle est déjà
+versionnée, dans `/sys/updates/` sinon ; il est **repris** par `Range`
+après une coupure, et supprimé après l'installation comme après un refus.
+Aucun codage de contenu n'est demandé (`identity`) : un paquet est déjà
+compressé, et décoder en flux serait un analyseur de plus.
+
+### Limites de la phase 15, connues
+
+- `installer` sur `spm.update` télécharge **dans la tâche du service** :
+  une autre requête attend la fin du transfert.
+- Le choix du canal se fait par commande (`spm canal`, `--canal`) ; pas
+  encore d'onglet dans les paramètres.
+- Le suivi des processus d'une version remonte les parents (64 niveaux) :
+  un processus qui changerait de parent (adoption par `init.dsa` après la
+  mort du sien) sortirait du compte. Les tâches de Nova gardent le PID de
+  leur parent même mort : le cas ne se produit pas aujourd'hui.
+- Aucun registre réel (GitHub) n'est éprouvé sous QEMU : le transfert
+  HTTPS l'est sur une connexion scriptée, le cycle complet sur un registre
+  `file:`.
+
 ---
 
 ## 4. Invariants à ne jamais casser
@@ -4379,6 +4484,13 @@ release n'est donc jamais une ISO que personne n'a vue démarrer.
 - **Aucune page de module .kmd n'est à la fois modifiable et exécutable**,
   et aucune de ses instructions ne s'exécute avant la vérification de sa
   signature.
+- **Une coupure pendant la bascule d'un pointeur `current` laisse
+  l'ancienne version ou la nouvelle, jamais aucune** (`[lifs] N coupures
+  pendant la bascule : ..., 0 sans pointeur`).
+- **Une mise à jour refusée ne laisse rien** : ni dossier de version, ni
+  `.tmp`, ni téléchargement (autotest de la phase 15, quatre causes).
+- **Une application ne demande que pour elle-même** sur `spm.update` ;
+  son identité est la racine depuis laquelle SPM l'a lancée.
 - **Le compositeur sur le GPU donne les mêmes pixels que sur le
   processeur** : `composition ... 0 pixel(s) differents du processeur` à
   chaque démarrage avec GPU.

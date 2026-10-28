@@ -23,12 +23,13 @@ Microkernel · GRUB / Multiboot2 · SMP · aucune dépendance externe dans le no
 4. [Commandes](#commandes)
 5. [Tester](#tester)
 6. [Ce que contient le système](#ce-que-contient-le-système)
-7. [Architecture](#architecture)
-8. [État d'avancement](#état-davancement)
-9. [Versions et publication](#versions-et-publication)
-10. [Documents de référence](#documents-de-référence)
-11. [Contribuer](#contribuer)
-12. [Organisation du dépôt](#organisation-du-dépôt)
+7. [Publier une application](#publier-une-application)
+8. [Architecture](#architecture)
+9. [État d'avancement](#état-davancement)
+10. [Versions et publication](#versions-et-publication)
+11. [Documents de référence](#documents-de-référence)
+12. [Contribuer](#contribuer)
+13. [Organisation du dépôt](#organisation-du-dépôt)
 
 ---
 
@@ -46,7 +47,7 @@ Quelques chiffres :
 | | |
 |---|---|
 | Code Rust | ~173 000 lignes, **zéro dépendance** (seuls `core`, `alloc`, `compiler_builtins`) |
-| Autotests au démarrage | ~2 000 vérifications, jugées automatiquement à chaque commit |
+| Autotests au démarrage | ~2 100 vérifications, jugées automatiquement à chaque commit |
 | Cœurs | 1 à 8 (SMP, affinité par type de binaire) |
 | Démarrage complet sous émulation | ~20 s jusqu'au dernier verdict d'autotest |
 
@@ -245,7 +246,7 @@ avant de considérer un changement comme fini :
 | `.cus` | Applications courantes | 4 |
 | `.ras` | Accès total, isolé de tout, pour les tests | 5 |
 
-Signatures à trois niveaux (SYSTEM, ENTERPRISE, SELF), `AppIdentity`
+Signatures à trois niveaux (SYSTEM, ENTERPRISE en Ed25519, SELF), `AppIdentity`
 immuable, permissions déclarées dans l'en-tête, bac à sable par type
 (§12.4), invite d'autorisation mémorisable, images liées ELF (§3.5) et
 modules de pilote signés `.kmd` (§3.6).
@@ -309,9 +310,55 @@ en rendu logiciel.
   Linux. Sous-système Linux et chargeur PE pour la compatibilité.
 - **SPM** : paquets `.spm` signés, dépôts, quatre codes de mise à jour,
   mises à jour de l'OS avec retour arrière automatique.
+- **Mises à jour atomiques des applications** : registres de manifestes
+  JSON signés (GitHub, serveur ou dossier), canaux `release`/`beta`/`test`,
+  chaque version dans son dossier, bascule par un pointeur remplacé en une
+  opération, ancienne version gardée tant qu'elle tourne, retour arrière.
 - **SDK `dev`** : gabarits, `dev.toml`, bac à sable, assembleur x86_64,
   compilateur d'un sous-ensemble de **Rust** vers x86_64, interprète Nova
   Script, convertisseur Electron → natif (ETR).
+
+---
+
+## Publier une application
+
+Une application se publie dans un **registre** : un dossier servi tel quel
+(dépôt GitHub lu par `raw.githubusercontent.com`, GitHub Pages, tout
+serveur, ou un dossier local), qui contient un manifeste JSON signé par
+application et ses paquets `.spm`.
+
+```bash
+tools/novasign.py keygen registre.seed          # une fois : la clé du registre
+```
+
+```json
+{
+  "app_name": "Mon application",
+  "app_id": "org.exemple.monapp",
+  "current_stable_version": "1.2.0",
+  "channels": {
+    "release": { "version": "1.2.0", "code": 0, "size": 48213,
+                 "checksum": "sha256-<empreinte du .spm>",
+                 "download_url": "monapp-1.2.0.spm" }
+  }
+}
+```
+
+```bash
+tools/novasign.py sign-manifest registre.seed org.exemple.monapp.json
+```
+
+Côté Nova, une fois (dans un terminal, phase 16 ; d'ici là la même ligne
+passe par `spm::manager::execute`) :
+
+```text
+spm registry add exemple https://raw.githubusercontent.com/<compte>/<depot>/main <cle publique>
+spm install org.exemple.monapp
+```
+
+Ensuite `spm update org.exemple.monapp` (ou `updater.dsa`, toutes les
+24 h) installe chaque nouvelle version à côté de l'ancienne et bascule
+d'un coup ; `spm rollback` revient à la précédente. Détail : spec §10.5.
 
 ---
 
@@ -364,7 +411,10 @@ d'interruption, appels système, invariants — est dans
 | 12 | Navigateur natif (libc Nova) | 🔧 à valider |
 | 13 | Pile graphique Nova et GPU | 🔧 à valider |
 | 14 | LIFS et partitions | 🔧 à valider |
-| 15+ | Voir [`ROADMAP.md`](ROADMAP.md) | 📝 |
+| 15 | Mises à jour atomiques des applications, Ed25519 | ✅ |
+| 16 | Langages et outils (JavaScript, Python, C, Java, débogueur) | 📝 |
+| 17 | Reliquats système de fichiers et POSIX | 📝 |
+| 18 | Firefox sur la pile Nova (machine de l'auteur) | ⏸ |
 
 Le détail, case par case, avec ce qui a été observé et sous quelles
 conditions, est dans [`ROADMAP.md`](ROADMAP.md) ; les limites connues y

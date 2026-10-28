@@ -966,6 +966,71 @@ spm repo add <url>               # ajoute un dépôt tiers
 | SELF + tout type | Non vérifié | Avertissement jaune |
 | Aucune + `.ras` | Dangereux | Avertissement rouge bloquant |
 
+### 10.5 Registre de manifestes et mises à jour atomiques (extension du 28 octobre 2026, phase 15)
+
+Proposition de l'auteur du 24 septembre 2026 (`propositions/mises-a-jour.md`),
+points ouverts tranchés le 28 octobre 2026 (ROADMAP, phase 15).
+
+**Registre.** Un emplacement statique — dépôt GitHub lu par
+`raw.githubusercontent.com`, GitHub Pages, tout serveur `https://` ou
+`http://`, ou un dossier `file:` — qui porte un **manifeste JSON par
+application**, `{base}/{app_id}.json` :
+
+```json
+{ "app_name": "...", "app_id": "...", "current_stable_version": "1.2.0",
+  "channels": {
+    "release": { "version": "1.2.0", "code": 0, "size": 12345,
+                 "checksum": "sha256-<64 hex>", "download_url": "app-1.2.0.spm" },
+    "beta": { ... }, "test": { ... } },
+  "signature": { "cle": "<64 hex>", "ed25519": "<128 hex>" } }
+```
+
+- `download_url` désigne un paquet `.spm` (§10.1), absolu ou relatif au
+  registre ; `code` est le code de mise à jour du §10.2.
+- Le manifeste est **signé en Ed25519** par la clé du registre, sur
+  `"NOVA-REG\0" ‖ forme canonique` (JSON compact, membres triés, sans le
+  membre `signature`). La clé de confiance est celle enregistrée à l'ajout
+  du registre (`spm registry add <nom> <url> <clé>`,
+  `/sys/tools/spm/registres.cfg`), jamais celle que le manifeste annonce ;
+  un manifeste qui décrit une autre application est refusé.
+- Le paquet téléchargé doit avoir la taille et l'empreinte annoncées, puis
+  passe les contrôles de toute installation (§3.2, §10.4). Un refus ne
+  laisse rien sur le disque.
+
+**Canaux.** `release` (par défaut), `beta`, `test`, par application
+(`/sys/config/spm-canaux.cfg`, `spm canal <app|defaut> <canal>`, ou
+`spm install <app> --canal beta`). Passer à un canal plus ancien ne
+rétrograde qu'à la demande (`--retrograder`).
+
+**Installation atomique.** Chaque version s'installe dans son propre
+dossier : `{racine}/{app_id}/versions/{version}/`, `{racine}` étant celle du
+§4.3 pour le type (ou `/users/{user}/apps`). Elle est écrite dans
+`{version}.tmp`, renommée une fois complète, puis rendue active par le
+**pointeur** `{racine}/{app_id}/current`, un petit fichier qui nomme la
+version : le nouveau est écrit à côté puis remplace l'ancien en une seule
+opération du système de fichiers. Une coupure laisse l'ancienne version ou
+la nouvelle, jamais aucune. `{racine}/{app_id}/previous` nomme la version
+précédente, gardée pour `spm rollback <app>`.
+
+**Lancement et nettoyage.** Le lanceur lit le pointeur **au lancement** et
+donne au processus le chemin de sa version : un processus déjà lancé garde
+la sienne après une mise à jour. Une version qui n'est ni active, ni
+précédente, est supprimée dès qu'aucun processus lancé depuis elle (ni
+aucun de leurs descendants) ne vit ; au démarrage, tout ce qui n'est ni
+actif ni précédent est purgé, `.tmp` compris.
+
+**Rôles.** Seul le gestionnaire système (`spm.dsa`) écrit les dossiers
+d'applications. Une application peut seulement demander, sur le canal IPC
+`spm.update`, `verifier <app_id>` ou `installer <app_id>`, **pour
+elle-même** : son identité est l'application depuis laquelle elle a été
+lancée, pas ce qu'elle déclare. `updater.dsa` vérifie les manifestes avec
+les mises à jour de l'OS (§11.2) : code 2 installé en silence, les autres
+notifiés selon le §10.2.
+
+**Frontière avec le §11.** Ce mécanisme couvre les applications installées
+par SPM. Le noyau et ce qui est compilé avec lui (applications intégrées,
+navigateur intégré) suivent le §11 : partition A/B et redémarrage.
+
 ---
 
 ## 11. Mises à Jour de l'OS
