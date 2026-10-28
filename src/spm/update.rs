@@ -160,10 +160,11 @@ impl OsUpdateKind {
 
 /// Version of the OS produced by this build.
 ///
-/// Hard-coded for want of a build system that generates it. It is what
-/// decides whether a repository offers "better": a wrong value would
-/// either miss every update, or offer them again without end.
-pub const OS_VERSION: [u16; 4] = [0, 8, 0, 1];
+/// Taken from `Cargo.toml` through `crate::version`, the field the
+/// release workflow tags. It is what decides whether a repository offers
+/// "better": a wrong value would either miss every update, or offer them
+/// again without end.
+pub const OS_VERSION: [u16; 4] = crate::version::NUMBERS;
 
 /// Name of the file a fetched update is dropped under.
 pub fn staging_name(version: &[u16; 4]) -> String {

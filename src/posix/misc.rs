@@ -30,7 +30,7 @@ pub fn uname(t: &Arc<Thread>, buf: u64) -> LxResult<u64> {
     // struct utsname: six fields of 65 bytes.
     let fields = match t.process.abi {
         super::Abi::Linux => ["Linux", "nova", "6.6.0-nova", "#1 SMP Nova OS", "x86_64", "(none)"],
-        super::Abi::Nova => ["Nova", "nova", "12.0", "#1 SMP Nova OS", "x86_64", "(none)"],
+        super::Abi::Nova => ["Nova", "nova", crate::version::VERSION, "#1 SMP Nova OS", "x86_64", "(none)"],
     };
     let mut out = [0u8; 65 * 6];
     for (i, f) in fields.iter().enumerate() {

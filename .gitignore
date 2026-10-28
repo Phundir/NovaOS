@@ -2,3 +2,5 @@
 disks/
 /build/
 /iso/boot/*.bin
+__pycache__/
+*.pyc

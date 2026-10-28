@@ -4,8 +4,8 @@ description: Faire le point sur l'etat du projet en debut de session
 
 Reprise de contexte. Lire dans cet ordre :
 
-1. `docs/ROADMAP.md` — tableau d'avancement et limites connues
-2. `docs/ARCHITECTURE.md` — carte du code actuel
+1. `ROADMAP.md` — tableau d'avancement et limites connues
+2. `ARCHITECTURE.md` — carte du code actuel
 3. Sortie de `git log --oneline -10`
 
 Puis produire un point court, en prose, couvrant :

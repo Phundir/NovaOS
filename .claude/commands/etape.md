@@ -7,12 +7,12 @@ Etape demandee : $ARGUMENTS (si vide, prendre la premiere case non cochee).
 
 Deroulement impose :
 
-1. Lire `docs/ROADMAP.md` et identifier precisement l'etape a traiter.
-2. Lire les sections de `docs/SPECIFICATION.md` que cette etape reference.
+1. Lire `ROADMAP.md` et identifier precisement l'etape a traiter.
+2. Lire les sections de `SPECIFICATION.md` que cette etape reference.
    Citer les numeros de section consultes.
-3. Lire `docs/DECISIONS.md` en entier — verifier qu'aucune decision verrouillee
+3. Lire `DECISIONS.md` en entier — verifier qu'aucune decision verrouillee
    ni piege connu ne concerne ce qui va etre ecrit.
-4. Lire `docs/ARCHITECTURE.md` pour situer le code existant.
+4. Lire `ARCHITECTURE.md` pour situer le code existant.
 5. **Avant d'ecrire du code** : exposer en quelques lignes ce qui va etre fait,
    les decisions de conception non triviales et leurs raisons, et tout point ou
    la specification laisse un choix ouvert.

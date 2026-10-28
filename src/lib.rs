@@ -54,6 +54,7 @@ pub mod syscall;
 pub mod textbuf;
 pub mod usb;
 pub mod user;
+pub mod version;
 pub mod vga;
 pub mod vm;
 pub mod web;
@@ -1172,13 +1173,18 @@ fn init_interrupts() {
 
 fn banner(boot: &BootInfo) {
     let (label, color) = match boot.mode {
-        BootMode::Normal => ("Nova OS booted", Color::LightGreen),
-        BootMode::Recovery => ("Nova OS booted - RECOVERY", Color::Yellow),
-        BootMode::Debug => ("Nova OS booted - DEBUG", Color::LightCyan),
+        BootMode::Normal => ("", Color::LightGreen),
+        BootMode::Recovery => (" - RECOVERY", Color::Yellow),
+        BootMode::Debug => (" - DEBUG", Color::LightCyan),
     };
 
     vga::set_color(color, Color::Black);
-    kprintln!("{}", label);
+    kprintln!(
+        "Nova OS {} ({}) booted{}",
+        version::VERSION,
+        version::COMMIT,
+        label
+    );
 
     vga::set_color(Color::LightGray, Color::Black);
     kprintln!(
