@@ -524,56 +524,80 @@ fn node_and_links(report: &mut Report, now: u64) {
     // --- file of several blocks ---
     // Passes the mark of the direct blocks and forces the use of the
     // indirection block: the code path is not the same.
-    let free_before = free_blocks();
+    //
+    // The file exists, short, before the free count is read: creating it
+    // inserts a node and a directory entry, and on LIFS that insertion
+    // may split a tree and take a block for good -- which is growth of the
+    // directory, not a leak of the file. That is how the check failed on
+    // the second boot of a fresh disk, the trees being fuller.
+    //
+    // Other self-tests write on the same volume at the same time (SPM,
+    // the explorer): one of their blocks taken between the two readings
+    // looks like a leak too. A leak is systematic and noise is not, so the
+    // cycle is tried three times and passes if one of them is exact.
     let large: Vec<u8> = (0..80_000u32).map(|i| (i % 251) as u8).collect();
-    report.expect_ok(
-        "ecriture d'un fichier de 80 Kio (indirection)",
-        super::write_file(
-            "/cache/autotest/documents/gros.bin",
-            &large,
-            admin,
-            Mode::private_file(),
-            now,
-        ),
-    );
-    let reread = super::read_file("/cache/autotest/documents/gros.bin", admin);
-    report.check(
-        "relecture d'un fichier a indirection",
-        reread.as_deref() == Ok(&large[..]),
-    );
-
-    // --- truncation ---
-    report.expect_ok(
-        "reecriture plus courte",
-        super::write_file(
+    let mut exact = false;
+    let mut last = (0, 0);
+    for attempt in 0..3 {
+        let _ = super::write_file(
             "/cache/autotest/documents/gros.bin",
             b"court",
             admin,
             Mode::private_file(),
             now,
-        ),
-    );
-    let shortened = super::read_file("/cache/autotest/documents/gros.bin", admin);
-    report.check(
-        "les blocs excedentaires sont rendus",
-        shortened.as_deref() == Ok(&b"court"[..]),
-    );
+        );
+        let free_before = free_blocks();
+        let grown = super::write_file(
+            "/cache/autotest/documents/gros.bin",
+            &large,
+            admin,
+            Mode::private_file(),
+            now,
+        );
+        if attempt == 0 {
+            report.expect_ok("ecriture d'un fichier de 80 Kio (indirection)", grown);
+            let reread = super::read_file("/cache/autotest/documents/gros.bin", admin);
+            report.check(
+                "relecture d'un fichier a indirection",
+                reread.as_deref() == Ok(&large[..]),
+            );
+        }
 
-    // The file now weighs one block: all the rest must have come back to
-    // the volume, **indirection table included**. It is that last point
-    // that was missing: it stayed marked taken without describing
-    // anything, and no walk could find it again.
-    let free_after = free_blocks();
-    report.check(
-        "la table d'indirection est rendue avec les blocs",
-        free_after + 1 == free_before,
-    );
-    if free_after + 1 != free_before {
+        // --- truncation ---
+        let shrunk = super::write_file(
+            "/cache/autotest/documents/gros.bin",
+            b"court",
+            admin,
+            Mode::private_file(),
+            now,
+        );
+        if attempt == 0 {
+            report.expect_ok("reecriture plus courte", shrunk);
+            let shortened = super::read_file("/cache/autotest/documents/gros.bin", admin);
+            report.check(
+                "les blocs excedentaires sont rendus",
+                shortened.as_deref() == Ok(&b"court"[..]),
+            );
+        }
+
+        // The file is back to one block: all the rest must have come back
+        // to the volume, **indirection table included**. It is that last
+        // point that was missing: it stayed marked taken without
+        // describing anything, and no walk could find it again.
+        let free_after = free_blocks();
+        last = (free_before, free_after);
+        if free_after == free_before {
+            exact = true;
+            break;
+        }
+    }
+    report.check("la table d'indirection est rendue avec les blocs", exact);
+    if !exact {
         crate::serial_println!(
-            "[fs]   blocs libres : {} avant, {} apres - {} manquants",
-            free_before,
-            free_after,
-            free_before.saturating_sub(free_after + 1)
+            "[fs]   blocs libres : {} avant, {} apres - ecart de {}",
+            last.0,
+            last.1,
+            last.0 as i64 - last.1 as i64
         );
     }
 

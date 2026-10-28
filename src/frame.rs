@@ -340,6 +340,30 @@ pub fn stats() -> (usize, usize, usize) {
     )
 }
 
+/// Runs `cycle` up to `attempts` times (it receives the attempt number)
+/// and tells whether one run cost no frame, with the readings of the last
+/// one: `(neutral, free before, free after)`.
+///
+/// The free count is the whole machine's. During the boot self-tests,
+/// other tasks allocate and free at the same time, and one of their
+/// frames taken inside the window reads as a leak of the code under test
+/// -- a check that failed one boot in five under emulation. A leak costs
+/// on every run; that noise does not. Self-tests that assert "everything
+/// taken is given back" go through here rather than reading `stats` twice.
+pub fn neutral_cycle(attempts: usize, mut cycle: impl FnMut(usize)) -> (bool, usize, usize) {
+    let mut last = (0, 0);
+    for attempt in 0..attempts.max(1) {
+        let before = stats().2;
+        cycle(attempt);
+        let after = stats().2;
+        last = (before, after);
+        if after >= before {
+            return (true, before, after);
+        }
+    }
+    (false, last.0, last.1)
+}
+
 /// Logs the state of the allocator and checks that the kernel is protected.
 pub fn dump_state() {
     let (total, used, free) = stats();

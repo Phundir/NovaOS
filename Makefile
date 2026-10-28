@@ -202,7 +202,7 @@ BENCH_MIB   ?= 512
 BENCH_ACCEL ?=
 BENCH_PORT  ?= 8000
 
-.PHONY: venus venus-check shaders kmd-test webroot nova-libc disk-migrate disk-lifs print-qemu-flags print-qemu-headless bench-net all kernel iso audio-devices run run-full run-smp run-nogui log debug debug-int clean check check-ascii police racines re prev unprev cargo-build disk disk-reset check-export run-netdump run-nonet
+.PHONY: test test-smp1 test-novga test-all dist version venus venus-check shaders kmd-test webroot nova-libc disk-migrate disk-lifs print-qemu-flags print-qemu-headless bench-net all kernel iso audio-devices run run-full run-smp run-nogui log debug debug-int clean check check-ascii police racines re prev unprev cargo-build disk disk-reset check-export run-netdump run-nonet
 
 all: iso
 
@@ -223,8 +223,12 @@ $(BUILD_DIR)/%.o: boot/%.asm | $(BUILD_DIR)
 PILE ?=
 PILE_FLAGS := $(if $(PILE),-C force-frame-pointers=yes --cfg nova_pile,)
 
+# Commit the kernel is built from, printed in the boot banner next to the
+# version of Cargo.toml (src/version.rs). Absent outside a Git checkout.
+NOVA_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null)
+
 cargo-build:
-	RUSTFLAGS="$(PILE_FLAGS)" cargo build $(CARGO_FLAGS)
+	$(if $(NOVA_COMMIT),NOVA_COMMIT=$(NOVA_COMMIT)) RUSTFLAGS="$(PILE_FLAGS)" cargo build $(CARGO_FLAGS)
 
 $(KERNEL): $(ASM_OBJ) cargo-build $(LINKER)
 	ld.lld -n -T $(LINKER) -o $@ $(ASM_OBJ) $(RUST_LIB)
@@ -452,6 +456,81 @@ run-nonet: $(ISO) $(DISK) $(MEDIA)
 bench-net: $(ISO) $(DISK) $(MEDIA)
 	BUILD_DIR=$(BUILD_DIR) BENCH_MIB=$(BENCH_MIB) BENCH_PORT=$(BENCH_PORT) BENCH_DISPLAY="$(QEMU_HEADLESS)" \
 	  tools/bench-net.sh $(QEMU) $(BENCH_ACCEL) $(QEMU_FLAGS) -smp 4
+
+# --- tests automatiques et distribution ---
+
+# Version unique du systeme : le champ de Cargo.toml (src/version.rs).
+VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+
+version:
+	@echo $(VERSION)
+
+# `make test` : demarre l'ISO sans fenetre et juge la sortie serie
+# (tools/boot-test.py) -- tous les verdicts d'autotest verts, aucune
+# panique, aucun ECHEC, aucun BOOT_ERR_. QEMU s'arrete des que le dernier
+# verdict est imprime. Le disque est le sien (build/test/), neuf a chaque
+# premier demarrage : le disque de travail (disks/) n'est jamais touche.
+# Deux demarrages sur le meme disque : le second doit le retrouver
+# (CLAUDE.md, "installation idempotente").
+TEST_DIR     := $(BUILD_DIR)/test
+TEST_DISK    := $(TEST_DIR)/nova-disk.img
+TEST_SMP     ?= 4
+TEST_MEM     ?= 2G
+TEST_TIMEOUT ?= 900
+TEST_VGA     ?= -vga virtio
+# L'ISO eprouvee : celle de build/ par defaut ; la release eprouve la
+# sienne (make test TEST_ISO=build/dist/nova-os-X.iso), sans la refaire.
+TEST_ISO     ?= $(ISO)
+TEST_FLAGS    = -cdrom $(TEST_ISO) -boot d -m $(TEST_MEM) $(QEMU_ACCEL) $(TEST_VGA) \
+                -drive id=novadisk,file=$(TEST_DISK),format=raw,if=none \
+                -device ich9-ahci,id=ahci -device ide-hd,drive=novadisk,bus=ahci.0 \
+                -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
+                -audiodev none,id=snd0 -device AC97,audiodev=snd0 \
+                -device qemu-xhci,id=xhci -device usb-tablet,bus=xhci.0 \
+                -display none -no-reboot
+TEST_EXTRA   ?=
+
+test: $(TEST_ISO)
+	@mkdir -p $(TEST_DIR)
+	@rm -f $(TEST_DISK)
+	@tools/lifs.py create $(TEST_DISK) --size 1024 --data 128 > /dev/null
+	python3 tools/boot-test.py --timeout $(TEST_TIMEOUT) --log $(TEST_DIR)/boot1-smp$(TEST_SMP).log $(TEST_EXTRA) \
+	  -- $(QEMU) $(TEST_FLAGS) -smp $(TEST_SMP)
+	python3 tools/boot-test.py --timeout $(TEST_TIMEOUT) --log $(TEST_DIR)/boot2-smp$(TEST_SMP).log $(TEST_EXTRA) \
+	  --expect '\[fs\]   demarrage n 2 ' \
+	  -- $(QEMU) $(TEST_FLAGS) -smp $(TEST_SMP)
+
+# Les variantes de CLAUDE.md : un seul coeur, aucun ecran.
+test-smp1:
+	$(MAKE) --no-print-directory test TEST_SMP=1
+
+test-novga:
+	$(MAKE) --no-print-directory test TEST_VGA="-vga none" TEST_EXTRA=--no-screen
+
+test-all: test test-smp1 test-novga
+
+# `make dist` : ce que publie une release (.github/workflows/release.yml).
+# Le noyau y est depouille de ses informations de debogage (92 -> 8 Mio) ;
+# celui de build/ les garde, pour llvm-addr2line. Le disque systeme est
+# une image GPT + LIFS vierge, compressee : `xz -d` puis
+# `-drive file=nova-disk.img,...` (README).
+DIST_DIR     := $(BUILD_DIR)/dist
+DIST_NAME    := nova-os-$(VERSION)
+OBJCOPY      ?= $(shell command -v objcopy || command -v llvm-objcopy)
+
+dist: $(KERNEL)
+	rm -rf $(DIST_DIR)
+	mkdir -p $(DIST_DIR)/iso/boot/grub
+	$(OBJCOPY) --strip-debug $(KERNEL) $(DIST_DIR)/iso/boot/nova-os.bin
+	cp $(ISO_DIR)/boot/grub/grub.cfg $(DIST_DIR)/iso/boot/grub/grub.cfg
+	grub-mkrescue -o $(DIST_DIR)/$(DIST_NAME).iso $(DIST_DIR)/iso 2> /dev/null
+	cp $(DIST_DIR)/iso/boot/nova-os.bin $(DIST_DIR)/$(DIST_NAME)-kernel.bin
+	tools/lifs.py create $(DIST_DIR)/$(DIST_NAME)-disk.img --size 2048 --data 256 > /dev/null
+	xz -T0 -9 -f $(DIST_DIR)/$(DIST_NAME)-disk.img
+	rm -rf $(DIST_DIR)/iso
+	cd $(DIST_DIR) && sha256sum $(DIST_NAME).iso $(DIST_NAME)-kernel.bin $(DIST_NAME)-disk.img.xz > SHA256SUMS
+	@echo "[ok] distribution $(VERSION) dans $(DIST_DIR)"
+	@ls -la $(DIST_DIR)
 
 # Reconstruction complete. Deux sous-make plutot que `re: clean all` :
 # make resout tout le graphe de dependances avant d'executer la moindre
