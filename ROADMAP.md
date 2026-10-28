@@ -1,6 +1,6 @@
 # Nova OS — Roadmap de développement
 
-Basée sur `docs/SPECIFICATION.md` v1.0. Environnement : CachyOS, Rust nightly,
+Basée sur `SPECIFICATION.md` v1.0. Environnement : CachyOS, Rust nightly,
 x86_64, GRUB/Multiboot2.
 
 > **Ce fichier se met à jour à chaque fin d'étape**, après validation par la
@@ -27,7 +27,10 @@ x86_64, GRUB/Multiboot2.
 | Phase 12 — Navigateur natif (libc Nova) | 🔧 implémentée, à valider | Navigateur en `.cus` sur la libc Nova ; objets du noyau sortis de `src/linux/` vers `src/posix/` (23 septembre, soir) ; aucune case cochée |
 | Phase 13 — Pile graphique Nova et accélération GPU | 🔧 faite hors Firefox, à valider | Spec acceptée (24 septembre) ; pilote virtio-gpu 3D, anneau Venus, encodeur généré et vérifié (68 commandes), cœur GPU, écran et plan curseur au cœur, compositeur sur le GPU (égal au pixel près au processeur), `SYS_GPU_*`, bibliothèques C et Rust, modules `.kmd` signés, délai de garde éprouvé ; 75 vérifications ; aucune case cochée (validation de l'utilisateur attendue) ; Firefox (13.0, 13.9-13.10, 13.11.1) reporté par l'utilisateur |
 | Phase 14 — LIFS (nouveau type de partition, liens CoW et Tag) | 🔧 implémentée, à valider | Décisions 14.1 prises (24 septembre) ; GPT/MBR, partitions montées une lettre chacune, racine LIFS, plus aucun formatage implicite ; LIFS (arbres B+, étendues, clones CoW, Tag, index inverse, journal) ; `SYS_FS_NODE_*` ; `tools/lifs.py` et reprise NovaFS → LIFS ; 81 vérifications LIFS dont 32 coupures simulées ; aucune case cochée (validation de l'utilisateur attendue) |
-| Phase 15 — Mises à jour atomiques des applications | 📝 planifiée | Proposition de l'utilisateur du 24 septembre 2026 (`propositions/mises-a-jour.md`) ; évolution de SPM (phase 8) ; points à trancher (15.1) |
+| Phase 15 — Mises à jour atomiques des applications | 🔄 en cours | Proposition de l'utilisateur du 24 septembre 2026 (`propositions/mises-a-jour.md`) ; points 15.1 tranchés le 28 octobre (mandat d'autonomie) ; préalables partagés d'abord (JSON, Ed25519, HTTPS en flux, remplacement atomique d'une entrée) |
+| Phase 16 — Langages et outils (fin de la phase 9) | 📝 planifiée | Moteur JavaScript complet (navigateur intégré et ligne Node/Bun du §13.2), Python, C, Java, débogueur de `dev run --debug` |
+| Phase 17 — Reliquats système de fichiers et POSIX | 📝 planifiée | Ce que les phases 12 et 14 ont laissé ouvert hors Firefox : page de temps, autotest appel par appel, `copy_file_range`/clonage, Tag dans l'explorateur, GPT de secours, partitionneur |
+| Phase 18 — Firefox sur la pile Nova | ⏸ chez l'auteur | 12.5, 12.7, 12.8, 13.0, 13.9, 13.10, 13.11.1 : demandent la construction du fork et le GPU de la machine de l'auteur |
 
 **La phase 10 est validée.** Les vingt cases du 10.1 au 10.4 sont
 cochées sur la foi des sorties série du 5 septembre 2026 : `make run`,
@@ -43,19 +46,47 @@ cochées sur 229.** Les sept restantes sont toutes en phase 9, et elles
 sont nommées juste en dessous. Il ne reste donc **plus de case à ouvrir**
 — seulement des limites à lever, listées phase par phase plus bas.
 
-**Prochaine étape : au choix, et ce sont deux chantiers de nature
-différente.**
+**Prochaine étape : la phase 15**, dans l'ordre réorganisé ci-dessous.
+(L'ancien choix « un espace d'adressage par processus » ou « élargir le
+sous-ensemble Rust » est derrière nous : les espaces privés sont faits
+depuis 11.3, et le reste de la phase 9 forme la phase 16.)
 
-- **Un espace d'adressage par processus.** C'est la limite ouverte par la
-  phase 3 dont dépendent le plus de choses : l'isolation du §12.4 est
-  aujourd'hui conventionnelle, `fork` et les threads NT sont refusés pour
-  cette raison, et rien n'empêche une tâche ring 3 de lire les pages
-  d'une autre. À traiter avant que du code tiers ne s'exécute pour de
-  bon.
-- **Élargir le sous-ensemble Rust**, ou porter une toolchain en espace
-  utilisateur pour fermer 9.5.2 à 9.5.6. La première voie est
-  incrémentale — chaque construction ajoutée est une construction de
-  moins dans la liste des refus ; la seconde est un projet en soi.
+### Suite du projet — plan réorganisé (28 octobre 2026)
+
+Demande de l'utilisateur du 28 octobre 2026 : continuer en autonomie,
+optimiser, compléter, et **réorganiser les phases pour ne pas modifier
+le même code plusieurs fois**. Le travail restant a donc été regroupé par
+zone de code, chaque morceau partagé étant écrit une fois, au premier
+endroit où il sert :
+
+| Ordre | Phase | Zones de code touchées | Ce qui y est écrit une fois pour toutes |
+|---|---|---|---|
+| 1 | 15 — Mises à jour atomiques | `json`, `crypto`, `binfmt/signature`, `web/http`, `fs` (moteur), `spm`, `apps` | lecteur JSON (resservira à `JSON.parse`), **Ed25519** (ferme la limite ENTERPRISE de la phase 3 et des `.kmd`), téléchargement HTTPS en flux (resservira à `fetch`), remplacement atomique d'une entrée de dossier |
+| 2 | 16 — Langages et outils | `web/js`, `sdk/*`, `apps/browser` | moteur JavaScript compilé et complet (DOM du navigateur intégré **et** `dev interpret` pour Node/Bun), interprète Python, compilateur C, JVM minimale, débogueur |
+| 3 | 17 — Reliquats FS et POSIX | `fs/lifs`, `fs/partition`, `posix`, `apps/explorer` | ce que 12 et 14 laissent ouvert hors Firefox |
+| 4 | 18 — Firefox sur la pile Nova | le fork, `nova-gfx` | rien ne se fait sans la machine de l'auteur (construction du fork, GPU) |
+
+Pourquoi cet ordre :
+- La phase 15 est la seule entièrement spécifiée par l'utilisateur et
+  non commencée ; ses préalables (JSON, HTTPS en flux, Ed25519) sont
+  exactement ce dont la phase 16 a besoin pour `JSON.parse` et `fetch`.
+  Les écrire en 15 évite de rouvrir `web/http` et `crypto` en 16.
+- Le moteur JavaScript sert deux lignes du §13.2 et le navigateur
+  intégré : le compléter une fois couvre les trois.
+- Les reliquats de 14 touchent le moteur LIFS ; ceux qui portent sur le
+  remplacement atomique d'une entrée passent en 15 (il en a besoin), les
+  autres restent groupés en 17.
+
+Versions : `0.{phase}.{correctif}`. Chaque étape validée d'une phase en
+cours peut donner une version corrective (`0.14.1`, `0.14.2`…) ; la fin de
+la phase 15 donne `0.15.0`. Voir `CHANGELOG.md`.
+
+Décision de conservation, en attendant l'avis de l'utilisateur :
+**`navigateur.cus` (le navigateur intégré) reste.** Son retrait
+(11.10.2) avait été reporté ; Firefox demande une racine de 833 Mio
+construite sur l'hôte et n'est donc dans aucune release, où le
+navigateur intégré est le seul. Le compléter (JavaScript, phase 16) ne
+préjuge pas de son retrait le jour où Firefox sera livrable.
 
 ### Travaux hors phase, à la demande (état au 22 septembre 2026)
 
@@ -228,7 +259,10 @@ le sont plus parce que la phase 10 les a fait apparaître pour de vrai :
 Ces points sont assumés à ce stade et documentés pour ne pas donner une fausse
 impression de complétude :
 
-- **Le code ring 3 n'est préemptible qu'aux frontières d'appel système.**
+- ~~**Le code ring 3 n'est préemptible qu'aux frontières d'appel système.**~~
+  **Levée en 11.3** : le minuteur préempte le ring 3 (`preempt_user`,
+  DECISIONS « La préemption du ring 3 imposait `swapgs` »). Texte
+  d'origine conservé :
   `syscall_dispatch` consomme `NEED_RESCHEDULE` à sa sortie, ce qui suffit à
   répartir le CPU entre plusieurs tâches utilisateur actives. Une boucle ring 3
   qui n'appelle jamais le noyau garde en revanche son cœur jusqu'à l'échéance de
@@ -241,7 +275,9 @@ impression de complétude :
 
 ### Limites ouvertes par la phase 3
 
-- **Un seul espace d'adressage.** Toutes les tâches partagent la même hiérarchie
+- ~~**Un seul espace d'adressage.**~~ **Levée en 11.3** (espaces
+  d'adressage privés, `vm::Space`, 20 vérifications à chaque démarrage).
+  Texte d'origine : Toutes les tâches partagent la même hiérarchie
   de pages : l'arène du chargeur place les images dans des créneaux disjoints,
   mais rien n'empêche une tâche ring 3 de lire les pages d'une autre. L'isolation
   §12.4 reste donc *conventionnelle*. La séparation réelle suppose un CR3 par
@@ -3652,14 +3688,20 @@ l'utilisateur, pas LIFS.
 - Les empreintes de performance (import de 500 Mio, profil du navigateur
   sur LIFS) ne sont pas mesurées.
 
-## Phase 15 — Mises à jour atomiques des applications 📝 (planifiée)
+## Phase 15 — Mises à jour atomiques des applications 🔄 (en cours)
 
 Proposition de l'utilisateur du 24 septembre 2026, conservée dans
 `propositions/mises-a-jour.md` : registre de manifestes JSON sur GitHub,
 canaux release/beta/test, installation de chaque version dans son propre
 dossier, bascule par un **pointeur actif**, ancienne version gardée tant
 qu'elle tourne puis supprimée, seul le gestionnaire système écrit les
-applications. Consigne : lister, sans code.
+applications.
+
+Le 28 octobre 2026, l'utilisateur a donné **mandat d'autonomie** (« tu es
+en total autonomie pour concevoir le meilleur code possible ») : les dix
+points de 15.1 sont tranchés ci-dessous par l'assistant, chacun sur la
+recommandation déjà écrite ici le 24 septembre, et consignés dans
+`DECISIONS.md`. Ils restent révisables par l'utilisateur.
 
 ### Ce qui existe déjà (SPM, phase 8 ; relevé le 24 septembre 2026)
 
@@ -3677,117 +3719,190 @@ applications. Consigne : lister, sans code.
 | Paramètres séparés des binaires | oui (spec §17 : `/users/{user}/settings/`, profil du navigateur dans `/users/{user}/apps/web-browser`) | aucun |
 | Codes de mise à jour obligatoire/standard/optionnelle/silencieuse (spec §10.2) | oui | le JSON proposé n'a pas ce champ : à ajouter |
 
-### Points à trancher (15.1)
+### Points tranchés (15.1, 28 octobre 2026)
 
-1. **Checksum n'est pas signature.** Un checksum publié à côté du binaire, par
-   le même compte GitHub, détecte une corruption, pas une substitution : qui
-   prend le compte change les deux. Proposé : garder la signature des paquets
-   (§3.2) **et** signer le manifeste (clé du dépôt), le checksum restant un
-   contrôle de transfert.
-2. **GitHub, une dépendance extérieure.** Le but est un système « entièrement
-   à Nova ». GitHub comme hébergeur par défaut, l'adresse du registre restant
-   configurable (`spm repo add`), et un dépôt local ou un autre serveur
-   servant le même format. À confirmer.
-3. **Format du paquet.** `browser.bin` dans l'exemple ; Nova a le format
-   `.spm` (en-tête, manifeste, binaire, ressources, scripts). Proposé : le
-   `download_url` désigne un `.spm`.
-4. **Où vivent les versions.** Exemple du texte : `/System/Apps/Browser.v2.tmp`
-   ; spec §17 : `/apps/`. Proposé : `/apps/{app_id}/versions/{version}/`
-   (et `{version}.tmp` pendant l'installation), pointeur
-   `/apps/{app_id}/current`. « Partition des applications » (texte, §2) : une
-   partition à part suppose la phase 14 (partitions) ; sinon, un dossier.
-5. **Le pointeur actif dans le système de fichiers.** NovaFS n'a pas de lien
-   symbolique natif (les liens symboliques n'existent que dans l'arbre
-   `posix`). Il faut un remplacement **atomique** d'une entrée de dossier
-   (l'équivalent de `rename` par-dessus une entrée existante), qui survive à
-   une coupure : l'ancien ou le nouveau, jamais aucun. Avec LIFS (phase 14),
-   le même besoin.
-6. **Fichiers encore projetés.** Un programme en cours a ses fichiers
-   projetés en mémoire (le navigateur : `libxul.so` par le cache de pages).
-   Supprimer l'ancienne version pendant qu'il tourne casserait ses pages : la
-   suppression différée du texte est **obligatoire**, et « le PID » doit être
-   **tous les processus** issus de cette version (Firefox en lance une
-   dizaine).
-7. **Canaux.** Qui choisit le canal (par application, par compte, global) ;
-   passage de beta à release (version plus ancienne : rétrogradation
-   permise ou non).
-8. **Retour arrière d'une application.** La proposition garde l'ancienne
-   version jusqu'à la fermeture puis la supprime ; le rollback (§11.3) garde
-   30 jours pour l'OS. Garder aussi la version précédente d'une application
-   (un retour possible si la nouvelle ne démarre pas) ? À décider.
-9. **Applications de base et OS.** Le texte vise « les applications de base
-   du système » ; les mises à jour du noyau restent au §11 (partition A/B et
-   redémarrage). Frontière à écrire.
-10. **Le navigateur.** Sa version actuelle occupe 833 Mio de racine Alpine
-    (`/apps/web-browser/root`) : trop lourd pour une mise à jour par
-    téléchargement complet. Soit des paquets par morceaux (seuls les fichiers
-    changés), soit attendre la cible Nova de Firefox (voir phase 13, « Ce qui
-    reste de Linux »).
+1. **Checksum et signature.** Le checksum du manifeste reste un contrôle de
+   transfert ; l'authenticité vient de la **signature du paquet** (§3.2)
+   **et** d'une **signature Ed25519 du manifeste** par la clé du registre.
+   Ed25519 est écrit une fois (15.0.2) et sert aussi à faire enfin
+   d'ENTERPRISE une vraie signature (limite de la phase 3).
+2. **GitHub par défaut, pas imposé.** Un registre est une adresse
+   (`https://`, `http://` ou `file:`) ; GitHub (`raw.githubusercontent.com`)
+   en est un parmi d'autres. Le système livre un registre local `file:`
+   (`/sys/tools/spm/registre`), qui sert aussi aux autotests.
+3. **Le `download_url` désigne un `.spm`.** Le format de paquet ne change
+   pas ; le manifeste dit où le prendre et quelle empreinte il doit avoir.
+4. **Emplacement.** `{racine}/{app_id}/versions/{version}/`, où la racine
+   est celle du §4.3 pour le type (`/sysapp`, `/apps`, `/games`, `/ras`) ;
+   pendant l'installation, `versions/{version}.tmp/`.
+5. **Le pointeur actif est un lien Tag de dossier** : l'entrée
+   `{racine}/{app_id}/current` désigne le nœud du dossier de la version
+   active (le §5.1 permet `link` sur un dossier). Un chemin
+   `.../current/app.cus` se résout sans lire de fichier pointeur. Basculer,
+   c'est **remplacer le nœud désigné par une entrée existante en une
+   opération** (`fs::relink`, 15.0.5) : une transaction du journal sur
+   LIFS, l'écriture d'une seule entrée sur NovaFS. L'ancien ou le nouveau,
+   jamais aucun.
+6. **Fichiers projetés.** Un processus garde ses fichiers par nœud, pas par
+   chemin ; la suppression d'une version attend qu'**aucun processus**
+   lancé depuis elle ne vive (tous ses processus, pas un PID).
+7. **Canaux.** Par application, `release` par défaut, réglable dans les
+   paramètres ; un canal global par défaut dans `/sys/config/spm.cfg`.
+   Passer d'un canal à un canal plus ancien ne rétrograde pas : la
+   version reste jusqu'à ce que le nouveau canal la dépasse, sauf demande
+   explicite (`spm install {app} --canal release --retrograder`).
+8. **Retour arrière.** La version **précédente** est gardée (une seule),
+   pour `spm rollback {app}` ; les plus anciennes sont supprimées dès
+   qu'aucun processus ne les exécute. Écart assumé au texte, qui supprime
+   tout de suite : c'est ce que fait déjà le §11.3 pour l'OS.
+9. **Frontière.** Ce mécanisme couvre les applications installées par SPM.
+   Le noyau, ses applications intégrées (explorateur, bloc-notes…) et le
+   navigateur intégré font partie de l'image de l'OS et suivent le §11
+   (partition A/B, redémarrage).
+10. **Le navigateur porté** (racine Alpine de 833 Mio) attend la phase 18 :
+    rien n'est téléchargeable tant qu'il n'est pas un paquet.
 
 ### Étapes
 
+#### 15.0 Préalables partagés (écrits une fois, resservent en 16 et 17)
+- [ ] 15.0.1 `src/json.rs` : lecteur et écrivain JSON (RFC 8259), bornés en
+  profondeur et en taille, sans flottant (un nombre non entier garde son
+  texte) ; autotest sur les cas de la RFC
+- [ ] 15.0.2 Ed25519 (RFC 8032) : SHA-512, vérification et signature ;
+  vecteurs de la RFC à chaque démarrage
+- [ ] 15.0.3 ENTERPRISE signé pour de vrai : certificat v2 signé Ed25519 par
+  l'autorité (binaires, `.kmd`, paquets), autorités = clés publiques,
+  validité temporelle contrôlée par l'horloge ; l'ancien certificat refusé
+  nommément
+- [ ] 15.0.4 Téléchargement HTTPS en flux (`web::http`) : redirections, corps
+  écrit par morceaux dans un fichier, sans plafond de 4 Mio, reprise par
+  `Range` après coupure
+- [ ] 15.0.5 `fs::relink` : remplacement atomique du nœud désigné par une
+  entrée (LIFS : une transaction ; NovaFS : une entrée) ; coupure simulée
+
 #### 15.1 Spécification et décisions
-- [ ] 15.1.1 Réponses de l'utilisateur aux dix points ci-dessus
-- [ ] 15.1.2 Spec §10 : registre de manifestes (format, canaux, signature du
-  manifeste, codes §10.2), emplacement des versions et pointeur actif, rôle
-  exclusif du gestionnaire, requête IPC de mise à jour ; §11 : frontière
-  applications / OS
+- [x] 15.1.1 Les dix points ci-dessus (mandat d'autonomie du 28 octobre)
+- [ ] 15.1.2 Spec §10.5 (registre, manifeste, canaux, emplacement des
+  versions, pointeur, rôle exclusif du gestionnaire, requête IPC) et §11
+  (frontière applications / OS)
 
-#### 15.2 Téléchargement
-- [ ] 15.2.1 Client HTTPS pour SPM (sur `web::http` et `web::tls`),
-  redirections (les liens de releases GitHub redirigent)
-- [ ] 15.2.2 Téléchargement en flux vers un fichier, sans limite de 4 Mio,
-  reprise ou recommencement après coupure
-- [ ] 15.2.3 Lecture JSON (analyseur écrit à la main, borné, sans
-  récursion non contrôlée)
+#### 15.2 Registre
+- [ ] 15.2.1 Manifeste JSON par application, canaux, codes §10.2, signature
+  Ed25519 vérifiée ; `spm registry add <url>` ; registre local livré
+- [ ] 15.2.2 Résolution : version du canal choisi, comparée à la version
+  installée ; refus nommé d'un manifeste altéré
 
-#### 15.3 Registre
-- [ ] 15.3.1 Manifeste par application et canaux ; signature du manifeste
-  vérifiée ; `spm repo add` accepte ce format à côté de l'index v1
-- [ ] 15.3.2 Service `updater.dsa` : vérification périodique (24 h, §11.2) de
-  tous les manifestes
-
-#### 15.4 Installation atomique
-- [ ] 15.4.1 Installation dans `versions/{version}.tmp`, vérifications
-  (checksum, signature, niveau §10.4), puis renommage en `versions/{version}`
-- [ ] 15.4.2 Bascule du pointeur `current` en une opération atomique du
-  système de fichiers (voir point 5)
-- [ ] 15.4.3 Coupure à chaque étape : au redémarrage, soit l'ancienne version
-  active et le `.tmp` purgé, soit la nouvelle active — jamais d'application
+#### 15.3 Installation atomique
+- [ ] 15.3.1 Téléchargement dans `versions/{version}.tmp`, empreinte,
+  signature, niveau §10.4, puis renommage en `versions/{version}`
+- [ ] 15.3.2 Bascule de `current` par `fs::relink`
+- [ ] 15.3.3 Coupure à chaque étape : au redémarrage, l'ancienne version
+  active et le `.tmp` purgé, ou la nouvelle active — jamais d'application
   cassée
 
-#### 15.5 Lancement par le pointeur
-- [ ] 15.5.1 Menu, raccourcis, associations de fichiers, `apps::launch` et le
-  lancement du navigateur passent par `current`
-- [ ] 15.5.2 Chaque processus lancé retient la version qu'il exécute
+#### 15.4 Lancement par le pointeur
+- [ ] 15.4.1 Le lanceur, l'explorateur et `apps::launch` lancent
+  `{racine}/{app}/current/{binaire}` dans un espace d'adressage à lui
+- [ ] 15.4.2 Chaque processus retient l'application et la version qu'il
+  exécute
 
-#### 15.6 Nettoyage
-- [ ] 15.6.1 Suppression différée d'une version quand plus aucun processus ne
-  l'exécute
-- [ ] 15.6.2 Purge au démarrage des versions qui ne sont plus pointées (et
-  des `.tmp`)
+#### 15.5 Nettoyage
+- [ ] 15.5.1 Suppression différée d'une version quand plus aucun processus
+  ne l'exécute (la précédente gardée pour le retour arrière)
+- [ ] 15.5.2 Purge au démarrage des `.tmp` et des versions ni actives ni
+  précédentes ; `spm rollback {app}`
 
-#### 15.7 Côté applications
-- [ ] 15.7.1 Requête IPC « une mise à jour est disponible / l'installer » vers
-  le gestionnaire ; refus pour une application qui demande pour une autre
-- [ ] 15.7.2 Notifications selon les codes §10.2 ; choix du canal dans les
+#### 15.6 Côté applications
+- [ ] 15.6.1 Requête IPC `spm.update` (« une mise à jour existe-t-elle »,
+  « installe-la ») vers le gestionnaire ; refus pour une application qui
+  demande pour une autre
+- [ ] 15.6.2 Notifications selon les codes §10.2 ; canal choisi dans les
   paramètres
+- [ ] 15.6.3 `updater.dsa` vérifie aussi les manifestes des applications
+  (24 h, §11.2)
 
-#### 15.8 Validation
-- [ ] 15.8.1 Dépôt de test local puis GitHub : mise à jour d'une application
+#### 15.7 Validation
+- [ ] 15.7.1 Autotest sur le registre local : mise à jour d'une application
   pendant qu'elle tourne ; l'ancienne continue, la nouvelle au prochain
-  lancement, l'ancienne supprimée à sa fermeture
-- [ ] 15.8.2 Manifeste altéré, checksum faux, paquet non signé : refus, rien
-  sur le disque
-- [ ] 15.8.3 Coupures simulées ; variantes de CLAUDE.md
+  lancement, l'ancienne supprimée à sa fin
+- [ ] 15.7.2 Manifeste altéré, checksum faux, paquet non signé : refus,
+  rien sur le disque
+- [ ] 15.7.3 Coupures simulées ; variantes de CLAUDE.md (`make test-all`)
 
-### Organisation et taille
+## Phase 16 — Langages et outils (fin de la phase 9) 📝 (planifiée)
 
-Ordre : 15.1 → 15.2 (HTTPS et flux : utiles aussi ailleurs) → 15.3 → 15.4 →
-15.5 → 15.6 → 15.7 → 15.8. Dépendance : le remplacement atomique d'une entrée
-(point 5) touche le système de fichiers ; s'il doit vivre sur une partition
-d'applications, la phase 14.0 (partitions) vient d'abord. Ordre de grandeur :
-**huit à douze sessions**.
+Ferme ce que la phase 9 a laissé ouvert : 9.1.3 (`dev run --debug`) et
+9.5.2 à 9.5.6 (les langages sans chaîne). Principe inchangé de la phase 9
+(DECISIONS, « Sept lignes du §13.2 ne pouvaient pas être écrites ») :
+**aucun chemin du SDK ne produit un binaire en prétendant l'avoir
+compilé** ; ce qui n'est pas écrit est refusé nommément. Ce qui change :
+au lieu d'attendre des chaînes externes (LLVM, Mono, une JVM, V8),
+Nova écrit les siennes, chacune pour un sous-ensemble **défini et
+documenté**, comme `sdk::rustc` pour Rust.
+
+#### 16.1 Moteur JavaScript
+- [ ] 16.1.1 `src/web/js/` compilé en entier (il ne l'est pas : `mod.rs` ne
+  déclare que `big` et `num`) ; bornes en pas et en pile (piège « un
+  interprète de noyau a deux bornes »)
+- [ ] 16.1.2 Bibliothèque standard manquante : `Number`, `Math`, `JSON`
+  (sur `src/json.rs`), `Date`, `RegExp`, `Map`/`Set`, `Promise` et file de
+  microtâches, fonctions globales
+- [ ] 16.1.3 Autotest : un corpus de cas à la manière de test262, verdict
+  série
+#### 16.2 Scripts dans le navigateur intégré
+- [ ] 16.2.1 DOM : `document`, éléments, attributs, texte, événements,
+  minuteries ; une modification du DOM refait la mise en page
+- [ ] 16.2.2 `fetch` et `XMLHttpRequest` sur le client de 15.0.4
+- [ ] 16.2.3 `about:accueil` ne dit plus « aucune page n'exécute de script »
+#### 16.3 Node et Bun (§13.2)
+- [ ] 16.3.1 `dev interpret main.js` : le moteur Nova, `console`, `require`
+  de modules locaux, `fs` sur `SYS_FS_*` ; la colonne « compilateur »
+  reste ETR
+#### 16.4 Débogueur (9.1.3)
+- [ ] 16.4.1 `dev run --debug` : points d'arrêt (`int3`), pas à pas (TF),
+  registres, mémoire, pile d'appels, sur le programme du bac à sable
+#### 16.5 Python (9.5.5)
+- [ ] 16.5.1 Interprète d'un sous-ensemble défini de Python 3 (indentation,
+  entiers illimités, `str`, `list`, `dict`, `tuple`, fonctions, classes,
+  exceptions) : `dev interpret main.py`
+#### 16.6 C (9.5.2)
+- [ ] 16.6.1 Compilateur d'un sous-ensemble défini de C vers x86_64, binaire
+  Nova qui s'exécute en ring 3 ; C++ refusé nommément
+#### 16.7 Java (9.5.4)
+- [ ] 16.7.1 JVM minimale : fichiers `.class`, interprète de bytecode,
+  `java.lang` réduit
+#### 16.8 C# (9.5.3)
+- [ ] 16.8.1 Interprète CIL minimal, ou refus nommé maintenu (à trancher à
+  l'étape selon ce que 16.7 aura coûté)
+
+## Phase 17 — Reliquats système de fichiers et POSIX 📝 (planifiée)
+
+Ce que les phases 12 et 14 ont laissé ouvert et qui ne dépend pas de
+Firefox. Groupé pour ne rouvrir `fs/lifs`, `fs/partition` et `posix`
+qu'une fois.
+
+- [ ] 17.1 Page de temps (`SYS_TIME_PAGE`, 0x0709) lue par la libc Nova
+  (12.2.7)
+- [ ] 17.2 Autotest appel par appel des domaines 09 à 0B (12.2.8)
+- [ ] 17.3 `copy_file_range`, `FICLONE`, `FICLONERANGE` : clone CoW sur LIFS
+  (14.4.2)
+- [ ] 17.4 Explorateur : les Tag d'un fichier, « étiqueter » (14.4.4)
+- [ ] 17.5 GPT de secours lue et réparée ; partitionneur (appel système et
+  onglet des paramètres) (14.0.4)
+- [ ] 17.6 Arbre B+ : emprunt entre voisins ; transaction plus grosse que
+  le journal découpée
+- [ ] 17.7 Reprise NovaFS → LIFS dans Nova (14.5.2)
+- [ ] 17.8 Export des clones et des Tag éprouvé sur un disque neuf (14.4.3)
+
+## Phase 18 — Firefox sur la pile Nova ⏸ (chez l'auteur)
+
+Regroupe les cases des phases 12 et 13 qui demandent la construction du
+fork de Firefox et le GPU de la machine de l'auteur : 12.5 (`nova-cc`),
+12.7 (bibliothèques reconstruites, GTK retiré), 12.8.1 à 12.8.4 (paquet
+`.spm` du navigateur, zéro appel Linux, racine Alpine retirée), 13.0
+(mesures), 13.9 et 13.10 (WebRender sur `nova-gfx`), 13.11.1 (scénario de
+charge). Le paquet du navigateur deviendra alors une application de la
+phase 15 comme une autre.
 
 ## Notes d'utilisation
 

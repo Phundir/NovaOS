@@ -10,7 +10,7 @@ question sans en discuter d'abord avec l'utilisateur.
 
 ## 1. Décisions issues de la spécification — non négociables
 
-Ces points viennent de `docs/SPECIFICATION.md` et ont été confirmés lors de la
+Ces points viennent de `SPECIFICATION.md` et ont été confirmés lors de la
 phase de conception. Ce ne sont pas des réglages.
 
 | Décision | Référence |
@@ -2535,7 +2535,7 @@ Ce qui **reste en français**, et doit le rester :
   mot pour mot ;
 - les **identifiants de la spécification** exposés à l'exécution : noms
   de canaux, clés de fichiers de configuration, noms de rôles ;
-- les **messages de commit** et les documents de `docs/`.
+- les **messages de commit** et les documents de référence à la racine.
 
 `tools/generer-police.py` a été traduit en même temps que `font.rs` qu'il
 engendre : traduire le fichier produit sans son générateur aurait été
@@ -4045,6 +4045,80 @@ mémoire** (aucun disque) est formaté par le noyau : il est le sien.
 - **`-boot d` dans QEMU.** Le MBR protecteur d'une GPT porte `0x55AA` : sans
   ordre de démarrage, le BIOS tentait d'amorcer le disque système (aucun
   code) et rien ne s'affichait, pas même GRUB.
+
+
+## Infrastructure : version, tests automatiques, publication (28 octobre 2026)
+
+Demande de l'utilisateur : un README complet, une publication automatique
+qui construit le projet à chaque changement de version et crée une
+release, des commits et des releases réguliers, en autonomie.
+
+### La version vit dans `Cargo.toml`, et nulle part ailleurs
+
+`src/version.rs` lit `CARGO_PKG_VERSION` à la compilation : la bannière
+(`Nova OS 0.14.0 (a1b2c3d) booted`), `uname` d'un programme porté et
+`spm::update::OS_VERSION` en dérivent. SPM portait sa propre constante
+(`0.8.0.1`) que rien ne tenait à jour ; or c'est elle qui décide si un
+dépôt propose « mieux ». Le commit vient du Makefile (`NOVA_COMMIT`),
+`local` hors d'un dépôt Git. Schéma : `0.{phase}.{correctif}`.
+
+### La toolchain est épinglée
+
+`rust-toolchain.toml` nomme une nightly datée (`nightly-2026-10-28`) et non
+plus `nightly`. Le noyau dépend de fonctions instables (`build-std`, cible
+JSON, `abi_x86_interrupt`) ; une release construite par la CI avec une
+nightly différente de celle du développeur ne prouverait rien. Changer la
+date est un changement comme un autre : il passe par `make test-all`.
+
+La seule ligne `warning` tolérée par la CI est l'avis de la toolchain sur
+`core` (« enabling the `sse` target feature ... » dans `stdarch`) : c'est
+le code de la bibliothèque standard recompilée par `build-std` pour une
+cible soft-float, pas le nôtre, et il n'a pas d'effet sur le binaire
+(`make check` : aucune instruction SSE hors de `fpu::worker`).
+
+### `make test` juge la sortie série, et s'arrête au dernier verdict
+
+`tools/boot-test.py` lit la série au fil de l'eau, arrête QEMU dès que
+tous les verdicts attendus sont imprimés, échoue à la première ligne
+`ECHEC`, `KERNEL PANIC`, `BOOT_ERR_` ou `ALLOCATION ECHOUEE`. C'est la
+validation « par l'assistant » de CLAUDE.md (2.7) rendue répétable : le
+journal complet reste dans `build/test/`. Le disque est le sien
+(`build/test/`), jamais `disks/` ; deux démarrages sur le même disque,
+le second doit imprimer `demarrage n 2`. 11.5 et 12 acceptent « non
+éprouvée » : leurs images (racine Linux, programmes natifs) ne sont pas
+dans l'ISO.
+
+### Un autotest qui lit un compteur global doit tolérer le bruit des autres
+
+Le premier passage de `make test` en boucle a fait sortir trois faux
+échecs, tous de la même famille : un autotest lit un compteur **de toute
+la machine** (blocs libres du volume, cadres libres) avant et après une
+opération, pendant que les autres autotests du démarrage allouent sur
+les autres cœurs.
+- « la table d'indirection est rendue avec les blocs » (phase 4) échouait
+  au second démarrage d'un disque neuf : sur LIFS, créer le fichier
+  insère un nœud et une entrée, ce qui peut couper une feuille d'arbre B+
+  et prendre un bloc pour de bon — croissance du dossier, pas fuite du
+  fichier. Le fichier est désormais créé court **avant** la première
+  lecture du compteur.
+- « un second cycle de lancement ne coûte aucun cadre » et « les cadres
+  pris par l'arène sont tous rendus » (phase 5) : bruit des autres tâches.
+
+Règle retenue : **une fuite coûte à chaque fois, le bruit non.** Le cycle
+mesuré est rejoué jusqu'à trois fois (`frame::neutral_cycle`), et
+l'invariant tient si un passage ne coûte rien. Les vérifications d'un
+passage rejoué ne comptent que si elles échouent : le nombre de
+vérifications d'un verdict ne dépend pas du bruit.
+
+### La release démarre l'ISO qu'elle publie
+
+`.github/workflows/release.yml` ne se déclenche que sur un push qui
+touche `Cargo.toml`, et ne fait rien si le tag `v{version}` existe déjà.
+Sinon : `make dist` (noyau dépouillé de ses informations de débogage,
+92 → 8 Mio ; disque vierge GPT + LIFS compressé), puis `make test` **sur
+l'ISO de `build/dist/`** (`TEST_ISO`), puis le tag et la release, notes
+tirées de `CHANGELOG.md`. Une version suffixée part en pré-release. La
+release n'est donc jamais une ISO que personne n'a vue démarrer.
 
 ---
 

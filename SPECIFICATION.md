@@ -1250,7 +1250,7 @@ Accessibilité est toujours visible et navigable au clavier.
 | Phase 12 | Navigateur natif | libc Nova, image liée, domaines 09 à 0B |
 | Phase 13 | Pile graphique | Cœur GPU, backend virtio-gpu/Venus, `SYS_GPU_*`, modules `.kmd`, Firefox sur la pile Nova |
 
-Le détail granulaire de ces phases se trouve dans `docs/ROADMAP.md`.
+Le détail granulaire de ces phases se trouve dans `ROADMAP.md`.
 
 ### Ressources recommandées
 

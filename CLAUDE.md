@@ -56,7 +56,8 @@ consecutives en parallele.
      Le noyau ne rend jamais la main, donc `timeout` est obligatoire et
      son code de sortie 124 est le cas normal. Cocher n'est alors permis
      que sur des lignes **citees** de ce fichier, jamais sur une
-     compilation reussie.
+     compilation reussie. `make test` fait la meme chose et s'arrete au
+     dernier verdict ; son journal est dans `build/test/`.
 8. **Cloturer** — cocher les cases dans `ROADMAP.md`, consigner dans la
    roadmap ce qui a ete observe et sous quelles conditions, mettre a jour
    `ARCHITECTURE.md` si la structure a change, ajouter toute lecon durable
@@ -105,6 +106,9 @@ make run        # QEMU 8 coeurs, 8 Gio, KVM, fenetre + serie (QEMU_SMP=1 : monoc
 make run-smp    # QEMU 4 coeurs — obligatoire pour tester le SMP
 make run-nogui  # serie seule, sans fenetre
 make log        # boot complet redirige vers build/boot.log
+make test       # boot sans fenetre, verdicts juges (tools/boot-test.py), deux fois
+make test-all   # test + monocoeur + sans ecran -- ce que fait la CI
+make dist       # ISO, noyau depouille, disque vierge : ce que publie une release
 make debug      # QEMU en attente sur gdb :1234
 make debug-int  # trace des interruptions et resets — diagnostic de triple faute
 make check      # ASCII des chaines, symboles non resolus, SSE, segments

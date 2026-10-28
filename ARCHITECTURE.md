@@ -2,7 +2,7 @@
 
 État au terme de la phase 6 (couche OS : pilotes, réseau, audio, ports
 internes, services de démarrage). Ce document décrit **ce qui existe**,
-pas ce qui est prévu — pour cela, voir `docs/ROADMAP.md`.
+pas ce qui est prévu — pour cela, voir `ROADMAP.md`.
 
 À mettre à jour quand la structure change : nouveau module, nouvelle région
 mémoire, nouveau vecteur d'interruption.
@@ -16,7 +16,7 @@ nova-os/
 ├── CLAUDE.md                  Instructions de travail
 ├── Makefile                   Build, run, debug, checks
 ├── Cargo.toml                 crate-type = ["staticlib"]
-├── rust-toolchain.toml        nightly + rust-src + llvm-tools-preview
+├── rust-toolchain.toml        nightly épinglée + rust-src + llvm-tools-preview
 ├── x86_64-nova_os.json        Target custom
 ├── .cargo/config.toml         build-std, json-target-spec
 │
@@ -27,8 +27,8 @@ nova-os/
 │   ├── trampoline.asm         Démarrage des cœurs secondaires (16→64 bits)
 │   ├── syscall_entry.asm      Point d'entrée syscall/sysret
 │   ├── usermode.asm           Programme de démonstration ring 3
-│   ├── user.asm               ⚠ brouillon non compilé, remplacé par usermode.asm
-│   └── syscall.asm            ⚠ brouillon non compilé, remplacé par syscall_entry.asm
+│   ├── fault.asm              Faute de page, copies utilisateur, entrée ring 3
+│   └── vmtest.asm             Programme d'essai des espaces privés (11.3)
 │
 ├── iso/boot/grub/grub.cfg     Menu GRUB, 4 entrées
 │
@@ -510,7 +510,7 @@ init.dsa
 
 ## 4. GDT
 
-Ordre imposé par `sysret` — voir `docs/DECISIONS.md` § piège 10.
+Ordre imposé par `sysret` — voir `DECISIONS.md` § piège 10.
 
 | Sélecteur | Contenu |
 |---|---|
@@ -679,7 +679,7 @@ tâche compare le compteur à la dernière valeur qu'elle a vue et sait
 Seules les lignes **ISA** sont routées — IRQ 1 (clavier) et 12 (souris),
 à front, actives hautes. Une ligne PCI est à niveau et active basse : le
 relais générique, qui ne lit aucun registre de périphérique, la laisserait
-assertée. Voir les limites de la phase 6 dans `docs/ROADMAP.md`. Les
+assertée. Voir les limites de la phase 6 dans `ROADMAP.md`. Les
 fonctions PCI qui offrent **MSI-X** passent par les vecteurs 64–67 : un
 message est un front, le même relais sert (`pci::Msix::route`,
 `idt::msi_irq_*`). Seule la file de réception de virtio-net l'utilise.
@@ -1318,7 +1318,7 @@ chaque surface est rejouée dedans, en coordonnées relatives. Le découpe de
 `Painter` se composant, une surface ne peut pas peindre au-delà de ce qui sera
 publié. Écrire plus large que ce qu'on publie ferait diverger le tampon arrière
 du tampon avant, et la divergence ne se verrait que plusieurs trames plus tard,
-ailleurs (voir `docs/DECISIONS.md`, piège 35).
+ailleurs (voir `DECISIONS.md`, piège 35).
 
 ### Routage des événements
 
@@ -1796,7 +1796,7 @@ double pas. Deux garde-fous, tous deux nécessaires :
 L'autotest de la phase 9 attendait auparavant `runtime::resolve(Asm)`.
 Cette condition porte sur un fichier **persistant** : vraie d'emblée dès
 le deuxième démarrage, elle ne synchronisait plus rien. Voir
-`docs/DECISIONS.md`, « Une purge au démarrage n'a de sens que si rien n'a
+`DECISIONS.md`, « Une purge au démarrage n'a de sens que si rien n'a
 démarré avant ».
 
 ### Ce qui a été ajouté hors de `sdk/`
