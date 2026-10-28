@@ -2434,8 +2434,11 @@ fn live_compositor(report: &mut Report) {
     );
 
     // A drawing command, a commit, and the damaged area must cover the
-    // surface.
-    super::with(|comp| {
+    // surface. The damage is read under the same lock as the commit: the
+    // compositor's task, on another core, publishes and clears it as
+    // soon as the lock is free -- read in a second step, it was gone one
+    // boot in ten.
+    let damage = super::with(|comp| {
         comp.damage_rect(Rect::EMPTY);
         let _ = super::compositor::handle(
             comp,
@@ -2451,9 +2454,9 @@ fn live_compositor(report: &mut Report) {
                 .build(),
         );
         let _ = super::compositor::handle(comp, pid, proto::OP_COMMIT, &Writer::new().u32(id).build());
-    });
-
-    let damage = super::with(|comp| comp.pending_damage()).unwrap_or(Rect::EMPTY);
+        comp.pending_damage()
+    })
+    .unwrap_or(Rect::EMPTY);
     report.check(
         "un commit endommage la zone de sa surface",
         !damage.is_empty() && damage.contains(45, 45),
