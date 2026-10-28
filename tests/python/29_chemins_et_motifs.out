@@ -1,0 +1,22 @@
+/usr/local/lib/python3.13/site.tar.gz PurePosixPath('/usr/local/lib/python3.13/site.tar.gz') ('/', 'usr', 'local', 'lib', 'python3.13', 'site.tar.gz') site.tar.gz .gz ['.tar', '.gz'] site.tar /usr/local/lib/python3.13 / True
+[PurePosixPath('/usr/local/lib/python3.13'), PurePosixPath('/usr/local/lib'), PurePosixPath('/usr/local')] /usr/local/lib/python3.13 5 /usr/local/lib/python3.13/x.py /usr/local/lib/python3.13/site.tar.bz2 /usr/local/lib/python3.13/archive.gz
+local/lib/python3.13/site.tar.gz False a/b/c/d x/y a/b/c
+True True False  []
+[PurePosixPath('a'), PurePosixPath('a/c'), PurePosixPath('b')] True True ../a/b
+'/usr/local/lib/python3.13/site.tar.gz' is not in the subpath of '/etc'
+True True True ['alpha', 'beta'] b'\x00\x01' 11
+['a.txt', 'b.py', 'sub'] ['_tmp_pathlib/b.py'] ['_tmp_pathlib/b.py', '_tmp_pathlib/sub/c.py'] ['_tmp_pathlib/a.txt', '_tmp_pathlib/sub/deep/d.txt']
+['_tmp_pathlib/a.txt', '_tmp_pathlib/b.py', '_tmp_pathlib/sub'] ['_tmp_pathlib/a.txt', '_tmp_pathlib/sub/deep/d.txt'] ['_tmp_pathlib/sub/c.py'] a[[]b][*]
+True ['a.c', 'c.c'] (?s:.*\.[ch])\Z True
+['a.txt', 'b.py', 'sub'] ../c.py /a/b inter
+_tmp_pathlib ['sub'] ['a.txt', 'b.py']
+_tmp_pathlib/sub ['deep'] ['c.py']
+_tmp_pathlib/sub/deep [] ['d.txt']
+[('_tmp_pathlib', ['sub'], ['a.txt', 'b.py']), ('_tmp_pathlib/sub', ['deep'], ['c.py']), ('_tmp_pathlib/sub/deep', [], ['d.txt'])]
+_tmp_pathlib/renamed.txt True False _tmp_pathlib/renamed.txt True a/b
+alpha
+False False
+FileNotFoundError 2
+['Héllo', 'wörld', 'naïve', 'café', '٣٤', '東京'] ['1', '٣', '߂'] ['a', 'b', 'c', 'd']
+['é', 'v', 'ü'] STRASSE _ X _ ['a\nb'] ['été-2024', 'ok']
+['—', '·'] ABcz ['ab c'] ['abc'] []

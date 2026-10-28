@@ -1,0 +1,56 @@
+md5 04441caba84f6c35ef16cd7a39a65eeb 16 64 d41d8cd98f00b204
+sha1 d4a0bc1fd9f01674c9482a6e3fe4781ae0928afd 20 64 da39a3ee5e6b4b0d
+sha224 bd7c425ddb0312ac1fc673c27c242a6d5889655ed1b4b2d477e1cc54 28 64 d14a028c2a3a2bc9
+sha256 92f80897a708620ff1f83231f7210bff77fb7f8164ae61914963193cf104307f 32 64 e3b0c44298fc1c14
+sha384 aa1aad925408b694507272269edeb019af76bb7abe0e0d1b958c6394f2371e98fb68b64ec327507e9cbba71c5cedd82a 48 128 38b060a751ac9638
+sha512 0f918f42f98d985c863139e92ec6437d7eda07f8ce4136663d6c157d1a01f8223c8d444cf36d9e60580cf572392899b9e8bd47e95cf9bb78badced6d3ece610e 64 128 cf83e1357eefb8bd
+ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad 398533d48111e9f664b1f64cb10c4b63
+f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8 True
+07e6997180cf7f12904f04100d405d34888fdf62af6d506a0ecc23b196fe99d8
+True True 3035780256 175844047 3252201774
+b'' True True
+b'abcabcabc'
+b'hello world'
+b'00ff6162' b'\x00\xffab' b'aGVsbG8=\n' b'hello' 907060870 b'6162-6364-6566'
+b'' b'' b'' b'' b'' b''
+b'Zg==' b'MY======' b'66' b'W&' b'Ac' b'CO======'
+b'Zm8=' b'MZXQ====' b'666F' b'W^V' b'Ao@' b'CPNG===='
+b'Zm9v' b'MZXW6===' b'666F6F' b'W^Zo' b'AoDS' b'CPNMU==='
+b'Zm9vYg==' b'MZXW6YQ=' b'666F6F62' b'W^Zp|' b'AoDTs' b'CPNMUOG='
+b'Zm9vYmE=' b'MZXW6YTB' b'666F6F6261' b'W^Zp|VE' b'AoDTs@/' b'CPNMUOJ1'
+b'Zm9vYmFy' b'MZXW6YTBOI======' b'666F6F626172' b'W^Zp|VR8' b'AoDTs@<)' b'CPNMUOJ1E8======'
+b'foobar' b'-__-' b'\xfb\xff\xfe' b'foob' b'foobar' b'foobar'
+b'eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4\neHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eA==\n'
+Error Incorrect padding
+feffffff6079feff00286bee00000000000000f0ffffffffffffffff 16 15 9
+400921f9f01b866e cdcccc3d 003e (0.10000000149011612,) (1.0,)
+(-1, 2, -3, 4) b'ab\x00\x00' (b'ab',) b'\x01z'
+[(1,), (2,)] 8 (1, 2) b'\x01\x00\x00\x00\x02\x00\x00\x00'
+struct.error 'h' format requires -32768 <= number <= 32767
+struct.error 'b' format requires -128 <= number <= 127
+struct.error unpack requires a buffer of 4 bytes
+struct.error pack expected 2 items for packing (got 1)
+struct.error required argument is not an integer
+struct.error 'h' format requires -32768 <= number <= 32767
+OverflowError float too large to pack with f format
+'ligne 1\nligne 2\nx\n' 18
+ligne 1
+ lig ['ne 2\n', 'x\n'] 
+b'ab' b'c\n' [b'def\n'] 8 1 2 b'aXY\ndef\n'
+['a\n', 'b\n', 'c'] False
+True
+I/O operation on closed file
+The quick brown fox jumps over
+the lazy dog. Pack my box with
+five dozen liquor jugs! How
+vexingly quick daft zebras
+jump; a well-known sentence-
+ending example-with-hyphens
+appears here.
+['The quick brown fox', 'jumps over the lazy', 'dog. Pack my box with', 'five dozen liquor']
+The quick brown fox jumps over the lazy dog. [...] | Hello world!
+* The quick brown fox
+  jumps over the lazy
+  dog. Pack my box [...]
+'\ndef f():\n    return 1\n' '> a\n\n> b\n'
+['Supercalif', 'ragilistic', 'expialidoc', 'ious is', 'long']

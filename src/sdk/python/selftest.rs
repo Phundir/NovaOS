@@ -44,6 +44,10 @@ const CORPUS: &[(&str, &str, &str, Option<&str>)] = &[
     ("23_complexes", include_str!("../../../tests/python/23_complexes.py"), include_str!("../../../tests/python/23_complexes.out"), None),
     ("24_octets", include_str!("../../../tests/python/24_octets.py"), include_str!("../../../tests/python/24_octets.out"), None),
     ("25_metaclasses", include_str!("../../../tests/python/25_metaclasses.py"), include_str!("../../../tests/python/25_metaclasses.out"), None),
+    ("26_abc_nombres_statistiques", include_str!("../../../tests/python/26_abc_nombres_statistiques.py"), include_str!("../../../tests/python/26_abc_nombres_statistiques.out"), None),
+    ("27_datetime", include_str!("../../../tests/python/27_datetime.py"), include_str!("../../../tests/python/27_datetime.out"), None),
+    ("28_octets_et_flux", include_str!("../../../tests/python/28_octets_et_flux.py"), include_str!("../../../tests/python/28_octets_et_flux.out"), None),
+    ("29_chemins_et_motifs", include_str!("../../../tests/python/29_chemins_et_motifs.py"), include_str!("../../../tests/python/29_chemins_et_motifs.out"), None),
 ];
 
 /// A program of several files, relative to `TEST_ROOT`.

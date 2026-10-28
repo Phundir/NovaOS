@@ -72,6 +72,8 @@ enum Category {
     Upper,
     Lower,
     Number,
+    /// `Nd`: decimal digits of every script.
+    Decimal,
     Punctuation,
     Any,
 }
@@ -356,7 +358,8 @@ impl<'a> Parser<'a> {
                     "l" | "letter" | "alphabetic" | "alpha" => Category::Letter,
                     "lu" | "uppercase_letter" | "uppercase" => Category::Upper,
                     "ll" | "lowercase_letter" | "lowercase" => Category::Lower,
-                    "n" | "nd" | "number" | "decimal_number" => Category::Number,
+                    "n" | "number" => Category::Number,
+                    "nd" | "decimal_number" | "digit" => Category::Decimal,
                     "p" | "punctuation" => Category::Punctuation,
                     _ => Category::Any,
                 };
@@ -725,6 +728,26 @@ impl Input {
     }
 }
 
+/// Unicode `Nd`: numeric characters less the other numbers (`No`, `Nl`:
+/// superscripts, fractions, roman numerals, circled numbers...).
+fn is_decimal(c: char) -> bool {
+    if c.is_ascii_digit() {
+        return true;
+    }
+    if !c.is_numeric() || c.is_ascii() {
+        return false;
+    }
+    let u = c as u32;
+    let other = matches!(u,
+        0xb2 | 0xb3 | 0xb9 | 0xbc..=0xbe | 0x9f4..=0x9f9 | 0xb72..=0xb77 | 0xbf0..=0xbf2 | 0xc78..=0xc7e
+        | 0xd58..=0xd5e | 0xd70..=0xd78 | 0xf2a..=0xf33 | 0x1369..=0x137c | 0x16ee..=0x16f0 | 0x17f0..=0x17f9
+        | 0x19da | 0x2070..=0x209f | 0x2150..=0x218f | 0x2460..=0x24ff | 0x2776..=0x2793 | 0x2cfd | 0x3007
+        | 0x3021..=0x3029 | 0x3038..=0x303a | 0x3192..=0x3195 | 0x3220..=0x3229 | 0x3248..=0x324f
+        | 0x3251..=0x325f | 0x3280..=0x3289 | 0x32b1..=0x32bf | 0xa6e6..=0xa6ef | 0xa830..=0xa835
+        | 0x10107..=0x10133 | 0x10140..=0x10178 | 0x1018a..=0x1018b | 0x10e60..=0x10e7e | 0x1f100..=0x1f10c);
+    !other
+}
+
 fn is_word(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
@@ -759,6 +782,7 @@ impl Class {
                         Category::Upper => c.is_uppercase(),
                         Category::Lower => c.is_lowercase(),
                         Category::Number => c.is_numeric(),
+                        Category::Decimal => is_decimal(c),
                         Category::Punctuation => c.is_ascii_punctuation() || (!c.is_alphanumeric() && !c.is_whitespace() && !c.is_control()),
                         Category::Any => true,
                     };

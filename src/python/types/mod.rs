@@ -366,6 +366,7 @@ pub fn special_attr(vm: &mut Vm, object: &Value, name: &str) -> PyResult<Option<
         (Value::File(f), "closed") => Some(Value::Bool(f.borrow().closed)),
         (Value::Property(p), "fget") => Some(p[0].clone()),
         (Value::Property(p), "fset") => Some(p[1].clone()),
+        (Value::Property(p), "fdel") => Some(p[2].clone()),
         (Value::StaticMethod(f) | Value::ClassMethod(f), "__func__") => Some((**f).clone()),
         (_, "__doc__") => Some(Value::None),
         _ => {

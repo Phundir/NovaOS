@@ -159,6 +159,8 @@ pub struct Class {
     pub id: usize,
     /// The class of this class when it is not `type`.
     pub metaclass: RefCell<Option<Rc<Class>>>,
+    /// The classes derived directly from this one (`__subclasses__`).
+    pub subclasses: RefCell<Vec<alloc::rc::Weak<Class>>>,
 }
 
 pub struct Instance {
@@ -547,7 +549,13 @@ impl Class {
             base,
             id: NEXT_CLASS_ID.next(),
             metaclass: RefCell::new(None),
+            subclasses: RefCell::new(Vec::new()),
         });
+        for base in class.bases.iter() {
+            let mut list = base.subclasses.borrow_mut();
+            list.retain(|w| w.strong_count() > 0);
+            list.push(Rc::downgrade(&class));
+        }
         track(Tracked::Class(Rc::downgrade(&class)));
         class
     }

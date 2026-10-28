@@ -14,6 +14,8 @@ use super::super::int::Int;
 use super::super::types::num::{float_of, float_to_int};
 use super::super::value::*;
 use super::super::vm::{PyResult, Vm};
+use super::super::ast::BinOp;
+use super::libm;
 use crate::web::js::num::Num;
 
 fn arg(vm: &mut Vm, a: &[Value], i: usize, function: &str) -> PyResult<Num> {
@@ -176,21 +178,12 @@ fn log1p(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
     if x.partial_cmp(Num::ONE.neg()) != Some(core::cmp::Ordering::Greater) {
         return domain(vm);
     }
-    // For small x, ln(1 + x) loses x's low bits: the series instead.
-    if x.abs().lt(Num::ONE.scale2(-20)) {
-        let x2 = x.mul(x);
-        return Ok(Value::Float(x.sub(x2.div(Num::TWO)).add(x2.mul(x).div(Num::from_i64(3)))));
-    }
-    Ok(Value::Float(Num::ONE.add(x).ln()))
+    Ok(Value::Float(libm::log1p(x)))
 }
 
 fn expm1(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
     let x = arg(vm, a, 0, "expm1")?;
-    if x.abs().lt(Num::ONE.scale2(-20)) {
-        let x2 = x.mul(x);
-        return Ok(Value::Float(x.add(x2.div(Num::TWO)).add(x2.mul(x).div(Num::from_i64(6)))));
-    }
-    checked(vm, x, x.exp().sub(Num::ONE))
+    checked(vm, x, libm::expm1(x))
 }
 
 fn trig(vm: &mut Vm, a: &[Value], name: &str, f: fn(Num) -> Num) -> PyResult<Value> {
@@ -233,23 +226,267 @@ fn atan2(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
 
 fn sinh(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
     let x = arg(vm, a, 0, "sinh")?;
-    let e = x.exp();
-    checked(vm, x, e.sub(Num::ONE.div(e)).div(Num::TWO))
+    checked(vm, x, libm::sinh(x))
 }
 
 fn cosh(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
     let x = arg(vm, a, 0, "cosh")?;
-    let e = x.exp();
-    checked(vm, x, e.add(Num::ONE.div(e)).div(Num::TWO))
+    checked(vm, x, libm::cosh(x))
 }
 
 fn tanh(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
     let x = arg(vm, a, 0, "tanh")?;
-    if x.abs().partial_cmp(Num::from_i64(20)) == Some(core::cmp::Ordering::Greater) {
-        return Ok(Value::Float(if x.is_negative() { Num::ONE.neg() } else { Num::ONE }));
+    Ok(Value::Float(libm::tanh(x)))
+}
+
+fn asinh(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let x = arg(vm, a, 0, "asinh")?;
+    Ok(Value::Float(libm::asinh(x)))
+}
+
+fn acosh(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let x = arg(vm, a, 0, "acosh")?;
+    checked(vm, x, libm::acosh(x))
+}
+
+fn atanh(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let x = arg(vm, a, 0, "atanh")?;
+    if !x.abs().lt(Num::ONE) && !x.is_nan() {
+        return domain(vm);
     }
-    let e2 = x.mul(Num::TWO).exp();
-    Ok(Value::Float(e2.sub(Num::ONE).div(e2.add(Num::ONE))))
+    Ok(Value::Float(libm::atanh(x)))
+}
+
+fn erf(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let x = arg(vm, a, 0, "erf")?;
+    Ok(Value::Float(libm::erf(x)))
+}
+
+fn erfc(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let x = arg(vm, a, 0, "erfc")?;
+    Ok(Value::Float(libm::erfc(x)))
+}
+
+fn gamma(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let x = arg(vm, a, 0, "gamma")?;
+    match libm::gamma(x) {
+        Ok(r) => Ok(Value::Float(r)),
+        Err(true) => domain(vm),
+        Err(false) => range_error(vm),
+    }
+}
+
+fn lgamma(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let x = arg(vm, a, 0, "lgamma")?;
+    match libm::lgamma(x) {
+        Ok(r) => Ok(Value::Float(r)),
+        Err(true) => domain(vm),
+        Err(false) => range_error(vm),
+    }
+}
+
+fn cbrt(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let x = arg(vm, a, 0, "cbrt")?;
+    Ok(Value::Float(libm::cbrt(x)))
+}
+
+/// IEEE 754 remainder, CPython's own algorithm (`m_remainder`).
+fn remainder(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let x = arg(vm, a, 0, "remainder")?;
+    let y = arg(vm, a, 1, "remainder")?;
+    if x.is_finite() && y.is_finite() {
+        if y.is_zero() {
+            return domain(vm);
+        }
+        let (absx, absy) = (x.abs(), y.abs());
+        let m = absx.rem(absy);
+        let c = absy.sub(m);
+        let r = if m.lt(c) {
+            m
+        } else if c.lt(m) {
+            c.neg()
+        } else {
+            m.sub(Num::TWO.mul(Num::HALF.mul(absx.sub(m)).rem(absy)))
+        };
+        let sign = if x.is_sign_negative() { Num::ONE.neg() } else { Num::ONE };
+        return Ok(Value::Float(sign.mul(r)));
+    }
+    if x.is_nan() {
+        return Ok(Value::Float(x));
+    }
+    if y.is_nan() {
+        return Ok(Value::Float(y));
+    }
+    if x.is_infinite() {
+        return domain(vm);
+    }
+    Ok(Value::Float(x))
+}
+
+/// A double's position on the line of all doubles, where -0.0 and 0.0
+/// are the same point.
+fn ordinal(x: Num) -> i64 {
+    let magnitude = (x.0 & !(1 << 63)) as i64;
+    if x.0 >> 63 == 1 { -magnitude } else { magnitude }
+}
+
+/// `steps` doubles from `x` toward `y` (C's nextafter, repeated); a zero
+/// reached from a negative number stays -0.0.
+fn next_toward(x: Num, y: Num, steps: u64) -> Num {
+    if x.is_nan() {
+        return x;
+    }
+    if y.is_nan() {
+        return y;
+    }
+    if x.equals(y) {
+        return y;
+    }
+    let (from, to) = (ordinal(x), ordinal(y));
+    let distance = from.abs_diff(to);
+    if steps >= distance {
+        return y;
+    }
+    let n = if from < to { from + steps as i64 } else { from - steps as i64 };
+    if n == 0 {
+        return if from < 0 { Num::NEG_ZERO } else { Num::ZERO };
+    }
+    if n < 0 { Num((-n) as u64 | 1 << 63) } else { Num(n as u64) }
+}
+
+fn nextafter(vm: &mut Vm, a: &[Value], kw: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let x = arg(vm, a, 0, "nextafter")?;
+    let y = arg(vm, a, 1, "nextafter")?;
+    let steps = match a.get(2).or_else(|| args::keyword(kw, "steps")) {
+        None | Some(Value::None) => 1,
+        Some(v) => {
+            let n = match v {
+                Value::Int(n) => n.clone(),
+                Value::Bool(b) => Int::Small(*b as i64),
+                _ => return vm.type_error("'float' object cannot be interpreted as an integer"),
+            };
+            if n.is_negative() {
+                return vm.value_error("steps must be a non-negative integer");
+            }
+            n.to_i64().map_or(u64::MAX, |n| n as u64)
+        }
+    };
+    if steps == 0 {
+        return Ok(Value::Float(x));
+    }
+    Ok(Value::Float(next_toward(x, y, steps)))
+}
+
+fn ulp(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let x = arg(vm, a, 0, "ulp")?;
+    if x.is_nan() {
+        return Ok(Value::Float(x));
+    }
+    let x = x.abs();
+    if x.is_infinite() {
+        return Ok(Value::Float(x));
+    }
+    let up = next_toward(x, Num::INFINITY, 1);
+    if up.is_infinite() {
+        let down = next_toward(x, Num::NEG_INFINITY, 1);
+        return Ok(Value::Float(x.sub(down)));
+    }
+    Ok(Value::Float(up.sub(x)))
+}
+
+/// The exact value of a finite double, as `n * 2^-2148`: the unit in
+/// which products of two doubles (and sums of them) are exact.
+fn exact_units(x: Num) -> Int {
+    let (negative, m, e) = x.decompose();
+    let n = Int::from_u128(m as u128).shl((e + 1074) as u64).unwrap_or(Int::zero());
+    if negative { n.neg() } else { n }
+}
+
+fn exact_product(x: Num, y: Num) -> Int {
+    let (nx, mx, ex) = x.decompose();
+    let (ny, my, ey) = y.decompose();
+    let n = Int::from_u128(mx as u128 * my as u128).shl((ex + ey + 2148) as u64).unwrap_or(Int::zero());
+    if nx != ny { n.neg() } else { n }
+}
+
+/// Rounds `n * 2^-2148` to a double, once.
+fn round_units(n: &Int) -> Num {
+    if n.is_zero() {
+        return Num::ZERO;
+    }
+    let scale = Int::Small(1).shl(2148).unwrap_or(Int::Small(1));
+    super::super::types::int_true_div(n, &scale)
+}
+
+fn fma(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let x = arg(vm, a, 0, "fma")?;
+    let y = arg(vm, a, 1, "fma")?;
+    let z = arg(vm, a, 2, "fma")?;
+    if !(x.is_finite() && y.is_finite() && z.is_finite()) {
+        let r = x.mul(y).add(z);
+        if r.is_nan() && !x.is_nan() && !y.is_nan() && !z.is_nan() {
+            return vm.value_error("invalid operation in fma");
+        }
+        return Ok(Value::Float(r));
+    }
+    let total = exact_product(x, y).add(&exact_units(z).shl(1074).unwrap_or(Int::zero()));
+    if total.is_zero() {
+        // The sign of an exact zero: -0.0 only when both parts are -0.0
+        // or negative zeros cancel as IEEE says.
+        return Ok(Value::Float(x.mul(y).add(z)));
+    }
+    let r = round_units(&total);
+    if r.is_infinite() {
+        return vm.overflow("overflow in fma");
+    }
+    Ok(Value::Float(r))
+}
+
+/// `sumprod(p, q)`: exact on ints, rounded once on floats (CPython
+/// computes in extended precision with the same result), the generic
+/// operators otherwise.
+fn sumprod(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let (Some(p), Some(q)) = (a.first(), a.get(1)) else {
+        return vm.type_error("sumprod() takes exactly 2 arguments");
+    };
+    let p = vm.collect(p)?;
+    let q = vm.collect(q)?;
+    if p.len() != q.len() {
+        return vm.value_error("Inputs are not the same length");
+    }
+    let all_int = p.iter().chain(q.iter()).all(|v| matches!(v, Value::Int(_) | Value::Bool(_)));
+    let all_real = p.iter().chain(q.iter()).all(|v| matches!(v, Value::Int(_) | Value::Bool(_) | Value::Float(_)));
+    let any_float = p.iter().chain(q.iter()).any(|v| matches!(v, Value::Float(_)));
+    if all_real && any_float && !all_int {
+        let mut floats = Vec::with_capacity(p.len());
+        let mut exact = true;
+        for (x, y) in p.iter().zip(q.iter()) {
+            let fx = float_of(vm, x)?;
+            let fy = float_of(vm, y)?;
+            if !fx.is_finite() || !fy.is_finite() {
+                exact = false;
+            }
+            floats.push((fx, fy));
+        }
+        if exact {
+            let mut total = Int::zero();
+            for (x, y) in floats.iter() {
+                total = total.add(&exact_product(*x, *y));
+            }
+            return Ok(Value::Float(round_units(&total)));
+        }
+        let mut total = Num::ZERO;
+        for (x, y) in floats {
+            total = total.add(x.mul(y));
+        }
+        return Ok(Value::Float(total));
+    }
+    let mut total = Value::int(0);
+    for (x, y) in p.iter().zip(q.iter()) {
+        let product = vm.binary(BinOp::Mul, x, y, false)?;
+        total = vm.binary(BinOp::Add, &total, &product, false)?;
+    }
+    Ok(total)
 }
 
 fn floor_or_ceil(vm: &mut Vm, a: &[Value], ceil: bool) -> PyResult<Value> {
@@ -714,7 +951,9 @@ pub fn module(vm: &mut Vm) -> Rc<Module> {
         ("radians", radians), ("isfinite", isfinite), ("isinf", isinf), ("isnan", isnan), ("isclose", isclose),
         ("copysign", copysign), ("fmod", fmod), ("modf", modf), ("frexp", frexp), ("ldexp", ldexp), ("fsum", fsum),
         ("prod", prod), ("factorial", factorial), ("gcd", gcd), ("lcm", lcm), ("isqrt", isqrt), ("comb", comb),
-        ("perm", perm),
+        ("perm", perm), ("asinh", asinh), ("acosh", acosh), ("atanh", atanh), ("erf", erf), ("erfc", erfc),
+        ("gamma", gamma), ("lgamma", lgamma), ("cbrt", cbrt), ("remainder", remainder), ("nextafter", nextafter),
+        ("ulp", ulp), ("fma", fma), ("sumprod", sumprod),
     ];
     let module = super::native_module(vm, "math", functions);
     super::set(&module, "pi", Value::Float(Num::PI));

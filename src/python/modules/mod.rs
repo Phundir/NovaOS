@@ -9,7 +9,9 @@
 //! its body runs, so a cycle of imports sees the partial module, as in
 //! CPython; a module whose body fails is removed again.
 
+pub mod codec;
 pub mod json;
+pub mod libm;
 pub mod math;
 pub mod random;
 pub mod re;
@@ -33,9 +35,14 @@ const SOURCES: &[(&str, &str)] = &[
     ("cmath", include_str!("lib/cmath.py")),
     ("bisect", include_str!("lib/bisect.py")),
     ("collections", include_str!("lib/collections.py")),
+    ("collections.abc", include_str!("lib/collections_abc.py")),
+    ("fractions", include_str!("lib/fractions.py")),
+    ("numbers", include_str!("lib/numbers.py")),
+    ("statistics", include_str!("lib/statistics.py")),
     ("contextlib", include_str!("lib/contextlib.py")),
     ("copy", include_str!("lib/copy.py")),
     ("dataclasses", include_str!("lib/dataclasses.py")),
+    ("datetime", include_str!("lib/datetime.py")),
     ("enum", include_str!("lib/enum.py")),
     ("functools", include_str!("lib/functools.py")),
     ("heapq", include_str!("lib/heapq.py")),
@@ -43,6 +50,17 @@ const SOURCES: &[(&str, &str)] = &[
     ("operator", include_str!("lib/operator.py")),
     ("string", include_str!("lib/string.py")),
     ("typing", include_str!("lib/typing.py")),
+    ("fnmatch", include_str!("lib/fnmatch.py")),
+    ("glob", include_str!("lib/glob.py")),
+    ("pathlib", include_str!("lib/pathlib.py")),
+    ("base64", include_str!("lib/base64.py")),
+    ("binascii", include_str!("lib/binascii.py")),
+    ("hashlib", include_str!("lib/hashlib.py")),
+    ("hmac", include_str!("lib/hmac.py")),
+    ("io", include_str!("lib/io.py")),
+    ("struct", include_str!("lib/struct.py")),
+    ("textwrap", include_str!("lib/textwrap.py")),
+    ("zlib", include_str!("lib/zlib.py")),
 ];
 
 /// The names `help('modules')` would list: native and shipped.
@@ -162,12 +180,18 @@ fn load(vm: &mut Vm, name: &str) -> PyResult<Value> {
         "random" => Some(random::module(vm)),
         "sys" => Some(system::sys(vm)),
         "time" => Some(system::time(vm)),
-        "os" => Some(system::os(vm)),
+        "os" => {
+            let module = system::os(vm);
+            // The parts of os written in Python, added onto the module.
+            execute(vm, "_osextra", "<_osextra>", include_str!("lib/_osextra.py"), None)?;
+            return Ok(Value::Module(module));
+        }
         "os.path" => {
             load(vm, "os")?;
             return registered(vm, "os.path").ok_or_else(|| not_found(vm, name));
         }
         "json" => Some(json::module(vm)),
+        "_nova" => Some(codec::module(vm)),
         "re" => Some(re::module(vm)),
         "traceback" => Some(system::traceback(vm)),
         _ => None,
@@ -176,8 +200,13 @@ fn load(vm: &mut Vm, name: &str) -> PyResult<Value> {
         return Ok(Value::Module(module));
     }
     if let Some((_, source)) = SOURCES.iter().find(|(n, _)| *n == name) {
+        if let Some(i) = name.rfind('.') {
+            load(vm, &name[..i])?;
+        }
         let file = alloc::format!("<{}>", name);
-        return execute(vm, name, &file, source, None);
+        let module = execute(vm, name, &file, source, None)?;
+        bind_in_parent(vm, name, &module);
+        return Ok(module);
     }
     // The program's own modules: the directories to look in.
     let (directories, leaf) = match name.rfind('.') {

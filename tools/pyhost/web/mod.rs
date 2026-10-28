@@ -2,3 +2,6 @@
 //! build: the JavaScript engine's numbers and regular expressions.
 
 pub mod js;
+
+#[path = "../../../src/web/inflate.rs"]
+pub mod inflate;

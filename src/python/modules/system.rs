@@ -397,14 +397,41 @@ pub fn time(vm: &mut Vm) -> Rc<Module> {
 
 fn path_arg(vm: &mut Vm, value: Option<&Value>) -> PyResult<String> {
     match value {
-        Some(Value::Str(s)) => Ok(String::from(&**s)),
-        Some(other) => {
-            let name = vm.type_name(other);
-            let message = alloc::format!("expected str, bytes or os.PathLike object, not {}", name);
-            vm.type_error(&message)
-        }
+        Some(v) => Ok(String::from(&*fspath(vm, v)?)),
         None => vm.type_error("missing required argument 'path'"),
     }
+}
+
+/// A path argument: a str, or an object with `__fspath__` (pathlib).
+pub fn fspath(vm: &mut Vm, value: &Value) -> PyResult<Rc<str>> {
+    match value {
+        Value::Str(s) => return Ok(s.clone()),
+        Value::Bytes(b) => return Ok(Rc::from(super::super::types::bytes::latin1(b).as_str())),
+        Value::Instance(_) => {
+            let class = vm.class_of(value);
+            if let Some(method) = class.lookup("__fspath__") {
+                let r = vm.call(&method, core::slice::from_ref(value), &[])?;
+                if let Value::Str(s) = r {
+                    return Ok(s);
+                }
+                let name = vm.type_name(&r);
+                let message = alloc::format!("expected {}.__fspath__() to return str or bytes, not {}", class.name, name);
+                return vm.type_error(&message);
+            }
+        }
+        _ => {}
+    }
+    let name = vm.type_name(value);
+    let message = alloc::format!("expected str, bytes or os.PathLike object, not {}", name);
+    vm.type_error(&message)
+}
+
+fn fspath_native(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let v = a.first().cloned().unwrap_or(Value::None);
+    if let Value::Bytes(_) = v {
+        return Ok(v);
+    }
+    Ok(Value::Str(fspath(vm, &v)?))
 }
 
 fn getcwd(vm: &mut Vm, _: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
@@ -689,6 +716,7 @@ pub fn os(vm: &mut Vm) -> Rc<Module> {
     let functions: &[(&'static str, NativeFn)] = &[
         ("getcwd", getcwd), ("listdir", listdir), ("mkdir", mkdir), ("makedirs", makedirs), ("remove", remove),
         ("unlink", remove), ("rmdir", rmdir), ("rename", rename), ("replace", rename), ("getenv", getenv), ("walk", walk),
+        ("fspath", fspath_native),
     ];
     let module = super::native_module(vm, "os", functions);
     super::set(&module, "path", Value::Module(path));

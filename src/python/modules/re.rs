@@ -13,7 +13,7 @@
 //! non-empty one, never twice at the same place (`re.sub('x*', '-',
 //! 'abxd')` is `'-a-b--d-'`).
 //!
-//! Limits: `\d`, `\w`, `\s` are ASCII (CPython's are Unicode on str
+//! Limits (former): `\d`, `\w`, `\s` were ASCII (CPython's are Unicode on str
 //! patterns); conditional groups `(?(1)...)` are refused.
 
 use alloc::rc::Rc;
@@ -50,8 +50,9 @@ fn translate(pattern: &str, mut flags: i64) -> Result<(String, i64), String> {
     // Global inline flags at the start: (?aiLmsux).
     while chars.get(i) == Some(&'(') && chars.get(i + 1) == Some(&'?') && chars.get(i + 2).is_some_and(|c| "aiLmsux".contains(*c)) {
         let mut j = i + 2;
+        let mut found = 0;
         while j < chars.len() && "aiLmsux".contains(chars[j]) {
-            flags |= match chars[j] {
+            found |= match chars[j] {
                 'i' => IGNORECASE,
                 'm' => MULTILINE,
                 's' => DOTALL,
@@ -62,16 +63,28 @@ fn translate(pattern: &str, mut flags: i64) -> Result<(String, i64), String> {
             };
             j += 1;
         }
+        // `(?i:...)` is a scoped group, handled below.
         if chars.get(j) != Some(&')') {
             break;
         }
+        flags |= found;
         i = j + 1;
     }
-    let verbose = flags & VERBOSE != 0;
-    let multiline = flags & MULTILINE != 0;
-    let dotall = flags & DOTALL != 0;
+    let mut verbose = flags & VERBOSE != 0;
+    let mut multiline = flags & MULTILINE != 0;
+    let mut dotall = flags & DOTALL != 0;
+    // Python's \d \w \s are Unicode on str patterns, JavaScript's ASCII.
+    let unicode = flags & ASCII == 0;
+    // A case-insensitive scope `(?i:...)` inside a case-sensitive pattern:
+    // its letters become [xX] (the engine has no scoped flags).
+    let mut local_ignore = false;
+    let global_ignore = flags & IGNORECASE != 0;
+    // Every open group: the flags to restore at its `)`, for `(?s:...)`.
+    let mut scopes: Vec<Option<(bool, bool, bool, bool)>> = Vec::new();
     let mut out = String::with_capacity(pattern.len() + 8);
     let mut in_class = false;
+    const WORD: &str = "\\p{L}\\p{N}_";
+    const SPACE: &str = "\\t\\n\\x0b\\x0c\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
     while i < chars.len() {
         let c = chars[i];
         if verbose && !in_class {
@@ -94,6 +107,22 @@ fn translate(pattern: &str, mut flags: i64) -> Result<(String, i64), String> {
                 match next {
                     'A' if !in_class => out.push_str("(?<![\\s\\S])"),
                     'Z' if !in_class => out.push_str("(?![\\s\\S])"),
+                    'd' if unicode => out.push_str("\\p{Nd}"),
+                    'w' if unicode => {
+                        if in_class { out.push_str(WORD) } else { out.push_str(&alloc::format!("[{}]", WORD)) }
+                    }
+                    's' if unicode => {
+                        if in_class { out.push_str(SPACE) } else { out.push_str(&alloc::format!("[{}]", SPACE)) }
+                    }
+                    'D' if unicode && !in_class => out.push_str("\\P{Nd}"),
+                    'W' if unicode && !in_class => out.push_str(&alloc::format!("[^{}]", WORD)),
+                    'S' if unicode && !in_class => out.push_str(&alloc::format!("[^{}]", SPACE)),
+                    'b' if unicode && !in_class => {
+                        out.push_str(&alloc::format!("(?:(?<=[{w}])(?![{w}])|(?<![{w}])(?=[{w}]))", w = WORD))
+                    }
+                    'B' if unicode && !in_class => {
+                        out.push_str(&alloc::format!("(?:(?<=[{w}])(?=[{w}])|(?<![{w}])(?![{w}]))", w = WORD))
+                    }
                     _ => {
                         out.push('\\');
                         out.push(next);
@@ -125,6 +154,7 @@ fn translate(pattern: &str, mut flags: i64) -> Result<(String, i64), String> {
                 let rest: String = chars[i + 2..].iter().take(3).collect();
                 if rest.starts_with("P<") {
                     out.push_str("(?<");
+                    scopes.push(None);
                     i += 4;
                     continue;
                 }
@@ -145,11 +175,78 @@ fn translate(pattern: &str, mut flags: i64) -> Result<(String, i64), String> {
                 if rest.starts_with('(') {
                     return Err(String::from("conditional groups are not supported"));
                 }
+                // A scoped flag group: (?aimsx-imsx:...).
+                let mut j = i + 2;
+                let mut on = String::new();
+                let mut off = String::new();
+                let mut negative = false;
+                while j < chars.len() && ("aiLmsux".contains(chars[j]) || chars[j] == '-') {
+                    if chars[j] == '-' {
+                        negative = true;
+                    } else if negative {
+                        off.push(chars[j]);
+                    } else {
+                        on.push(chars[j]);
+                    }
+                    j += 1;
+                }
+                if j > i + 2 && chars.get(j) == Some(&':') {
+                    scopes.push(Some((dotall, multiline, verbose, local_ignore)));
+                    for (set, value) in [(&on, true), (&off, false)] {
+                        for f in set.chars() {
+                            match f {
+                                's' => dotall = value,
+                                'm' => multiline = value,
+                                'x' => verbose = value,
+                                'i' => local_ignore = value && !global_ignore,
+                                _ => {}
+                            }
+                        }
+                    }
+                    out.push_str("(?:");
+                    i = j + 1;
+                    continue;
+                }
+                if j > i + 2 && chars.get(j) == Some(&')') {
+                    return Err(alloc::format!("global flags not at the start of the expression at position {}", i));
+                }
+                scopes.push(None);
                 out.push('(');
+            }
+            '(' if !in_class => {
+                scopes.push(None);
+                out.push('(');
+            }
+            ')' if !in_class => {
+                if let Some(Some((d, m, v, l))) = scopes.pop() {
+                    dotall = d;
+                    multiline = m;
+                    verbose = v;
+                    local_ignore = l;
+                }
+                out.push(')');
             }
             '.' if !in_class => out.push_str(if dotall { "[\\s\\S]" } else { "[^\\n]" }),
             '$' if !in_class => out.push_str(if multiline { "(?=\\n|(?![\\s\\S]))" } else { "(?=\\n?(?![\\s\\S]))" }),
             '^' if !in_class && multiline => out.push_str("(?:(?<![\\s\\S])|(?<=\\n))"),
+            letter if local_ignore && letter.is_alphabetic() => {
+                let lower: String = letter.to_lowercase().collect();
+                let upper: String = letter.to_uppercase().collect();
+                if in_class {
+                    // A range of letters takes its other case too.
+                    if chars.get(i + 1) == Some(&'-') && chars.get(i + 2).is_some_and(|c| c.is_alphabetic()) {
+                        let high = chars[i + 2];
+                        let other = |c: char| if c.is_lowercase() { c.to_uppercase().next().unwrap_or(c) } else { c.to_lowercase().next().unwrap_or(c) };
+                        out.push_str(&alloc::format!("{}-{}{}-{}", letter, high, other(letter), other(high)));
+                        i += 3;
+                        continue;
+                    }
+                    out.push_str(&lower);
+                    out.push_str(&upper);
+                } else {
+                    out.push_str(&alloc::format!("[{}{}]", lower, upper));
+                }
+            }
             other => out.push(other),
         }
         i += 1;

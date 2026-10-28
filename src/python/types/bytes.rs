@@ -130,8 +130,9 @@ fn via_str(vm: &mut Vm, a: &[Value], kw: &[(Rc<str>, Value)]) -> PyResult<Value>
         }
         converted.push(Value::list(parts));
     } else {
-        for value in a[2..].iter() {
-            converted.push(argument(vm, value, allow_int)?);
+        for (i, value) in a[2..].iter().enumerate() {
+            // `find(sub, start, end)`: only `sub` may be a byte value.
+            converted.push(argument(vm, value, allow_int && i == 0)?);
         }
     }
     let mut keywords = Vec::new();
@@ -404,11 +405,26 @@ fn hex(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
         Some(v) => bytes_of(v).map(|b| latin1(&b)),
         None => None,
     };
+    let group = match a.get(2) {
+        Some(v) => args::int(vm, v)?,
+        None => 1,
+    };
     let parts: Vec<String> = bytes.iter().map(|x| alloc::format!("{:02x}", x)).collect();
-    Ok(Value::str(&match separator {
-        Some(sep) => parts.join(&sep),
-        None => parts.concat(),
-    }))
+    let Some(sep) = separator.filter(|_| group != 0) else {
+        return Ok(Value::str(&parts.concat()));
+    };
+    // Groups of `group` bytes, counted from the right when positive.
+    let size = group.unsigned_abs() as usize;
+    let n = parts.len();
+    let mut out = String::new();
+    for (i, p) in parts.iter().enumerate() {
+        let boundary = if group > 0 { i > 0 && (n - i) % size == 0 } else { i > 0 && i % size == 0 };
+        if boundary {
+            out.push_str(&sep);
+        }
+        out.push_str(p);
+    }
+    Ok(Value::str(&out))
 }
 
 fn fromhex(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {

@@ -29,6 +29,7 @@ use super::{constructor, method};
 /// built-in type -- built from the arguments for an immutable one,
 /// empty for a list, dict or set, which `__init__` fills.
 pub fn allocate(vm: &mut Vm, class: &Rc<Class>, a: &[Value], kw: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    abstract_check(vm, class)?;
     let instance = Instance::new(class.clone());
     if !matches!(class.base, Base::Object | Base::Exception | Base::Other) {
         if let Some(make) = constructor(vm, class) {
@@ -41,6 +42,27 @@ pub fn allocate(vm: &mut Vm, class: &Rc<Class>, a: &[Value], kw: &[(Rc<str>, Val
         instance.dict.borrow_mut().set_str("args", Value::tuple(a.to_vec()));
     }
     Ok(Value::Instance(instance))
+}
+
+/// A class whose `__abstractmethods__` is not empty (abc) cannot be
+/// instantiated, CPython's message naming the methods in order.
+fn abstract_check(vm: &mut Vm, class: &Rc<Class>) -> PyResult<()> {
+    let Some(Value::FrozenSet(set)) = class.lookup("__abstractmethods__") else {
+        return Ok(());
+    };
+    let mut names: Vec<String> = set.keys().iter().filter_map(|v| if let Value::Str(s) = v { Some(String::from(&**s)) } else { None }).collect();
+    if names.is_empty() {
+        return Ok(());
+    }
+    names.sort();
+    let listed: Vec<String> = names.iter().map(|n| alloc::format!("'{}'", n)).collect();
+    let message = alloc::format!(
+        "Can't instantiate abstract class {} without an implementation for abstract method{} {}",
+        class.name,
+        if names.len() > 1 { "s" } else { "" },
+        listed.join(", ")
+    );
+    vm.type_error(&message)
 }
 
 /// `object.__new__(cls, ...)` and the `__new__` of built-in types.
@@ -346,6 +368,34 @@ fn type_dunder_init(_: &mut Vm, _: &[Value], _: &[(Rc<str>, Value)]) -> PyResult
 
 fn type_prepare(_: &mut Vm, _: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
     Ok(Value::dict(super::super::dict::Dict::new()))
+}
+
+fn type_subclasses(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    match a.first() {
+        Some(Value::Class(c)) => Ok(Value::list(c.subclasses.borrow().iter().filter_map(|w| w.upgrade()).map(Value::Class).collect())),
+        _ => vm.type_error("descriptor '__subclasses__' requires a 'type' object"),
+    }
+}
+
+/// `type.__instancecheck__` and `type.__subclasscheck__`: the plain test,
+/// for a metaclass's `super()` call.
+fn type_instancecheck(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let (Some(Value::Class(c)), Some(object)) = (a.first(), a.get(1)) else {
+        return vm.type_error("__instancecheck__ expected 1 argument");
+    };
+    Ok(Value::Bool(vm.class_of(object).is_subclass(c)))
+}
+
+fn type_subclasscheck(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    match (a.first(), a.get(1)) {
+        (Some(Value::Class(c)), Some(Value::Class(sub))) => Ok(Value::Bool(sub.is_subclass(c))),
+        _ => vm.type_error("issubclass() arg 1 must be a class"),
+    }
+}
+
+/// `object.__subclasshook__`: no opinion.
+fn object_subclasshook(_: &mut Vm, _: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    Ok(Value::NotImplemented)
 }
 
 fn type_mro(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
@@ -1052,10 +1102,14 @@ pub fn install(vm: &mut Vm) {
     }
     // `__new__` is called with the class: not bound.
     object.dict.borrow_mut().set_str("__new__", super::native("__new__", object_new));
+    object.dict.borrow_mut().set_str("__subclasshook__", Value::ClassMethod(Rc::new(super::native("__subclasshook__", object_subclasshook))));
     object.dict.borrow_mut().set_str("__init_subclass__", Value::ClassMethod(Rc::new(super::native("__init_subclass__", object_init_subclass))));
 
     let type_ = vm.types.type_.clone();
     method(&type_, "mro", type_mro);
+    method(&type_, "__subclasses__", type_subclasses);
+    method(&type_, "__instancecheck__", type_instancecheck);
+    method(&type_, "__subclasscheck__", type_subclasscheck);
     method(&type_, "__call__", type_dunder_call);
     method(&type_, "__init__", type_dunder_init);
     type_.dict.borrow_mut().set_str("__new__", super::native("__new__", type_dunder_new));

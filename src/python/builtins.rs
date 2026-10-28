@@ -91,13 +91,8 @@ fn input(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
 }
 
 fn open(vm: &mut Vm, a: &[Value], kw: &[(Rc<str>, Value)]) -> PyResult<Value> {
-    let path = match args::get(a, kw, 0, "file") {
-        Some(Value::Str(s)) => s.clone(),
-        Some(other) => {
-            let t = vm.type_name(other);
-            let message = alloc::format!("expected str, bytes or os.PathLike object, not {}", t);
-            return vm.type_error(&message);
-        }
+    let path = match args::get(a, kw, 0, "file").cloned() {
+        Some(v) => super::modules::system::fspath(vm, &v)?,
         None => return vm.type_error("open() missing required argument 'file' (pos 1)"),
     };
     let mode = match args::get(a, kw, 1, "mode") {
@@ -888,25 +883,65 @@ fn class_matches(vm: &mut Vm, class: &Rc<Class>, of: &Value, function: &str) -> 
     }
 }
 
+/// `isinstance(object, of)`: tuples member by member, then the
+/// metaclass's `__instancecheck__` (abc.ABCMeta), then the MRO.
+fn instance_check(vm: &mut Vm, object: &Value, of: &Value) -> PyResult<bool> {
+    let class = vm.class_of(object);
+    match of {
+        Value::Class(c) if class.id == c.id => return Ok(true),
+        Value::Tuple(items) => {
+            for item in items.iter() {
+                if instance_check(vm, object, item)? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+        Value::Class(c) => {
+            let meta = c.metaclass.borrow().clone();
+            if let Some(hook) = meta.and_then(|m| m.lookup("__instancecheck__")) {
+                if matches!(hook, Value::Function(_)) {
+                    let r = vm.call(&hook, &[of.clone(), object.clone()], &[])?;
+                    return vm.truthy(&r);
+                }
+            }
+        }
+        _ => {}
+    }
+    class_matches(vm, &class, of, "isinstance")
+}
+
+/// `issubclass(class, of)`, through the metaclass's `__subclasscheck__`.
+fn subclass_check(vm: &mut Vm, class: &Rc<Class>, of: &Value) -> PyResult<bool> {
+    match of {
+        Value::Tuple(items) => {
+            for item in items.iter() {
+                if subclass_check(vm, class, item)? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+        Value::Class(c) => {
+            let meta = c.metaclass.borrow().clone();
+            if let Some(hook) = meta.and_then(|m| m.lookup("__subclasscheck__")) {
+                if matches!(hook, Value::Function(_)) {
+                    let r = vm.call(&hook, &[of.clone(), Value::Class(class.clone())], &[])?;
+                    return vm.truthy(&r);
+                }
+            }
+        }
+        _ => {}
+    }
+    class_matches(vm, class, of, "issubclass")
+}
+
 fn isinstance(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
     let (Some(object), Some(of)) = (a.first(), a.get(1)) else {
         let message = alloc::format!("isinstance expected 2 arguments, got {}", a.len());
         return vm.type_error(&message);
     };
-    if let Value::Class(c) = of {
-        if let Some(hook) = c.lookup("__instancecheck__") {
-            if matches!(hook, Value::Function(_) | Value::ClassMethod(_)) {
-                let function = match hook {
-                    Value::ClassMethod(inner) => (*inner).clone(),
-                    other => other,
-                };
-                let r = vm.call(&function, &[of.clone(), object.clone()], &[])?;
-                return Ok(Value::Bool(vm.truthy(&r)?));
-            }
-        }
-    }
-    let class = vm.class_of(object);
-    Ok(Value::Bool(class_matches(vm, &class, of, "isinstance")?))
+    Ok(Value::Bool(instance_check(vm, object, of)?))
 }
 
 fn issubclass(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
@@ -918,7 +953,7 @@ fn issubclass(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Valu
         return vm.type_error("issubclass() arg 1 must be a class");
     };
     let class = class.clone();
-    Ok(Value::Bool(class_matches(vm, &class, of, "issubclass")?))
+    Ok(Value::Bool(subclass_check(vm, &class, of)?))
 }
 
 fn id(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
