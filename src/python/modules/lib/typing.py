@@ -230,3 +230,6 @@ class TypedDict(dict):
 
     def __new__(cls, *args, **kwargs):
         return dict(*args, **kwargs)
+
+
+from _builtins_extra import TypeAliasType

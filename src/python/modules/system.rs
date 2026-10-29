@@ -119,7 +119,8 @@ fn exc_info(vm: &mut Vm, _: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value>
     match vm.handling.last().cloned() {
         Some(exc) => {
             let class = Value::Class(vm.class_of(&exc));
-            Ok(Value::tuple(alloc::vec![class, exc, Value::None]))
+            let tb = vm.get_attr(&exc, "__traceback__")?;
+            Ok(Value::tuple(alloc::vec![class, exc, tb]))
         }
         None => Ok(Value::tuple(alloc::vec![Value::None, Value::None, Value::None])),
     }
@@ -172,12 +173,20 @@ pub fn sys(vm: &mut Vm) -> Rc<Module> {
     let argv: Vec<Value> = vm.argv.iter().map(|a| Value::str(a)).collect();
     super::set(&module, "argv", Value::list(argv));
     let path: Vec<Value> = vm.path.iter().map(|p| Value::str(p)).collect();
-    super::set(&module, "path", Value::list(path));
+    let path = Value::list(path);
+    if let Value::List(l) = &path {
+        vm.sys_path = Some(l.clone());
+    }
+    super::set(&module, "path", path);
     let mut modules = Dict::new();
     for (name, m) in &vm.modules {
         modules.set_str(name, m.clone());
     }
-    super::set(&module, "modules", Value::dict(modules));
+    let modules = Value::dict(modules);
+    if let Value::Dict(d) = &modules {
+        vm.sys_modules = Some(d.clone());
+    }
+    super::set(&module, "modules", modules);
     super::set(&module, "version", Value::str("3.13.0 (Nova OS, interprete integre)"));
     let info = struct_class(vm, "sys", "version_info", &["major", "minor", "micro", "releaselevel", "serial"]);
     let version = make_struct(&info, alloc::vec![Value::int(3), Value::int(13), Value::int(0), Value::str("final"), Value::int(0)]);
@@ -736,60 +745,110 @@ pub fn os(vm: &mut Vm) -> Rc<Module> {
 //  traceback
 // ------------------------------------------------------------
 
-fn current_or(vm: &mut Vm, a: &[Value]) -> Option<Value> {
-    match a.first() {
-        Some(v @ Value::Instance(_)) => Some(v.clone()),
-        Some(Value::Class(_)) => a.get(1).cloned(),
-        _ => vm.handling.last().cloned(),
-    }
-}
-
-fn format_exc(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
-    let _ = a;
-    match vm.handling.last().cloned() {
-        Some(exc) => Ok(Value::str(&super::super::format_exception(vm, &exc))),
-        None => Ok(Value::str("NoneType: None\n")),
-    }
-}
-
-fn print_exc(vm: &mut Vm, _: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
-    let text = match vm.handling.last().cloned() {
-        Some(exc) => super::super::format_exception(vm, &exc),
-        None => String::from("NoneType: None\n"),
-    };
-    vm.host.write(&text, true);
-    Ok(Value::None)
-}
-
-fn format_exception(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
-    match current_or(vm, a) {
-        Some(exc) => Ok(Value::list(alloc::vec![Value::str(&super::super::format_exception(vm, &exc))])),
-        None => Ok(Value::list(Vec::new())),
-    }
-}
-
-fn print_exception(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
-    if let Some(exc) = current_or(vm, a) {
-        let text = super::super::format_exception(vm, &exc);
-        vm.host.write(&text, true);
-    }
-    Ok(Value::None)
-}
-
-fn format_exception_only(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
-    match current_or(vm, a) {
-        Some(exc) => {
-            let line = super::super::exception_line(vm, &exc);
-            Ok(Value::list(alloc::vec![Value::str(&alloc::format!("{}\n", line))]))
+/// `_traceback.format(exc)`: the text CPython prints for an uncaught
+/// exception (chained ones included).
+fn tb_format(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let exc = a.first().cloned().unwrap_or(Value::None);
+    let chain = a.get(1).is_none_or(|c| !matches!(c, Value::Bool(false)));
+    if !chain {
+        if let Value::Instance(i) = &exc {
+            // Without the chain: the exception alone.
+            let (cause, context) = (i.cause.borrow().clone(), i.context.borrow().clone());
+            *i.cause.borrow_mut() = Value::None;
+            *i.context.borrow_mut() = Value::None;
+            let text = super::super::format_exception(vm, &exc);
+            *i.cause.borrow_mut() = cause;
+            *i.context.borrow_mut() = context;
+            return Ok(Value::str(&text));
         }
-        None => Ok(Value::list(Vec::new())),
     }
+    Ok(Value::str(&super::super::format_exception(vm, &exc)))
+}
+
+fn tb_exception_line(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let exc = a.first().cloned().unwrap_or(Value::None);
+    Ok(Value::str(&super::super::exception_line(vm, &exc)))
+}
+
+fn entry_tuple(vm: &mut Vm, file: &Rc<str>, line: u32, name: &Rc<str>, pos: Option<super::super::code::Pos>) -> Value {
+    let text = vm.source_line(file, line).map(|t| Value::str(t.trim())).unwrap_or(Value::None);
+    let (end_line, col, end_col) = match pos {
+        Some(p) if p.end_line != 0 => (Value::int(p.end_line as i64), Value::int(p.col as i64), Value::int(p.end_col as i64)),
+        _ => (Value::None, Value::None, Value::None),
+    };
+    Value::tuple(alloc::vec![Value::Str(file.clone()), Value::int(line as i64), Value::Str(name.clone()), text, end_line, col, end_col])
+}
+
+/// `_traceback.entries(exc)`: (filename, lineno, name, line, end_lineno,
+/// colno, end_colno) of each frame of the exception's traceback, the
+/// outermost first.
+fn tb_entries(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let Some(Value::Instance(i)) = a.first() else {
+        return Ok(Value::list(Vec::new()));
+    };
+    let entries = i.traceback.borrow().clone();
+    let mut out = Vec::new();
+    for (file, line, name, pos) in entries.iter().rev() {
+        out.push(entry_tuple(vm, file, *line, name, Some(*pos)));
+    }
+    Ok(Value::list(out))
+}
+
+/// `_traceback.set_entries(exc, entries)`: with_traceback, and
+/// `exc.__traceback__ = None`.
+fn tb_set_entries(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let Some(Value::Instance(i)) = a.first() else {
+        return Ok(Value::None);
+    };
+    let mut entries = Vec::new();
+    if let Some(list) = a.get(1) {
+        if !list.is_none() {
+            for item in vm.collect(list)? {
+                if let Value::Tuple(t) = item {
+                    if let (Some(Value::Str(f)), Some(Value::Int(l)), Some(Value::Str(n))) = (t.first(), t.get(1), t.get(2)) {
+                        entries.push((f.clone(), l.to_i64().unwrap_or(0) as u32, n.clone(), super::super::code::Pos::default()));
+                    }
+                }
+            }
+        }
+    }
+    entries.reverse();
+    *i.traceback.borrow_mut() = entries;
+    Ok(Value::None)
+}
+
+/// `_traceback.stack()`: the frames running now, outermost first (the
+/// library's own left out), for traceback.extract_stack.
+fn tb_stack(vm: &mut Vm, _: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let frames: Vec<(Rc<str>, u32, Rc<str>)> = vm
+        .frames
+        .iter()
+        .filter(|f| !f.code.filename.starts_with('<') || &*f.code.filename == "<string>" || &*f.code.filename == "<stdin>")
+        .map(|f| (f.code.filename.clone(), f.code.lines.get(f.last).copied().unwrap_or(f.code.first_line), f.code.name.clone()))
+        .collect();
+    let mut out = Vec::new();
+    for (file, line, name) in frames.iter() {
+        out.push(entry_tuple(vm, file, *line, name, None));
+    }
+    Ok(Value::list(out))
+}
+
+/// `_traceback.current()`: the exception being handled, or None.
+fn tb_current(vm: &mut Vm, _: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    Ok(vm.handling.last().cloned().unwrap_or(Value::None))
+}
+
+fn tb_write(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    if let Some(Value::Str(s)) = a.first() {
+        vm.host.write(s, true);
+    }
+    Ok(Value::None)
 }
 
 pub fn traceback(vm: &mut Vm) -> Rc<Module> {
     let functions: &[(&'static str, NativeFn)] = &[
-        ("format_exc", format_exc), ("print_exc", print_exc), ("format_exception", format_exception),
-        ("print_exception", print_exception), ("format_exception_only", format_exception_only),
+        ("format", tb_format), ("exception_line", tb_exception_line), ("entries", tb_entries),
+        ("set_entries", tb_set_entries), ("stack", tb_stack), ("current", tb_current), ("write_stderr", tb_write),
     ];
-    super::native_module(vm, "traceback", functions)
+    super::native_module(vm, "_traceback", functions)
 }

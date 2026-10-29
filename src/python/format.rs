@@ -86,11 +86,18 @@ pub fn str_repr(s: &str) -> String {
                 out.push('\\');
                 out.push(c);
             }
-            c if (c as u32) < 0x20 || (0x7f..0xa1).contains(&(c as u32)) || c as u32 == 0xad => {
-                out.push_str(&alloc::format!("\\x{:02x}", c as u32));
-            }
-            c if matches!(c as u32, 0x2028 | 0x2029 | 0x200b..=0x200f | 0xfeff) => {
-                out.push_str(&alloc::format!("\\u{:04x}", c as u32));
+            c if (c as u32) >= 0x20 && (c as u32) < 0x7f => out.push(c),
+            // CPython escapes what is not printable (categories C*, Z*
+            // but the space), by the shortest escape.
+            c if !super::modules::unicodedata::is_printable(c) => {
+                let code = c as u32;
+                if code < 0x100 {
+                    out.push_str(&alloc::format!("\\x{:02x}", code));
+                } else if code < 0x10000 {
+                    out.push_str(&alloc::format!("\\u{:04x}", code));
+                } else {
+                    out.push_str(&alloc::format!("\\U{:08x}", code));
+                }
             }
             c => out.push(c),
         }

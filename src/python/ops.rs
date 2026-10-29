@@ -122,7 +122,13 @@ impl Vm {
     }
 
     pub fn type_name(&self, value: &Value) -> Rc<str> {
-        self.class_of(value).name.clone()
+        let class = self.class_of(value);
+        // The library's stand-ins for CPython's C types carry the C name
+        // (`decimal.Decimal`, `datetime.date`): their own, not inherited.
+        if let Some(Value::Str(name)) = class.dict.borrow().get_str("__nova_type_name__") {
+            return name;
+        }
+        class.name.clone()
     }
 
     /// The built-in value inside an instance of a subclass of a built-in
@@ -184,7 +190,17 @@ impl Vm {
                 }
                 if class.base == Base::Exception {
                     match name {
-                        "__traceback__" => return Ok(Value::None),
+                        "__traceback__" => {
+                            if instance.traceback.borrow().is_empty() {
+                                return Ok(Value::None);
+                            }
+                            // A chain of traceback objects, made in Python.
+                            let module = super::modules::import(self, "_traceback", 0, &Value::None)?;
+                            let entries = self.get_attr(&module, "entries")?;
+                            let list = self.call(&entries, core::slice::from_ref(object), &[])?;
+                            let make = self.lazy_builtin("_nova_traceback")?.unwrap_or(Value::None);
+                            return self.call(&make, &[list], &[]);
+                        }
                         "__cause__" => return Ok(instance.cause.borrow().clone()),
                         "__context__" => return Ok(instance.context.borrow().clone()),
                         _ => {}
@@ -261,6 +277,9 @@ impl Vm {
                         if let Some(found) = self.types.type_.lookup(name) {
                             return self.bind(found, object, class);
                         }
+                        if name == "__doc__" {
+                            return Ok(Value::None);
+                        }
                         let message = alloc::format!("type object '{}' has no attribute '{}'", class.name, name);
                         self.attribute_error(&message)
                     }
@@ -284,6 +303,22 @@ impl Vm {
                 "__defaults__" => Ok(if function.defaults.is_empty() { Value::None } else { Value::tuple(function.defaults.clone()) }),
                 "__dict__" => Ok(Value::Dict(shared(function.dict.borrow().clone()))),
                 "__code__" => Ok(Value::Code(function.code.clone())),
+                "__globals__" => Ok(Value::Dict(function.globals.dict.clone())),
+                "__kwdefaults__" => {
+                    if function.kwdefaults.is_empty() {
+                        return Ok(Value::None);
+                    }
+                    let mut d = Dict::new();
+                    for (k, v) in function.kwdefaults.iter() {
+                        d.set_str(k, v.clone());
+                    }
+                    Ok(Value::dict(d))
+                }
+                "__closure__" => Ok(if function.closure.is_empty() { Value::None } else { Value::tuple(function.closure.iter().map(|c| Value::Cell(c.clone())).collect()) }),
+                "__annotations__" | "__type_params__" if function.dict.borrow().get_str(name).is_none() => {
+                    Ok(if name == "__annotations__" { Value::dict(Dict::new()) } else { Value::tuple(Vec::new()) })
+                }
+                "__call__" => Ok(object.clone()),
                 _ => {
                     if let Some(v) = function.dict.borrow().get_str(name) {
                         return Ok(v);
@@ -291,12 +326,56 @@ impl Vm {
                     self.generic_attr(object, name)
                 }
             },
-            Value::Builtin(b) if name == "__name__" => Ok(Value::str(b.name)),
+            Value::Builtin(b) if matches!(name, "__name__" | "__qualname__") => Ok(Value::str(b.name)),
+            Value::Builtin(_) if name == "__module__" => Ok(Value::str("builtins")),
+            Value::Builtin(_) if matches!(name, "__doc__" | "__text_signature__") => Ok(Value::None),
+            Value::Builtin(_) if name == "__self__" => Ok(Value::Module(self.builtins.clone())),
+            Value::Builtin(_) | Value::Method(_) if name == "__call__" => Ok(object.clone()),
             Value::Method(m) if name == "__self__" => Ok(m.0.clone()),
             Value::Method(m) if name == "__func__" => Ok(m.1.clone()),
-            Value::Method(m) if matches!(name, "__name__" | "__qualname__" | "__doc__") => {
+            Value::Method(m) if name == "__qualname__" && matches!(m.1, Value::Builtin(_)) => {
+                let owner = self.type_name(&m.0);
+                let method = match &m.1 {
+                    Value::Builtin(b) => b.name,
+                    _ => "",
+                };
+                Ok(Value::str(&alloc::format!("{}.{}", owner, method)))
+            }
+            Value::Method(m) if name != "__class__" => {
+                // A bound method reads the function's attributes.
                 let function = m.1.clone();
-                self.get_attr(&function, name)
+                match self.get_attr(&function, name) {
+                    Ok(v) => Ok(v),
+                    Err(_) => {
+                        let message = alloc::format!("'method' object has no attribute '{}'", name);
+                        self.attribute_error(&message)
+                    }
+                }
+            }
+            Value::Code(c) => {
+                let strs = |v: &[Rc<str>]| Value::tuple(v.iter().map(|s| Value::Str(s.clone())).collect());
+                match name {
+                    "co_name" => Ok(Value::Str(c.name.clone())),
+                    "co_qualname" => Ok(Value::Str(c.qualname.clone())),
+                    "co_filename" => Ok(Value::Str(c.filename.clone())),
+                    "co_firstlineno" => Ok(Value::int(c.first_line as i64)),
+                    "co_argcount" => Ok(Value::int(c.argcount as i64)),
+                    "co_posonlyargcount" => Ok(Value::int(c.posonly as i64)),
+                    "co_kwonlyargcount" => Ok(Value::int(c.kwonly as i64)),
+                    "co_nlocals" => Ok(Value::int(c.varnames.len() as i64)),
+                    "co_varnames" => Ok(strs(&c.varnames)),
+                    "co_names" => Ok(strs(&c.names)),
+                    "co_cellvars" => Ok(strs(&c.cellvars)),
+                    "co_freevars" => Ok(strs(&c.freevars)),
+                    "co_consts" => Ok(Value::tuple(c.consts.clone())),
+                    "co_flags" => {
+                        let flags = 0x3 | (c.varargs as i64) << 2 | (c.varkw as i64) << 3 | (!c.freevars.is_empty() as i64) << 4
+                            | ((c.generator && !c.coroutine) as i64) << 5 | ((c.coroutine && !c.generator) as i64) << 7
+                            | ((c.coroutine && c.generator) as i64) << 9;
+                        Ok(Value::int(flags))
+                    }
+                    _ => self.generic_attr(object, name),
+                }
             }
             Value::Super(s) => {
                 let (start, receiver) = (&s.0, &s.1);
@@ -338,6 +417,42 @@ impl Vm {
             return Ok(value);
         }
         let message = alloc::format!("'{}' object has no attribute '{}'", class.name, name);
+        self.attribute_error(&message)
+    }
+
+    /// With `__slots__` along the whole MRO (and no `__dict__` slot), an
+    /// instance has no dictionary: only the named slots can be set.
+    pub fn check_slots(&mut self, class: &Rc<Class>, name: &str) -> PyResult<()> {
+        if class.lookup("__slots__").is_none() {
+            return Ok(());
+        }
+        let mro = class.mro.borrow().clone();
+        for c in mro.iter() {
+            if c.id == self.types.object.id {
+                continue;
+            }
+            let slots = c.dict.borrow().get_str("__slots__");
+            match slots {
+                None => {
+                    // A built-in type gives no dictionary, but exceptions.
+                    if super::types::is_builtin(self, c) && !c.is_subclass(&self.types.base_exception) {
+                        continue;
+                    }
+                    return Ok(());
+                }
+                Some(slots) => {
+                    let names: Vec<Value> = match &slots {
+                        Value::Str(_) => alloc::vec![slots.clone()],
+                        other => self.collect(other).unwrap_or_default(),
+                    };
+                    let allowed = names.iter().any(|n| matches!(n, Value::Str(s) if &**s == name || &**s == "__dict__"));
+                    if allowed {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        let message = alloc::format!("'{}' object has no attribute '{}' and no __dict__ for setting new attributes", class.name, name);
         self.attribute_error(&message)
     }
 
@@ -386,6 +501,7 @@ impl Vm {
                     }
                     _ => {}
                 }
+                self.check_slots(&class, name)?;
                 instance.dict.borrow_mut().set_str(name, value);
                 Ok(())
             }
@@ -426,6 +542,10 @@ impl Vm {
         let removed = match object {
             Value::Instance(i) => {
                 let class = i.class();
+                if let Some(hook @ Value::Function(_)) = class.lookup("__delattr__") {
+                    self.call(&hook, &[object.clone(), Value::str(name)], &[])?;
+                    return Ok(());
+                }
                 match class.lookup(name) {
                     Some(Value::Property(p)) => {
                         if !p[2].is_none() {
@@ -642,8 +762,8 @@ impl Vm {
             "unsupported operand type(s) for {}{}: '{}' and '{}'",
             symbol,
             if inplace { "=" } else { "" },
-            a_class.name,
-            b_class.name
+            self.type_name(a),
+            self.type_name(b)
         );
         self.type_error(&message)
     }
@@ -746,7 +866,7 @@ impl Vm {
             _ => {}
         }
         // `int | None`: a union of types (annotations, isinstance).
-        if op == BinOp::BitOr && self.is_type_like(a) && self.is_type_like(b) && (matches!(a, Value::Class(_)) || matches!(b, Value::Class(_)) || self.is_union(a) || self.is_union(b)) {
+        if op == BinOp::BitOr && self.is_type_like(a) && self.is_type_like(b) && !(matches!(a, Value::None) && matches!(b, Value::None)) {
             return self.make_union(a, b).map(Some);
         }
         // Views of keys and items are sets for these operators.
@@ -1019,7 +1139,12 @@ impl Vm {
         match op {
             CmpOp::Eq => Ok(Value::Bool(a.is(b))),
             CmpOp::NotEq => {
-                // Default __ne__: the inverse of __eq__.
+                // Default __ne__: the inverse of __eq__ -- unless a class
+                // wrote its own __ne__ (that gave NotImplemented).
+                let own = |c: &Rc<Class>| matches!(c.lookup("__ne__"), Some(Value::Function(_)));
+                if own(&a_class) || own(&b_class) {
+                    return Ok(Value::Bool(!a.is(b)));
+                }
                 let eq = self.compare(CmpOp::Eq, a, b)?;
                 Ok(Value::Bool(!self.truthy(&eq)?))
             }
@@ -1398,6 +1523,12 @@ impl Vm {
     }
 
     fn is_type_like(&self, value: &Value) -> bool {
+        if let Value::Instance(i) = value {
+            // `list[int] | None`: a types.GenericAlias joins unions too.
+            if let Some(Value::Str(n)) = i.class().dict.borrow().get_str("__nova_type_name__") {
+                return &*n == "types.GenericAlias" || &*n == "typing.TypeAliasType";
+            }
+        }
         matches!(value, Value::Class(_) | Value::None) || self.is_union(value)
     }
 

@@ -354,6 +354,7 @@ def _divide_and_round(a, b):
 
 class timedelta:
     """Difference between two datetime values."""
+    __nova_type_name__ = 'datetime.timedelta'
 
     __slots__ = '_days', '_seconds', '_microseconds', '_hashcode'
 
@@ -635,6 +636,7 @@ def _module_name(obj):
 
 class date:
     """Concrete date type."""
+    __nova_type_name__ = 'datetime.date'
 
     __slots__ = '_year', '_month', '_day', '_hashcode'
 
@@ -841,6 +843,7 @@ _IsoCalendarDate.__name__ = 'IsoCalendarDate'
 
 class tzinfo:
     """Abstract base class for time zone info classes."""
+    __nova_type_name__ = 'datetime.tzinfo'
     __slots__ = ()
 
     def tzname(self, dt):
@@ -876,6 +879,7 @@ class tzinfo:
 
 class time:
     """Time with time zone."""
+    __nova_type_name__ = 'datetime.time'
 
     __slots__ = '_hour', '_minute', '_second', '_microsecond', '_tzinfo', '_hashcode', '_fold'
 
@@ -1103,6 +1107,7 @@ time.resolution = timedelta(microseconds=1)
 
 class datetime(date):
     """datetime(year, month, day[, hour[, minute[, second[, microsecond[,tzinfo]]]]])"""
+    __nova_type_name__ = 'datetime.datetime'
     __slots__ = time.__slots__
 
     def __new__(cls, year, month=None, day=None, hour=0, minute=0, second=0,
@@ -1535,6 +1540,7 @@ def _cmperror(x, y):
 
 
 class timezone(tzinfo):
+    __nova_type_name__ = 'datetime.timezone'
     __slots__ = '_offset', '_name'
 
     _Omitted = object()

@@ -133,6 +133,8 @@ def namedtuple(typename, field_names, *, rename=False, defaults=None, module=Non
 
 
 class deque:
+    __class_getitem__ = classmethod(type(list[int]))
+
     """A list with a moving head: append and popleft in constant time."""
 
     def __init__(self, iterable=(), maxlen=None):
@@ -611,6 +613,8 @@ class Counter(dict):
 
 
 class ChainMap:
+    __class_getitem__ = classmethod(type(list[int]))
+
     def __init__(self, *maps):
         self.maps = list(maps) or [{}]
 

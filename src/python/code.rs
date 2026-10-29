@@ -156,6 +156,18 @@ pub enum Op {
 }
 
 /// A compiled function body (or module, or class body).
+/// The columns of an op's expression, end exclusive, `end_line` 0 when
+/// unknown; `anchor` the part to mark with `^`; `quiet` for a call that
+/// is a whole `return f(...)` or `x = f(...)` (CPython shows no carets).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Pos {
+    pub col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+    pub anchor: (u32, u32),
+    pub quiet: bool,
+}
+
 #[derive(Debug)]
 pub struct Code {
     pub name: Rc<str>,
@@ -164,6 +176,9 @@ pub struct Code {
     pub ops: Vec<Op>,
     /// The source line of each op, for tracebacks.
     pub lines: Vec<u32>,
+    /// The columns of the expression each op evaluates (the carets of
+    /// tracebacks).
+    pub positions: Vec<Pos>,
     pub consts: Vec<Value>,
     pub names: Vec<Rc<str>>,
     /// Local variables, parameters first.

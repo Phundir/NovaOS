@@ -21,6 +21,16 @@ const MAX_DEPTH: usize = 200;
 pub struct SyntaxError {
     pub message: String,
     pub line: u32,
+    /// 1-based columns of the offending text (CPython's offset and
+    /// end_offset), 0 when unknown.
+    pub offset: u32,
+    pub end_offset: u32,
+}
+
+impl SyntaxError {
+    pub fn new(message: impl Into<String>, line: u32) -> SyntaxError {
+        SyntaxError { message: message.into(), line, offset: 0, end_offset: 0 }
+    }
 }
 
 type PResult<T> = Result<T, SyntaxError>;
@@ -39,6 +49,9 @@ struct Parser {
     functions: usize,
     /// For each enclosing function, innermost last: is it `async def`?
     asyncs: Vec<bool>,
+    /// Statements to run before the one being parsed: the type
+    /// parameters of PEP 695 bound to their TypeVars.
+    prelude: Vec<Stmt>,
     /// Counter of the hidden names `async for` and `async with` use.
     hidden: usize,
 }
@@ -64,8 +77,36 @@ impl Parser {
         tok
     }
 
+    /// `expected an indented block after 'if' statement on line 3`: the
+    /// statement is the first token of the logical line the block opens.
+    fn indent_error<T>(&self) -> PResult<T> {
+        let mut i = self.pos.saturating_sub(1);
+        while i > 0 && !matches!(self.tokens[i - 1].tok, Tok::Newline | Tok::Indent | Tok::Dedent) {
+            i -= 1;
+        }
+        let mut first = &self.tokens[i];
+        if matches!(&first.tok, Tok::Name(n) if &**n == "async") {
+            first = &self.tokens[(i + 1).min(self.tokens.len() - 1)];
+        }
+        let what = match &first.tok {
+            Tok::Name(n) if &**n == "def" => String::from("function definition"),
+            Tok::Name(n) if &**n == "class" => String::from("class definition"),
+            Tok::Name(n) if &**n == "except" && matches!(self.tokens.get(i + 1).map(|t| &t.tok), Some(Tok::Op("*"))) => String::from("'except*' statement"),
+            Tok::Name(n) => alloc::format!("'{}' statement", n),
+            _ => String::from("statement"),
+        };
+        let message = alloc::format!("expected an indented block after {} on line {}", what, first.line);
+        Err(SyntaxError::new(message, self.line()))
+    }
+
     fn error<T>(&self, message: &str) -> PResult<T> {
-        Err(SyntaxError { message: String::from(message), line: self.line() })
+        let t = &self.tokens[self.pos];
+        let mut e = SyntaxError::new(String::from(message), self.line());
+        if t.end_line != 0 && !matches!(t.tok, Tok::Newline | Tok::Indent | Tok::Dedent | Tok::Eof) {
+            e.offset = t.col + 1;
+            e.end_offset = if t.end_line == t.line { t.end_col + 1 } else { t.col + 2 };
+        }
+        Err(e)
     }
 
     fn is_op(&self, op: &str) -> bool {
@@ -74,6 +115,10 @@ impl Parser {
 
     fn is_kw(&self, word: &str) -> bool {
         matches!(self.peek(), Tok::Name(n) if &**n == word)
+    }
+
+    fn peek_is_op(&self, offset: usize, op: &str) -> bool {
+        matches!(self.peek_at(offset), Tok::Op(o) if *o == op)
     }
 
     fn kw_at(&self, offset: usize, word: &str) -> bool {
@@ -120,14 +165,14 @@ impl Parser {
                 self.advance();
                 Ok(n)
             }
-            _ => self.error("nom attendu"),
+            _ => self.error("invalid syntax"),
         }
     }
 
     fn enter(&mut self) -> PResult<()> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
-            return self.error("imbrication trop profonde");
+            return self.error("too many nested parentheses");
         }
         Ok(())
     }
@@ -136,8 +181,120 @@ impl Parser {
         self.depth -= 1;
     }
 
+    /// An expression ending at the last token consumed, with the
+    /// columns tracebacks underline: it starts at its leftmost operand,
+    /// or at the token before its operand (`-x`, `await x`), or at the
+    /// bracket that opens it, or at the single token it is.
     fn expr_at(&self, kind: ExprKind, line: u32) -> Expr {
-        Expr { kind, line }
+        let mut expr = Expr::new(kind, line);
+        if self.pos == 0 {
+            return expr;
+        }
+        let last = &self.tokens[self.pos - 1];
+        if last.end_line == 0 {
+            return expr;
+        }
+        let known = |e: &Expr| e.end_line != 0;
+        let start: Option<(u32, u32)> = match &expr.kind {
+            ExprKind::BinOp(_, l, _) | ExprKind::Compare(l, _) | ExprKind::Call(l, _) | ExprKind::Attribute(l, _) | ExprKind::Subscript(l, _) => {
+                if known(l) { Some((l.line, l.col)) } else { None }
+            }
+            ExprKind::BoolOp(_, values) => values.first().filter(|v| known(v)).map(|v| (v.line, v.col)),
+            ExprKind::IfExp(body, _, _) => if known(body) { Some((body.line, body.col)) } else { None },
+            ExprKind::Tuple(items) if !matches!(last.tok, Tok::Op(")")) => items.first().filter(|v| known(v)).map(|v| (v.line, v.col)),
+            ExprKind::Unary(_, operand) | ExprKind::Await(operand) | ExprKind::Starred(operand) => {
+                if known(operand) { self.token_before(operand.line, operand.col).map(|t| (t.line, t.col)) } else { None }
+            }
+            ExprKind::Name(_) | ExprKind::Const(_) | ExprKind::FString(_) => Some((last.line, last.col)),
+            ExprKind::List(_) | ExprKind::Tuple(_) | ExprKind::Set(_) | ExprKind::Dict(_) | ExprKind::ListComp(..)
+            | ExprKind::SetComp(..) | ExprKind::DictComp(..) | ExprKind::Generator(..) => self.opening_bracket(),
+            _ => None,
+        };
+        let Some((sl, sc)) = start else {
+            return expr;
+        };
+        expr.line = sl;
+        expr.col = sc;
+        expr.end_line = last.end_line;
+        expr.end_col = last.end_col;
+        // The part to underline with '^'.
+        let anchor_from = match &expr.kind {
+            ExprKind::BinOp(_, l, _) => Some((l, None)),
+            ExprKind::Call(f, _) => Some((f, Some("("))),
+            ExprKind::Subscript(v, _) => Some((v, Some("["))),
+            _ => None,
+        };
+        if let Some((left, wanted)) = anchor_from {
+            if known(left) {
+                if let Some(t) = self.token_after(left.end_line, left.end_col, wanted) {
+                    if t.line == expr.line && t.line == expr.end_line {
+                        let end = if wanted.is_some() { expr.end_col } else { t.end_col };
+                        expr.anchor = (t.col, end);
+                    }
+                }
+            }
+        }
+        expr
+    }
+
+    /// The token that ends where (line, col) starts, before self.pos.
+    fn token_before(&self, line: u32, col: u32) -> Option<&Token> {
+        let mut i = self.pos;
+        while i > 0 {
+            i -= 1;
+            let t = &self.tokens[i];
+            if (t.line, t.col) == (line, col) {
+                return if i > 0 { Some(&self.tokens[i - 1]) } else { None };
+            }
+            if (t.line, t.col) < (line, col) {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// The first token at or after (line, col) -- skipping the `)` that
+    /// close a parenthesized operand -- or the first `wanted` one.
+    fn token_after(&self, line: u32, col: u32, wanted: Option<&str>) -> Option<&Token> {
+        let mut i = self.pos;
+        while i > 0 && (self.tokens[i - 1].line, self.tokens[i - 1].col) >= (line, col) {
+            i -= 1;
+        }
+        while i < self.pos {
+            let t = &self.tokens[i];
+            match (wanted, &t.tok) {
+                (Some(w), Tok::Op(o)) if *o == w => return Some(t),
+                (Some(_), _) => {}
+                (None, Tok::Op(")")) => {}
+                (None, _) => return Some(t),
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// The bracket matching the closing one just consumed.
+    fn opening_bracket(&self) -> Option<(u32, u32)> {
+        let last = self.pos.checked_sub(1)?;
+        if !matches!(self.tokens[last].tok, Tok::Op(")") | Tok::Op("]") | Tok::Op("}")) {
+            return None;
+        }
+        let mut depth = 0i32;
+        let mut i = last + 1;
+        while i > 0 {
+            i -= 1;
+            match self.tokens[i].tok {
+                Tok::Op(")") | Tok::Op("]") | Tok::Op("}") => depth += 1,
+                Tok::Op("(") | Tok::Op("[") | Tok::Op("{") => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((self.tokens[i].line, self.tokens[i].col));
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     // --------------------------------------------------------
@@ -185,17 +342,22 @@ impl Parser {
                         }
                         return if self.is_kw("for") { self.async_for(line) } else { self.async_with(line) };
                     } else {
-                        return self.error("syntaxe invalide apres async");
+                        return self.error("invalid syntax");
                     }
                 }
                 "match" if self.match_statement_ahead() => Some(self.match_stmt()?),
+                "type" if matches!(self.peek_at(1), Tok::Name(_)) && (self.peek_is_op(2, "=") || self.peek_is_op(2, "[")) => {
+                    Some(self.type_alias()?)
+                }
                 _ => None,
             },
             Tok::Op("@") => Some(self.decorated()?),
             _ => None,
         };
         if let Some(kind) = compound {
-            return Ok(alloc::vec![Stmt { kind, line }]);
+            let mut out = core::mem::take(&mut self.prelude);
+            out.push(Stmt { kind, line });
+            return Ok(out);
         }
         self.simple_statements()
     }
@@ -255,7 +417,7 @@ impl Parser {
         };
         let it = self.hidden_name();
         let v = self.hidden_name();
-        let e = |kind: ExprKind| Expr { kind, line };
+        let e = |kind: ExprKind| Expr::new(kind, line);
         let st = |kind: StmtKind| Stmt { kind, line };
         let call = |object: Expr, method: &str| {
             e(ExprKind::Call(Box::new(e(ExprKind::Attribute(Box::new(object), Rc::from(method)))), Vec::new()))
@@ -329,7 +491,7 @@ impl Parser {
             self.expect_op(")")?;
         }
         let mut body = self.block()?;
-        let e = |kind: ExprKind| Expr { kind, line };
+        let e = |kind: ExprKind| Expr::new(kind, line);
         let st = |kind: StmtKind| Stmt { kind, line };
         for (context, target) in items.into_iter().rev() {
             let m = self.hidden_name();
@@ -386,11 +548,11 @@ impl Parser {
         let subject = self.star_expressions()?;
         self.expect_op(":")?;
         if !matches!(self.peek(), Tok::Newline) {
-            return self.error("match attend un bloc de case");
+            return self.error("invalid syntax");
         }
         self.advance();
         if !matches!(self.peek(), Tok::Indent) {
-            return self.error("bloc indente attendu (IndentationError)");
+            return self.indent_error();
         }
         self.advance();
         let mut cases = Vec::new();
@@ -401,7 +563,7 @@ impl Parser {
             }
             let line = self.line();
             if !self.eat_kw("case") {
-                return self.error("case attendu");
+                return self.error("invalid syntax");
             }
             let pattern = self.open_pattern()?;
             let guard = if self.eat_kw("if") { Some(self.named_expression()?) } else { None };
@@ -412,16 +574,13 @@ impl Parser {
             self.advance();
         }
         if cases.is_empty() {
-            return self.error("match sans case");
+            return self.error("invalid syntax");
         }
         // An irrefutable case other than the last makes the rest
         // unreachable: CPython refuses it.
         for case in &cases[..cases.len() - 1] {
             if case.guard.is_none() && irrefutable(&case.pattern) {
-                return Err(SyntaxError {
-                    message: String::from("wildcard makes remaining patterns unreachable"),
-                    line: case.line,
-                });
+                return Err(SyntaxError::new(String::from("wildcard makes remaining patterns unreachable"), case.line));
             }
         }
         Ok(StmtKind::Match(subject, cases))
@@ -610,7 +769,7 @@ impl Parser {
                 }
                 Ok(value)
             }
-            _ => self.error("motif invalide"),
+            _ => self.error("invalid syntax"),
         }
     }
 
@@ -619,7 +778,7 @@ impl Parser {
         if matches!(self.peek(), Tok::Newline) {
             self.advance();
             if !matches!(self.peek(), Tok::Indent) {
-                return self.error("bloc indente attendu (IndentationError)");
+                return self.indent_error();
             }
             self.advance();
             let mut body = Vec::new();
@@ -655,7 +814,7 @@ impl Parser {
                 self.advance();
             }
             Tok::Eof | Tok::Dedent => {}
-            _ => return self.error("syntaxe invalide"),
+            _ => return self.error("invalid syntax"),
         }
         Ok(out)
     }
@@ -679,7 +838,7 @@ impl Parser {
                 "return" => {
                     self.advance();
                     if self.functions == 0 {
-                        return self.error("'return' hors d'une fonction");
+                        return self.error("'return' outside function");
                     }
                     if self.at_statement_end() {
                         StmtKind::Return(None)
@@ -827,7 +986,7 @@ impl Parser {
             if let Some(op) = aug {
                 self.advance();
                 if !matches!(first.kind, ExprKind::Name(_) | ExprKind::Attribute(..) | ExprKind::Subscript(..)) {
-                    return self.error("cible invalide pour une affectation augmentee");
+                    return self.error("illegal expression for augmented assignment");
                 }
                 let value = self.star_expressions_or_yield()?;
                 return Ok(Stmt { kind: StmtKind::AugAssign(first, op, value), line });
@@ -861,7 +1020,7 @@ impl Parser {
                 for item in items {
                     if let ExprKind::Starred(inner) = &item.kind {
                         if delete {
-                            return Err(SyntaxError { message: String::from("cible invalide"), line: expr.line });
+                            return Err(SyntaxError::new(String::from("cannot assign to expression"), expr.line));
                         }
                         starred += 1;
                         self.check_target(inner, delete)?;
@@ -870,14 +1029,11 @@ impl Parser {
                     }
                 }
                 if starred > 1 {
-                    return Err(SyntaxError { message: String::from("plusieurs expressions etoilees dans une affectation"), line: expr.line });
+                    return Err(SyntaxError::new(String::from("multiple starred expressions in assignment"), expr.line));
                 }
                 Ok(())
             }
-            _ => Err(SyntaxError {
-                message: String::from(if delete { "impossible de supprimer cette expression" } else { "impossible d'affecter a cette expression" }),
-                line: expr.line,
-            }),
+            _ => Err(SyntaxError::new(String::from(if delete { "cannot delete expression" } else { "cannot assign to expression" }), expr.line)),
         }
     }
 
@@ -947,11 +1103,14 @@ impl Parser {
         self.advance();
         let body = self.block()?;
         let mut handlers = Vec::new();
+        if self.is_kw("except") && self.peek_is_op(1, "*") {
+            return self.try_star(body);
+        }
         while self.is_kw("except") {
             let line = self.line();
             self.advance();
             if self.is_op("*") {
-                return self.error("except* n'est pas pris en charge");
+                return self.error("cannot have both 'except' and 'except*' on the same 'try'");
             }
             let (kind, name) = if self.is_op(":") {
                 (None, None)
@@ -966,9 +1125,100 @@ impl Parser {
         let orelse = if self.eat_kw("else") { self.block()? } else { Vec::new() };
         let finalbody = if self.eat_kw("finally") { self.block()? } else { Vec::new() };
         if handlers.is_empty() && finalbody.is_empty() {
-            return self.error("\"except\" ou \"finally\" attendu");
+            return self.error("expected 'except' or 'finally' block");
         }
         Ok(StmtKind::Try { body, handlers, orelse, finalbody: Rc::new(finalbody) })
+    }
+
+    /// `try: ... except* T as n: H ...` (PEP 654) becomes a plain `try`
+    /// whose one handler splits the exception group clause by clause:
+    ///
+    /// ```text
+    /// except BaseException as $e:
+    ///     $g = _nova_excstar_prepare($e)
+    ///     $r = []; $s = []
+    ///     $m, $g = _nova_excstar_split($g, T)
+    ///     if $m is not None:
+    ///         $s.append($m)
+    ///         try:
+    ///             n = $m
+    ///             H
+    ///         except BaseException as $x:
+    ///             $r.append($x)
+    ///     ...
+    ///     _nova_excstar_reraise($e, $g, $r, $s)
+    /// ```
+    fn try_star(&mut self, body: Vec<Stmt>) -> PResult<StmtKind> {
+        let first_line = self.line();
+        let e_name = self.hidden_name();
+        let g = self.hidden_name();
+        let r = self.hidden_name();
+        let sm = self.hidden_name();
+        let line = first_line;
+        let e = |kind: ExprKind| Expr::new(kind, line);
+        let st = |kind: StmtKind| Stmt { kind, line };
+        let name = |n: &Rc<str>| Expr::new(ExprKind::Name(n.clone()), line);
+        let call = |f: &str, args: Vec<Expr>| Expr::new(ExprKind::Call(Box::new(Expr::new(ExprKind::Name(Rc::from(f)), line)), args.into_iter().map(Arg::Positional).collect()), line);
+        let append = |list: &Rc<str>, item: Expr| Stmt {
+            kind: StmtKind::Expr(Expr::new(ExprKind::Call(
+                    Box::new(Expr::new(ExprKind::Attribute(Box::new(Expr::new(ExprKind::Name(list.clone()), line)), Rc::from("append")), line)),
+                    alloc::vec![Arg::Positional(item)],
+                ), line)),
+            line,
+        };
+        let mut handler = alloc::vec![
+            st(StmtKind::Assign(alloc::vec![name(&g)], call("_nova_excstar_prepare", alloc::vec![name(&e_name)]))),
+            st(StmtKind::Assign(alloc::vec![name(&r)], e(ExprKind::List(Vec::new())))),
+            st(StmtKind::Assign(alloc::vec![name(&sm)], e(ExprKind::List(Vec::new())))),
+        ];
+        while self.is_kw("except") {
+            self.advance();
+            if !self.eat_op("*") {
+                return self.error("cannot have both 'except' and 'except*' on the same 'try'");
+            }
+            if self.is_op(":") {
+                return self.error("expected one or more exception types");
+            }
+            let kind = self.expression()?;
+            let bound = if self.eat_kw("as") { Some(self.name()?) } else { None };
+            let clause = self.block()?;
+            let m = self.hidden_name();
+            let x = self.hidden_name();
+            handler.push(st(StmtKind::Assign(
+                alloc::vec![e(ExprKind::Tuple(alloc::vec![name(&m), name(&g)]))],
+                call("_nova_excstar_split", alloc::vec![name(&g), kind]),
+            )));
+            let mut inner = Vec::new();
+            if let Some(n) = bound {
+                inner.push(st(StmtKind::Assign(alloc::vec![name(&n)], name(&m))));
+            }
+            inner.extend(clause);
+            let guarded = st(StmtKind::Try {
+                body: inner,
+                handlers: alloc::vec![ExceptHandler {
+                    kind: Some(name(&Rc::from("BaseException"))),
+                    name: Some(x.clone()),
+                    body: alloc::vec![append(&r, name(&x))],
+                    line,
+                }],
+                orelse: Vec::new(),
+                finalbody: Rc::new(Vec::new()),
+            });
+            handler.push(st(StmtKind::If(
+                e(ExprKind::Compare(Box::new(name(&m)), alloc::vec![(CmpOp::IsNot, e(ExprKind::Const(Const::None)))])),
+                alloc::vec![append(&sm, name(&m)), guarded],
+                Vec::new(),
+            )));
+        }
+        handler.push(st(StmtKind::Expr(call("_nova_excstar_reraise", alloc::vec![name(&e_name), name(&g), name(&r), name(&sm)]))));
+        let orelse = if self.eat_kw("else") { self.block()? } else { Vec::new() };
+        let finalbody = if self.eat_kw("finally") { self.block()? } else { Vec::new() };
+        Ok(StmtKind::Try {
+            body,
+            handlers: alloc::vec![ExceptHandler { kind: Some(name(&Rc::from("BaseException"))), name: Some(e_name), body: handler, line }],
+            orelse,
+            finalbody: Rc::new(finalbody),
+        })
     }
 
     fn with_stmt(&mut self) -> PResult<StmtKind> {
@@ -1030,7 +1280,7 @@ impl Parser {
         while self.eat_op("@") {
             decorators.push(self.named_expression()?);
             if !matches!(self.peek(), Tok::Newline) {
-                return self.error("fin de ligne attendue apres un decorateur");
+                return self.error("invalid syntax");
             }
             self.advance();
         }
@@ -1042,7 +1292,7 @@ impl Parser {
         } else if self.is_kw("class") {
             self.class_stmt(decorators)
         } else {
-            self.error("def ou class attendu apres un decorateur")
+            self.error("invalid syntax")
         }
     }
 
@@ -1051,7 +1301,7 @@ impl Parser {
         self.advance(); // def
         let name = self.name()?;
         if self.is_op("[") {
-            return self.error("les parametres de type (PEP 695) ne sont pas pris en charge");
+            self.type_params()?;
         }
         self.expect_op("(")?;
         let params = self.parameters(")", true)?;
@@ -1067,20 +1317,93 @@ impl Parser {
         Ok(StmtKind::FunctionDef(Rc::new(FunctionDef { name, params: Rc::new(params), body: body?, decorators, line, is_async })))
     }
 
+    /// `[T, T: bound, *Ts, **P = default]` (PEP 695): each name is bound,
+    /// before the statement, to its TypeVar (in the enclosing scope:
+    /// CPython gives them a scope of their own).
+    fn type_params(&mut self) -> PResult<()> {
+        self.expect_op("[")?;
+        loop {
+            if self.is_op("]") {
+                break;
+            }
+            let line = self.line();
+            let kind = if self.eat_op("**") {
+                2
+            } else if self.eat_op("*") {
+                1
+            } else {
+                0
+            };
+            let name = self.name()?;
+            if self.eat_op(":") {
+                self.expression()?;
+            }
+            if self.eat_op("=") {
+                self.expression()?;
+            }
+            let f = Expr::new(ExprKind::Name(Rc::from("_nova_typevar")), line);
+            let args = alloc::vec![
+                Arg::Positional(Expr::new(ExprKind::Const(Const::Str(name.clone())), line)),
+                Arg::Positional(Expr::new(ExprKind::Const(Const::Int(super::int::Int::from_i64(kind))), line)),
+            ];
+            let value = Expr::new(ExprKind::Call(Box::new(f), args), line);
+            self.prelude.push(Stmt { kind: StmtKind::Assign(alloc::vec![Expr::new(ExprKind::Name(name), line)], value), line });
+            if !self.eat_op(",") {
+                break;
+            }
+        }
+        self.expect_op("]")?;
+        Ok(())
+    }
+
+    /// `type Name[T] = value`: Name = _nova_type_alias('Name', lambda: value).
+    fn type_alias(&mut self) -> PResult<StmtKind> {
+        let line = self.line();
+        self.advance(); // type
+        let name = self.name()?;
+        if self.is_op("[") {
+            self.type_params()?;
+        }
+        self.expect_op("=")?;
+        let value = self.expression()?;
+        let thunk = Expr::new(ExprKind::Lambda(Rc::new(Params::default()), Box::new(value)), line);
+        let f = Expr::new(ExprKind::Name(Rc::from("_nova_type_alias")), line);
+        let call = Expr::new(ExprKind::Call(Box::new(f), alloc::vec![
+                Arg::Positional(Expr::new(ExprKind::Const(Const::Str(name.clone())), line)),
+                Arg::Positional(thunk),
+            ]), line);
+        if !matches!(self.peek(), Tok::Newline | Tok::Eof) && !self.eat_op(";") {
+            return self.error("invalid syntax");
+        }
+        if matches!(self.peek(), Tok::Newline) {
+            self.advance();
+        }
+        Ok(StmtKind::Assign(alloc::vec![Expr::new(ExprKind::Name(name), line)], call))
+    }
+
     fn class_stmt(&mut self, decorators: Vec<Expr>) -> PResult<StmtKind> {
         let line = self.line();
         self.advance(); // class
         let name = self.name()?;
         let mut bases = Vec::new();
         let mut keywords = Vec::new();
+        let generic = self.is_op("[");
+        if generic {
+            self.type_params()?;
+        }
         if self.eat_op("(") {
             for arg in self.arguments()? {
                 match arg {
                     Arg::Positional(e) => bases.push(e),
                     Arg::Keyword(k, e) => keywords.push((k, e)),
-                    _ => return self.error("*args et **kwargs ne sont pas pris en charge dans une classe"),
+                    _ => return self.error("invalid syntax"),
                 }
             }
+        }
+        if generic {
+            // `class Box[T]:` derives from Generic, as in CPython.
+            let f = Expr::new(ExprKind::Name(Rc::from("_nova_generic")), line);
+            bases.push(Expr::new(ExprKind::Call(Box::new(f), Vec::new()), line));
         }
         // A class body is not a function: `return` stays forbidden there.
         let saved = core::mem::replace(&mut self.functions, 0);
@@ -1099,7 +1422,7 @@ impl Parser {
         while !self.is_op(close) {
             if self.eat_op("/") {
                 if keyword_only || !params.posonly.is_empty() {
-                    return self.error("'/' mal place");
+                    return self.error("/ must be ahead of *");
                 }
                 params.posonly = core::mem::take(&mut params.args);
             } else if self.eat_op("**") {
@@ -1127,7 +1450,7 @@ impl Parser {
                     if default.is_some() {
                         seen_default = true;
                     } else if seen_default {
-                        return self.error("un parametre sans valeur par defaut suit un parametre qui en a une");
+                        return self.error("parameter without a default follows parameter with a default");
                     }
                     params.args.push(Param { name, default });
                 }
@@ -1189,7 +1512,7 @@ impl Parser {
         let line = self.line();
         self.advance(); // yield
         if self.functions == 0 {
-            return self.error("'yield' hors d'une fonction");
+            return self.error("'yield' outside function");
         }
         if self.eat_kw("from") {
             let value = self.expression()?;
@@ -1424,7 +1747,7 @@ impl Parser {
             if self.eat_op(".") {
                 let name = match self.advance() {
                     Tok::Name(n) => n,
-                    _ => return self.error("nom d'attribut attendu"),
+                    _ => return self.error("invalid syntax"),
                 };
                 expr = self.expr_at(ExprKind::Attribute(Box::new(expr), name), line);
             } else if self.eat_op("(") {
@@ -1494,7 +1817,7 @@ impl Parser {
         let line = self.line();
         let lower = if self.is_op(":") { None } else { Some(Box::new(self.star_expression()?)) };
         if !self.eat_op(":") {
-            return lower.map(|b| *b).ok_or_else(|| SyntaxError { message: String::from("indice attendu"), line });
+            return lower.map(|b| *b).ok_or_else(|| SyntaxError::new(String::from("invalid syntax"), line));
         }
         let upper = if self.is_op(":") || self.is_op("]") || self.is_op(",") { None } else { Some(Box::new(self.expression()?)) };
         let step = if self.eat_op(":") {
@@ -1548,7 +1871,7 @@ impl Parser {
                     "False" => ExprKind::Const(Const::False),
                     "None" => ExprKind::Const(Const::None),
                     _ if KEYWORDS.contains(&&*n) => {
-                        return Err(SyntaxError { message: alloc::format!("syntaxe invalide pres de '{}'", n), line });
+                        return Err(SyntaxError::new(String::from("invalid syntax"), line));
                     }
                     _ => ExprKind::Name(n),
                 };
@@ -1589,7 +1912,7 @@ impl Parser {
                 }
                 if self.eat_op(")") {
                     if matches!(first.kind, ExprKind::Starred(_)) {
-                        return self.error("expression etoilee hors d'un contexte qui l'accepte");
+                        return self.error("can't use starred expression here");
                     }
                     return Ok(first);
                 }
@@ -1625,10 +1948,10 @@ impl Parser {
                 Ok(self.expr_at(ExprKind::List(items), line))
             }
             Tok::Op("{") => self.dict_or_set(),
-            Tok::Op(op) => Err(SyntaxError { message: alloc::format!("syntaxe invalide pres de '{}'", op), line }),
-            Tok::Newline | Tok::Eof => self.error("fin de ligne inattendue"),
-            Tok::Indent => self.error("indentation inattendue (IndentationError)"),
-            Tok::Dedent => self.error("syntaxe invalide"),
+            Tok::Op(_) => self.error("invalid syntax"),
+            Tok::Newline | Tok::Eof => self.error("invalid syntax"),
+            Tok::Indent => self.error("unexpected indent"),
+            Tok::Dedent => self.error("invalid syntax"),
         }
     }
 
@@ -1698,19 +2021,19 @@ impl Parser {
             match self.peek().clone() {
                 Tok::Str(s) => {
                     if bytes.is_some() {
-                        return self.error("melange de chaines et d'octets");
+                        return self.error("cannot mix bytes and nonbytes literals");
                     }
                     text.push_str(&s);
                 }
                 Tok::Bytes(b) => {
                     if any_f || !text.is_empty() || !parts.is_empty() {
-                        return self.error("melange de chaines et d'octets");
+                        return self.error("cannot mix bytes and nonbytes literals");
                     }
                     bytes.get_or_insert_with(Vec::new).extend_from_slice(&b);
                 }
                 Tok::FString(fparts) => {
                     if bytes.is_some() {
-                        return self.error("melange de chaines et d'octets");
+                        return self.error("cannot mix bytes and nonbytes literals");
                     }
                     any_f = true;
                     for part in fparts {
@@ -1768,8 +2091,8 @@ impl Parser {
 /// Parses the source of an f-string field as one expression.
 fn parse_expression_source(source: &str, line: u32, in_function: bool) -> PResult<Expr> {
     let wrapped = alloc::format!("({})", source.trim());
-    let tokens = lex::tokenize(&wrapped).map_err(|e| SyntaxError { message: e.message, line })?;
-    let tokens: Vec<Token> = tokens.into_iter().map(|t| Token { tok: t.tok, line }).collect();
+    let tokens = lex::tokenize(&wrapped).map_err(|e| SyntaxError::new(e.message, line))?;
+    let tokens: Vec<Token> = tokens.into_iter().map(|t| Token { tok: t.tok, line, col: 0, end_line: 0, end_col: 0 }).collect();
     let mut parser = Parser {
         tokens,
         pos: 0,
@@ -1777,13 +2100,14 @@ fn parse_expression_source(source: &str, line: u32, in_function: bool) -> PResul
         functions: usize::from(in_function),
         asyncs: if in_function { alloc::vec![true] } else { Vec::new() },
         hidden: 0,
+        prelude: Vec::new(),
     };
     let expr = parser.star_expressions()?;
     while matches!(parser.peek(), Tok::Newline) {
         parser.advance();
     }
     if !matches!(parser.peek(), Tok::Eof) {
-        return Err(SyntaxError { message: String::from("f-string : expression invalide"), line });
+        return Err(SyntaxError::new(String::from("f-string: invalid syntax"), line));
     }
     Ok(expr)
 }
@@ -1801,8 +2125,8 @@ fn irrefutable(pattern: &Pattern) -> bool {
 }
 
 pub fn parse(source: &str) -> Result<Vec<Stmt>, SyntaxError> {
-    let tokens = lex::tokenize(source).map_err(|e| SyntaxError { message: e.message, line: e.line })?;
-    let mut parser = Parser { tokens, pos: 0, depth: 0, functions: 0, asyncs: Vec::new(), hidden: 0 };
+    let tokens = lex::tokenize(source).map_err(|e| SyntaxError { message: e.message, line: e.line, offset: e.offset, end_offset: e.offset + 1 })?;
+    let mut parser = Parser { tokens, pos: 0, depth: 0, functions: 0, asyncs: Vec::new(), hidden: 0, prelude: Vec::new() };
     parser.file()
 }
 

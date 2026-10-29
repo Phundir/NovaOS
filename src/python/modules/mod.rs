@@ -16,6 +16,7 @@ pub mod math;
 pub mod random;
 pub mod re;
 pub mod system;
+pub mod unicodedata;
 
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -30,42 +31,61 @@ use super::{FileError, Mode};
 /// The modules written in Python, compiled on first import.
 const SOURCES: &[(&str, &str)] = &[
     ("_asyncgen", include_str!("lib/_asyncgen.py")),
+    ("_builtins_extra", include_str!("lib/_builtins_extra.py")),
     ("abc", include_str!("lib/abc.py")),
+    ("argparse", include_str!("lib/argparse.py")),
     ("asyncio", include_str!("lib/asyncio.py")),
-    ("cmath", include_str!("lib/cmath.py")),
+    ("base64", include_str!("lib/base64.py")),
+    ("binascii", include_str!("lib/binascii.py")),
     ("bisect", include_str!("lib/bisect.py")),
+    ("cmath", include_str!("lib/cmath.py")),
     ("collections", include_str!("lib/collections.py")),
     ("collections.abc", include_str!("lib/collections_abc.py")),
-    ("fractions", include_str!("lib/fractions.py")),
-    ("numbers", include_str!("lib/numbers.py")),
-    ("statistics", include_str!("lib/statistics.py")),
     ("contextlib", include_str!("lib/contextlib.py")),
     ("copy", include_str!("lib/copy.py")),
     ("dataclasses", include_str!("lib/dataclasses.py")),
     ("datetime", include_str!("lib/datetime.py")),
+    ("decimal", include_str!("lib/decimal.py")),
+    ("difflib", include_str!("lib/difflib.py")),
     ("enum", include_str!("lib/enum.py")),
-    ("functools", include_str!("lib/functools.py")),
-    ("heapq", include_str!("lib/heapq.py")),
-    ("itertools", include_str!("lib/itertools.py")),
-    ("operator", include_str!("lib/operator.py")),
-    ("string", include_str!("lib/string.py")),
-    ("typing", include_str!("lib/typing.py")),
     ("fnmatch", include_str!("lib/fnmatch.py")),
+    ("fractions", include_str!("lib/fractions.py")),
+    ("functools", include_str!("lib/functools.py")),
+    ("getopt", include_str!("lib/getopt.py")),
+    ("getpass", include_str!("lib/getpass.py")),
     ("glob", include_str!("lib/glob.py")),
-    ("pathlib", include_str!("lib/pathlib.py")),
-    ("base64", include_str!("lib/base64.py")),
-    ("binascii", include_str!("lib/binascii.py")),
     ("hashlib", include_str!("lib/hashlib.py")),
+    ("heapq", include_str!("lib/heapq.py")),
     ("hmac", include_str!("lib/hmac.py")),
+    ("html", include_str!("lib/html.py")),
+    ("html.entities", include_str!("lib/html_entities.py")),
+    ("html.parser", include_str!("lib/html_parser.py")),
     ("io", include_str!("lib/io.py")),
+    ("itertools", include_str!("lib/itertools.py")),
+    ("locale", include_str!("lib/locale.py")),
+    ("logging", include_str!("lib/logging.py")),
+    ("numbers", include_str!("lib/numbers.py")),
+    ("operator", include_str!("lib/operator.py")),
+    ("pathlib", include_str!("lib/pathlib.py")),
+    ("platform", include_str!("lib/platform.py")),
+    ("pprint", include_str!("lib/pprint.py")),
+    ("shlex", include_str!("lib/shlex.py")),
+    ("statistics", include_str!("lib/statistics.py")),
+    ("string", include_str!("lib/string.py")),
     ("struct", include_str!("lib/struct.py")),
     ("textwrap", include_str!("lib/textwrap.py")),
+    ("timeit", include_str!("lib/timeit.py")),
+    ("traceback", include_str!("lib/traceback.py")),
+    ("typing", include_str!("lib/typing.py")),
+    ("unittest", include_str!("lib/unittest.py")),
+    ("unittest.mock", include_str!("lib/unittest_mock.py")),
+    ("warnings", include_str!("lib/warnings.py")),
     ("zlib", include_str!("lib/zlib.py")),
 ];
 
 /// The names `help('modules')` would list: native and shipped.
 pub fn library() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = alloc::vec!["math", "random", "sys", "time", "os", "os.path", "json", "re", "traceback"];
+    let mut names: Vec<&'static str> = alloc::vec!["math", "random", "sys", "time", "os", "os.path", "json", "re", "_traceback"];
     names.extend(SOURCES.iter().map(|(n, _)| *n));
     names
 }
@@ -85,6 +105,9 @@ pub fn new_module(vm: &mut Vm, name: &str, file: &str) -> Rc<Module> {
     let module = Rc::new(Module { name: Rc::from(name), dict, file: Rc::from(file) });
     vm.modules.retain(|(n, _)| &**n != name);
     vm.modules.push((Rc::from(name), Value::Module(module.clone())));
+    if let Some(d) = vm.sys_modules.clone() {
+        d.borrow_mut().set_str(name, Value::Module(module.clone()));
+    }
     module
 }
 
@@ -105,6 +128,9 @@ pub fn set(module: &Rc<Module>, name: &str, value: Value) {
 }
 
 fn registered(vm: &Vm, name: &str) -> Option<Value> {
+    if let Some(d) = &vm.sys_modules {
+        return d.borrow().get_str(name);
+    }
     vm.modules.iter().find(|(n, _)| &**n == name).map(|(_, m)| m.clone())
 }
 
@@ -165,6 +191,9 @@ fn execute(vm: &mut Vm, name: &str, file: &str, source: &str, package: Option<&s
         Ok(_) => Ok(Value::Module(module)),
         Err(e) => {
             vm.modules.retain(|(n, _)| &**n != name);
+            if let Some(d) = vm.sys_modules.clone() {
+                d.borrow_mut().remove_str(name);
+            }
             Err(e)
         }
     }
@@ -178,7 +207,11 @@ fn load(vm: &mut Vm, name: &str) -> PyResult<Value> {
     let native = match name {
         "math" => Some(math::module(vm)),
         "random" => Some(random::module(vm)),
-        "sys" => Some(system::sys(vm)),
+        "sys" => {
+            let module = system::sys(vm);
+            execute(vm, "_sysextra", "<_sysextra>", include_str!("lib/_sysextra.py"), None)?;
+            return Ok(Value::Module(module));
+        }
         "time" => Some(system::time(vm)),
         "os" => {
             let module = system::os(vm);
@@ -192,8 +225,9 @@ fn load(vm: &mut Vm, name: &str) -> PyResult<Value> {
         }
         "json" => Some(json::module(vm)),
         "_nova" => Some(codec::module(vm)),
+        "unicodedata" => Some(unicodedata::module(vm)),
         "re" => Some(re::module(vm)),
-        "traceback" => Some(system::traceback(vm)),
+        "_traceback" => Some(system::traceback(vm)),
         _ => None,
     };
     if let Some(module) = native {
@@ -226,7 +260,13 @@ fn load(vm: &mut Vm, name: &str) -> PyResult<Value> {
             };
             (directories, &name[i + 1..])
         }
-        None => (vm.path.clone(), name),
+        None => {
+            let path = match &vm.sys_path {
+                Some(list) => list.borrow().iter().filter_map(|v| if let Value::Str(s) = v { Some(String::from(&**s)) } else { None }).collect(),
+                None => vm.path.clone(),
+            };
+            (path, name)
+        }
     };
     for directory in directories {
         let file = join(&directory, &alloc::format!("{}.py", leaf));

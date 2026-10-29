@@ -13,7 +13,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::ast::*;
-use super::code::{Code, Op};
+use super::code::{Code, Op, Pos};
 use super::int::Int;
 use super::symtable::{self, Place, ScopeKind, Table};
 use super::value::Value;
@@ -22,6 +22,12 @@ use crate::web::js::num::Num;
 pub struct CompileError {
     pub message: String,
     pub line: u32,
+}
+
+impl CompileError {
+    pub fn new(message: impl Into<String>, line: u32) -> CompileError {
+        CompileError { message: message.into(), line }
+    }
 }
 
 type CResult<T> = Result<T, CompileError>;
@@ -54,10 +60,14 @@ struct Compiler<'a> {
     units: Vec<Unit>,
     filename: Rc<str>,
     line: u32,
+    /// The columns of the expression being compiled.
+    pos: Pos,
+    /// The next expression is a whole call statement (see Pos::quiet).
+    quiet_next: bool,
 }
 
 fn err<T>(message: &str, line: u32) -> CResult<T> {
-    Err(CompileError { message: String::from(message), line })
+    Err(CompileError::new(String::from(message), line))
 }
 
 impl<'a> Compiler<'a> {
@@ -77,9 +87,11 @@ impl<'a> Compiler<'a> {
 
     fn emit(&mut self, op: Op) -> usize {
         let line = self.line;
+        let pos = self.pos;
         let unit = self.unit();
         unit.code.ops.push(op);
         unit.code.lines.push(line);
+        unit.code.positions.push(pos);
         unit.code.ops.len() - 1
     }
 
@@ -259,6 +271,7 @@ impl<'a> Compiler<'a> {
             filename: self.filename.clone(),
             ops: Vec::new(),
             lines: Vec::new(),
+            positions: Vec::new(),
             consts: Vec::new(),
             names: Vec::new(),
             varnames: Vec::new(),
@@ -365,12 +378,14 @@ impl<'a> Compiler<'a> {
 
     fn stmt(&mut self, statement: &Stmt) -> CResult<()> {
         self.line = statement.line;
+        self.pos = Pos::default();
         match &statement.kind {
             StmtKind::Expr(e) => {
                 self.expr(e)?;
                 self.emit(Op::Pop);
             }
             StmtKind::Assign(targets, value) => {
+                self.quiet_next = targets.len() == 1 && matches!(targets[0].kind, ExprKind::Name(_)) && Self::named_call(value);
                 self.expr(value)?;
                 for (i, target) in targets.iter().enumerate() {
                     if i + 1 < targets.len() {
@@ -449,10 +464,13 @@ impl<'a> Compiler<'a> {
             StmtKind::Pass => {}
             StmtKind::Return(value) => {
                 if self.scope_kind() != ScopeKind::Function {
-                    return err("'return' hors d'une fonction", statement.line);
+                    return err("'return' outside function", statement.line);
                 }
                 match value {
-                    Some(v) => self.expr(v)?,
+                    Some(v) => {
+                        self.quiet_next = Self::named_call(v);
+                        self.expr(v)?
+                    }
                     None => self.load_const(Value::None),
                 }
                 let blocks = self.unit().blocks.clone();
@@ -874,7 +892,7 @@ impl<'a> Compiler<'a> {
     fn break_or_continue(&mut self, is_break: bool, line: u32) -> CResult<()> {
         let blocks = self.unit().blocks.clone();
         let Some(loop_index) = blocks.iter().rposition(|b| matches!(b, Block::While { .. } | Block::For { .. })) else {
-            return err(if is_break { "'break' hors d'une boucle" } else { "'continue' hors d'une boucle" }, line);
+            return err(if is_break { "'break' outside loop" } else { "'continue' not properly in loop" }, line);
         };
         for block in blocks[loop_index + 1..].iter().rev() {
             self.unwind(block, false)?;
@@ -920,7 +938,7 @@ impl<'a> Compiler<'a> {
                 }
                 None => {
                     if index + 1 != handlers.len() {
-                        return err("un 'except:' nu doit etre le dernier", handler.line);
+                        return err("default 'except:' must be last", handler.line);
                     }
                 }
             }
@@ -1046,7 +1064,7 @@ impl<'a> Compiler<'a> {
             self.expr(decorator)?;
         }
         let flags = self.defaults(&def.params)?;
-        let scope = *self.table.by_node.get(&symtable::function_key(def)).ok_or(CompileError { message: String::from("portee introuvable"), line: def.line })?;
+        let scope = *self.table.by_node.get(&symtable::function_key(def)).ok_or(CompileError::new(String::from("internal compiler error: scope not found"), def.line))?;
         let qualname = self.qualname(&def.name);
         self.new_unit(scope, &def.name, &qualname, Some(&def.params), def.line);
         self.unit().code.doc = Self::docstring(&def.body);
@@ -1067,7 +1085,7 @@ impl<'a> Compiler<'a> {
         for decorator in &def.decorators {
             self.expr(decorator)?;
         }
-        let scope = *self.table.by_node.get(&symtable::class_key(def)).ok_or(CompileError { message: String::from("portee introuvable"), line: def.line })?;
+        let scope = *self.table.by_node.get(&symtable::class_key(def)).ok_or(CompileError::new(String::from("internal compiler error: scope not found"), def.line))?;
         let qualname = self.qualname(&def.name);
         self.new_unit(scope, &def.name, &qualname, None, def.line);
         // __module__, __qualname__, __doc__, annotations.
@@ -1148,8 +1166,8 @@ impl<'a> Compiler<'a> {
                     }
                 }
             }
-            ExprKind::Starred(_) => return err("une expression etoilee doit etre dans une liste ou un tuple", target.line),
-            _ => return err("cible d'affectation invalide", target.line),
+            ExprKind::Starred(_) => return err("starred assignment target must be in a list or tuple", target.line),
+            _ => return err("cannot assign to expression", target.line),
         }
         Ok(())
     }
@@ -1172,7 +1190,7 @@ impl<'a> Compiler<'a> {
                     self.delete_target(item)?;
                 }
             }
-            _ => return err("impossible de supprimer cette expression", target.line),
+            _ => return err("cannot delete expression", target.line),
         }
         Ok(())
     }
@@ -1205,7 +1223,7 @@ impl<'a> Compiler<'a> {
                 self.emit(Op::Rot3);
                 self.emit(Op::StoreSubscr);
             }
-            _ => return err("cible invalide pour une affectation augmentee", target.line),
+            _ => return err("illegal expression for augmented assignment", target.line),
         }
         Ok(())
     }
@@ -1215,11 +1233,20 @@ impl<'a> Compiler<'a> {
     // --------------------------------------------------------
 
     fn expr(&mut self, expr: &Expr) -> CResult<()> {
-        let saved = self.line;
+        let saved = (self.line, self.pos);
+        let quiet = core::mem::take(&mut self.quiet_next);
         self.line = expr.line;
+        if expr.end_line != 0 {
+            self.pos = Pos { col: expr.col, end_line: expr.end_line, end_col: expr.end_col, anchor: expr.anchor, quiet };
+        }
         let result = self.expr_inner(expr);
-        self.line = saved;
+        (self.line, self.pos) = saved;
         result
+    }
+
+    /// `f(...)` with `f` a plain name.
+    fn named_call(e: &Expr) -> bool {
+        matches!(&e.kind, ExprKind::Call(f, _) if matches!(f.kind, ExprKind::Name(_)))
     }
 
     fn expr_inner(&mut self, expr: &Expr) -> CResult<()> {
@@ -1358,7 +1385,7 @@ impl<'a> Compiler<'a> {
             ExprKind::Generator(element, generators) => self.comprehension(expr, 3, element, None, generators)?,
             ExprKind::Lambda(params, body) => {
                 let flags = self.defaults(params)?;
-                let scope = *self.table.by_node.get(&symtable::expr_key(expr)).ok_or(CompileError { message: String::from("portee introuvable"), line: expr.line })?;
+                let scope = *self.table.by_node.get(&symtable::expr_key(expr)).ok_or(CompileError::new(String::from("internal compiler error: scope not found"), expr.line))?;
                 let qualname = self.qualname("<lambda>");
                 self.new_unit(scope, "<lambda>", &qualname, Some(params), expr.line);
                 self.expr(body)?;
@@ -1375,7 +1402,7 @@ impl<'a> Compiler<'a> {
                 self.expr(orelse)?;
                 self.patch_here(to_end);
             }
-            ExprKind::Starred(_) => return err("expression etoilee hors d'un contexte qui l'accepte", expr.line),
+            ExprKind::Starred(_) => return err("can't use starred expression here", expr.line),
             ExprKind::Named(name, value) => {
                 self.expr(value)?;
                 self.emit(Op::Dup);
@@ -1515,7 +1542,7 @@ impl<'a> Compiler<'a> {
                     self.emit(Op::LoadDeref(i));
                     let first = self.unit().code.varnames.first().cloned();
                     let Some(first) = first.filter(|_| self.unit().code.argcount > 0) else {
-                        return err("super() : pas de premier argument", function.line);
+                        return err("super(): no arguments", function.line);
                     };
                     self.load_name(&first);
                     self.emit(Op::Call(2));
@@ -1532,13 +1559,13 @@ impl<'a> Compiler<'a> {
                 match arg {
                     Arg::Positional(e) => {
                         if !names.is_empty() {
-                            return err("argument positionnel apres un argument nomme", e.line);
+                            return err("positional argument follows keyword argument", e.line);
                         }
                         self.expr(e)?;
                     }
                     Arg::Keyword(name, e) => {
                         if names.iter().any(|n: &Value| matches!(n, Value::Str(s) if s == name)) {
-                            return err(&alloc::format!("argument nomme '{}' repete", name), e.line);
+                            return err(&alloc::format!("keyword argument repeated: {}", name), e.line);
                         }
                         self.expr(e)?;
                         names.push(Value::Str(name.clone()));
@@ -1597,7 +1624,7 @@ impl<'a> Compiler<'a> {
     /// A comprehension: a function of its first iterator, called at once.
     /// Kind: 0 list, 1 set, 2 dict, 3 generator.
     fn comprehension(&mut self, node: &Expr, kind: u8, element: &Expr, value: Option<&Expr>, generators: &[Comprehension]) -> CResult<()> {
-        let scope = *self.table.by_node.get(&symtable::expr_key(node)).ok_or(CompileError { message: String::from("portee introuvable"), line: node.line })?;
+        let scope = *self.table.by_node.get(&symtable::expr_key(node)).ok_or(CompileError::new(String::from("internal compiler error: scope not found"), node.line))?;
         let name = match kind {
             0 => "<listcomp>",
             1 => "<setcomp>",
@@ -1753,8 +1780,8 @@ impl<'a> Compiler<'a> {
 
 /// Compiles a module.
 pub fn compile_module(body: &[Stmt], filename: &str) -> Result<Rc<Code>, CompileError> {
-    let table = symtable::build(body).map_err(|e| CompileError { message: e.message, line: e.line })?;
-    let mut compiler = Compiler { table: &table, units: Vec::new(), filename: Rc::from(filename), line: 1 };
+    let table = symtable::build(body).map_err(|e| CompileError::new(e.message, e.line))?;
+    let mut compiler = Compiler { table: &table, units: Vec::new(), filename: Rc::from(filename), line: 1, pos: Pos::default(), quiet_next: false };
     compiler.new_unit(0, "<module>", "<module>", None, 1);
     compiler.unit().code.doc = Compiler::docstring(body);
     if body.iter().any(|s| matches!(s.kind, StmtKind::AnnAssign(..))) {
@@ -1770,12 +1797,12 @@ pub fn compile_module(body: &[Stmt], filename: &str) -> Result<Rc<Code>, Compile
 pub fn compile_eval(expr: &Expr, filename: &str) -> Result<Rc<Code>, CompileError> {
     let statement = Stmt { kind: StmtKind::Expr(expr.clone()), line: expr.line };
     let body = alloc::vec![statement];
-    let table = symtable::build(&body).map_err(|e| CompileError { message: e.message, line: e.line })?;
-    let mut compiler = Compiler { table: &table, units: Vec::new(), filename: Rc::from(filename), line: 1 };
+    let table = symtable::build(&body).map_err(|e| CompileError::new(e.message, e.line))?;
+    let mut compiler = Compiler { table: &table, units: Vec::new(), filename: Rc::from(filename), line: 1, pos: Pos::default(), quiet_next: false };
     compiler.new_unit(0, "<module>", "<module>", None, 1);
     // The expression the table was built on (scopes are keyed by node).
     let StmtKind::Expr(expr) = &body[0].kind else {
-        return Err(CompileError { message: String::from("expression attendue"), line: 1 });
+        return Err(CompileError::new(String::from("invalid syntax"), 1));
     };
     compiler.expr(expr)?;
     compiler.emit(Op::Return);

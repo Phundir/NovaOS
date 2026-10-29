@@ -110,14 +110,27 @@ pub enum Mode {
 
 /// A `SyntaxError` exception.
 pub fn syntax_error(vm: &mut Vm, message: &str, filename: &str, line: u32, text: Option<&str>) -> PyErr {
-    let class = vm.types.syntax_error.clone();
+    syntax_error_at(vm, message, filename, line, text, 0, 0)
+}
+
+/// A `SyntaxError` with its columns (1-based, 0 unknown); the
+/// indentation messages make an IndentationError, as CPython's.
+pub fn syntax_error_at(vm: &mut Vm, message: &str, filename: &str, line: u32, text: Option<&str>, offset: u32, end_offset: u32) -> PyErr {
+    let indentation = message == "unexpected indent"
+        || message == "unexpected unindent"
+        || message.starts_with("expected an indented block")
+        || message.starts_with("unindent does not match");
+    let class = if indentation { vm.types.indentation_error.clone() } else { vm.types.syntax_error.clone() };
     let err = vm.error(&class, message);
     if let PyErr::Exc(Value::Instance(i)) = &err {
         let mut d = i.dict.borrow_mut();
         d.set_str("msg", Value::str(message));
         d.set_str("filename", Value::str(filename));
         d.set_str("lineno", Value::int(line as i64));
-        d.set_str("text", text.map(Value::str).unwrap_or(Value::None));
+        d.set_str("text", text.map(|t| Value::str(&alloc::format!("{}\n", t))).unwrap_or(Value::None));
+        d.set_str("offset", if offset == 0 { Value::None } else { Value::int(offset as i64) });
+        d.set_str("end_lineno", Value::int(line as i64));
+        d.set_str("end_offset", if end_offset == 0 { Value::None } else { Value::int(end_offset as i64) });
     }
     err
 }
@@ -126,11 +139,11 @@ pub fn syntax_error(vm: &mut Vm, message: &str, filename: &str, line: u32, text:
 pub fn compile(vm: &mut Vm, source: &str, filename: &str, mode: Mode) -> PyResult<Rc<Code>> {
     let result = match mode {
         Mode::Module => parse::parse(source)
-            .map_err(|e| (e.message, e.line))
-            .and_then(|body| compile::compile_module(&body, filename).map_err(|e| (e.message, e.line))),
+            .map_err(|e| (e.message, e.line, e.offset, e.end_offset))
+            .and_then(|body| compile::compile_module(&body, filename).map_err(|e| (e.message, e.line, 0, 0))),
         Mode::Eval => parse::parse_eval(source)
-            .map_err(|e| (e.message, e.line))
-            .and_then(|expr| compile::compile_eval(&expr, filename).map_err(|e| (e.message, e.line))),
+            .map_err(|e| (e.message, e.line, e.offset, e.end_offset))
+            .and_then(|expr| compile::compile_eval(&expr, filename).map_err(|e| (e.message, e.line, 0, 0))),
     };
     // Tracebacks show the lines of files, not of `exec`'d strings.
     if !filename.starts_with('<') {
@@ -138,9 +151,9 @@ pub fn compile(vm: &mut Vm, source: &str, filename: &str, mode: Mode) -> PyResul
     }
     match result {
         Ok(code) => Ok(code),
-        Err((message, line)) => {
+        Err((message, line, offset, end_offset)) => {
             let text = source.lines().nth((line as usize).saturating_sub(1));
-            Err(syntax_error(vm, &message, filename, line, text))
+            Err(syntax_error_at(vm, &message, filename, line, text, offset, end_offset))
         }
     }
 }
@@ -201,12 +214,15 @@ fn format_chain(vm: &mut Vm, exc: &Value, out: &mut String, seen: &mut Vec<usize
     let entries = instance.traceback.borrow().clone();
     if !entries.is_empty() {
         out.push_str("Traceback (most recent call last):\n");
-        for (file, line, name) in entries.iter().rev() {
+        for (file, line, name, pos) in entries.iter().rev() {
             out.push_str(&alloc::format!("  File \"{}\", line {}, in {}\n", file, line, name));
             if let Some(text) = vm.source_line(file, *line) {
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
                     out.push_str(&alloc::format!("    {}\n", trimmed));
+                    if let Some(carets) = carets(&text, *line, pos) {
+                        out.push_str(&alloc::format!("    {}\n", carets));
+                    }
                 }
             }
         }
@@ -218,7 +234,23 @@ fn format_chain(vm: &mut Vm, exc: &Value, out: &mut String, seen: &mut Vec<usize
             let line = line.to_i64().unwrap_or(0) as u32;
             out.push_str(&alloc::format!("  File \"{}\", line {}\n", file, line));
             if let Some(Value::Str(text)) = d.get_str("text") {
-                out.push_str(&alloc::format!("    {}\n", text.trim()));
+                let trimmed = text.trim_end_matches(['\n', '\r']);
+                let stripped = trimmed.trim_start();
+                out.push_str(&alloc::format!("    {}\n", stripped.trim_end()));
+                // The caret line, columns counted from the stripped text.
+                if let Some(Value::Int(offset)) = d.get_str("offset") {
+                    let lead = trimmed.chars().count() - stripped.chars().count();
+                    let start = (offset.to_i64().unwrap_or(1) as usize).saturating_sub(1).saturating_sub(lead);
+                    let end = match d.get_str("end_offset") {
+                        Some(Value::Int(e)) => (e.to_i64().unwrap_or(0) as usize).saturating_sub(1).saturating_sub(lead),
+                        _ => start + 1,
+                    };
+                    let width = stripped.trim_end().chars().count();
+                    if start <= width {
+                        let end = end.max(start + 1).min(width.max(start + 1));
+                        out.push_str(&alloc::format!("    {}{}\n", " ".repeat(start), "^".repeat(end - start)));
+                    }
+                }
             }
         }
     }
@@ -232,6 +264,46 @@ fn format_chain(vm: &mut Vm, exc: &Value, out: &mut String, seen: &mut Vec<usize
             }
         }
     }
+}
+
+/// The line under a traceback's source line (PEP 657, as CPython 3.13
+/// draws it): `^` under the failing expression, or `~` under its
+/// operands and `^` under the operator, the call's parentheses or the
+/// subscript's brackets. None when the expression spans other lines or
+/// the whole line, or for `x = f(...)` and `return f(...)`.
+fn carets(text: &str, line: u32, pos: &code::Pos) -> Option<String> {
+    if pos.end_line != line || pos.quiet || pos.end_col <= pos.col {
+        return None;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let (start, end) = (pos.col as usize, (pos.end_col as usize).min(chars.len()));
+    if start >= end {
+        return None;
+    }
+    let anchored = pos.anchor.1 > pos.anchor.0;
+    let before = chars[..start].iter().any(|c| !c.is_whitespace());
+    let after = chars[end..].iter().any(|c| !c.is_whitespace());
+    if !anchored && !before && !after {
+        return None;
+    }
+    // Columns on screen: the line is shown without its indentation, and
+    // East Asian wide characters take two cells.
+    let indent = chars.iter().take_while(|c| c.is_whitespace()).count();
+    let width = |c: char| if matches!(modules::unicodedata::properties(c as u32).2, "W" | "F") { 2 } else { 1 };
+    let mut out = String::new();
+    for c in chars[indent.min(start)..start].iter() {
+        for _ in 0..width(*c) {
+            out.push(' ');
+        }
+    }
+    for (i, c) in chars[start..end].iter().enumerate() {
+        let column = (start + i) as u32;
+        let mark = if !anchored || (pos.anchor.0 <= column && column < pos.anchor.1) { '^' } else { '~' };
+        for _ in 0..width(*c) {
+            out.push(mark);
+        }
+    }
+    Some(out)
 }
 
 /// `ValueError: message` (the qualified name for a user's exception

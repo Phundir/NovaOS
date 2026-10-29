@@ -3,6 +3,7 @@
 //! non-ASCII string walks it -- ASCII strings, nearly all of them, go
 //! straight to the byte.
 
+use super::super::modules::unicodedata as ucd;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -391,27 +392,27 @@ fn predicate(vm: &mut Vm, a: &[Value], name: &str, test: fn(char) -> bool, empty
 }
 
 fn isdigit(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
-    predicate(vm, a, "isdigit", |c| c.is_ascii_digit() || matches!(c, '\u{b2}' | '\u{b3}' | '\u{b9}') || (c.is_numeric() && c.to_digit(10).is_some()), false)
+    predicate(vm, a, "isdigit", ucd::is_digit, false)
 }
 
 fn isdecimal(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
-    predicate(vm, a, "isdecimal", |c| c.is_ascii_digit(), false)
+    predicate(vm, a, "isdecimal", ucd::is_decimal, false)
 }
 
 fn isnumeric(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
-    predicate(vm, a, "isnumeric", |c| c.is_numeric(), false)
+    predicate(vm, a, "isnumeric", ucd::is_numeric, false)
 }
 
 fn isalpha(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
-    predicate(vm, a, "isalpha", |c| c.is_alphabetic(), false)
+    predicate(vm, a, "isalpha", ucd::is_alpha, false)
 }
 
 fn isalnum(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
-    predicate(vm, a, "isalnum", |c| c.is_alphanumeric(), false)
+    predicate(vm, a, "isalnum", |c| ucd::is_alpha(c) || ucd::is_numeric(c), false)
 }
 
 fn isspace(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
-    predicate(vm, a, "isspace", |c| c.is_whitespace(), false)
+    predicate(vm, a, "isspace", ucd::is_space, false)
 }
 
 fn isascii(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
@@ -419,7 +420,7 @@ fn isascii(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> 
 }
 
 fn isprintable(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
-    predicate(vm, a, "isprintable", |c| !c.is_control(), true)
+    predicate(vm, a, "isprintable", ucd::is_printable, true)
 }
 
 fn isupper(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {

@@ -108,6 +108,14 @@ pub struct Params {
 pub struct Expr {
     pub kind: ExprKind,
     pub line: u32,
+    /// Where the expression sits (columns in characters, end exclusive),
+    /// for the carets of tracebacks; `end_line` 0 when unknown.
+    pub col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+    /// The part tracebacks underline with `^` (a binary operator, the
+    /// parentheses of a call, the brackets of a subscript), on `line`.
+    pub anchor: (u32, u32),
 }
 
 #[derive(Debug, Clone)]
@@ -283,6 +291,14 @@ pub struct Module {
     /// The source, for tracebacks.
     pub source: Rc<str>,
     pub filename: Rc<str>,
+}
+
+impl Expr {
+    /// An expression whose columns are not known (made by the parser
+    /// for a desugaring, or by the compiler).
+    pub fn new(kind: ExprKind, line: u32) -> Expr {
+        Expr { kind, line, col: 0, end_line: 0, end_col: 0, anchor: (0, 0) }
+    }
 }
 
 pub fn name_of(name: &str) -> Rc<str> {

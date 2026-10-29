@@ -207,7 +207,10 @@ fn object_setattr(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<
                         *i.class.borrow_mut() = c.clone();
                     }
                 }
-                _ => i.dict.borrow_mut().set_str(&name, value.clone()),
+                _ => {
+                    vm.check_slots(&class, &name)?;
+                    i.dict.borrow_mut().set_str(&name, value.clone())
+                }
             }
             Ok(Value::None)
         }
@@ -458,13 +461,57 @@ fn exc_init(vm: &mut Vm, a: &[Value], kw: &[(Rc<str>, Value)]) -> PyResult<Value
         };
         i.dict.borrow_mut().set_str("code", code);
     }
-    if class.is_subclass(&vm.types.os_error) && (2..=3).contains(&rest.len()) {
-        i.dict.borrow_mut().set_str("errno", rest[0].clone());
-        i.dict.borrow_mut().set_str("strerror", rest[1].clone());
-        i.dict.borrow_mut().set_str("filename", rest.get(2).cloned().unwrap_or(Value::None));
+    let mut rest = rest;
+    if class.is_subclass(&vm.types.os_error) {
+        let mut d = i.dict.borrow_mut();
+        for name in ["errno", "strerror", "filename", "filename2"] {
+            d.set_str(name, Value::None);
+        }
+        if (2..=5).contains(&rest.len()) {
+            d.set_str("errno", rest[0].clone());
+            d.set_str("strerror", rest[1].clone());
+            if rest.len() >= 3 {
+                d.set_str("filename", rest[2].clone());
+                if rest.len() == 5 {
+                    d.set_str("filename2", rest[4].clone());
+                }
+                rest.truncate(2);
+            }
+        }
+        drop(d);
+        // OSError(2, ...) is a FileNotFoundError, as CPython's __new__.
+        if class.id == vm.types.os_error.id {
+            if let Some(Value::Int(n)) = d_errno(i) {
+                let t = &vm.types;
+                let sub = match n.to_i64().unwrap_or(0) {
+                    11 | 114 | 115 => Some(&t.blocking_io_error),
+                    10 => Some(&t.child_process_error),
+                    32 | 108 => Some(&t.broken_pipe_error),
+                    103 => Some(&t.connection_aborted_error),
+                    111 => Some(&t.connection_refused_error),
+                    104 => Some(&t.connection_reset_error),
+                    17 => Some(&t.file_exists_error),
+                    2 => Some(&t.file_not_found_error),
+                    21 => Some(&t.is_a_directory_error),
+                    20 => Some(&t.not_a_directory_error),
+                    4 => Some(&t.interrupted_error),
+                    1 | 13 => Some(&t.permission_error),
+                    3 => Some(&t.process_lookup_error),
+                    110 => Some(&t.timeout_error),
+                    _ => None,
+                };
+                if let Some(sub) = sub {
+                    *i.class.borrow_mut() = sub.clone();
+                }
+            }
+        }
     }
     i.dict.borrow_mut().set_str("args", Value::tuple(rest));
     Ok(Value::None)
+}
+
+fn d_errno(i: &Instance) -> Option<Value> {
+    i.dict.borrow().get_str("errno")
 }
 
 fn exc_str(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
@@ -482,6 +529,11 @@ fn exc_str(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> 
                     if let Some(f) = filename.filter(|f| !f.is_none()) {
                         text.push_str(": ");
                         text.push_str(&vm.repr(&f)?);
+                        let second = i.dict.borrow().get_str("filename2");
+                        if let Some(f2) = second.filter(|f| !f.is_none()) {
+                            text.push_str(" -> ");
+                            text.push_str(&vm.repr(&f2)?);
+                        }
                     }
                     return Ok(Value::str(&text));
                 }

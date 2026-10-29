@@ -172,7 +172,7 @@ pub struct Instance {
     pub inner: RefCell<Value>,
     /// Exceptions: the traceback lines gathered while unwinding, and the
     /// exception being handled when this one was raised.
-    pub traceback: RefCell<Vec<(Rc<str>, u32, Rc<str>)>>,
+    pub traceback: RefCell<Vec<(Rc<str>, u32, Rc<str>, super::code::Pos)>>,
     pub context: RefCell<Value>,
     pub cause: RefCell<Value>,
 }

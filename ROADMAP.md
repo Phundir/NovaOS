@@ -4302,25 +4302,63 @@ sur l'hôte :
   DECISIONS) ramènent le programme le plus lourd du corpus de 87 s à 13 s
   dans QEMU (TCG), et `make test` de 119 s à 39 s.
 
+**Complément de la 16.5 (28-29 octobre 2026, à la demande « Fini python »).**
+Mesuré sur l'hôte (`make py-test`, `python3 -I` en témoin) et dans le noyau
+(autotest de `make test`) ; voir la ligne de validation consignée au
+commit de clôture.
+
+- **Langage** : `match`/`case` (PEP 634), `async`/`await`, `async for`/`with`,
+  générateurs et compréhensions asynchrones, `except*` et `ExceptionGroup`
+  (PEP 654), instruction `type` et paramètres de type `class C[T]`
+  (PEP 695 ; les noms `T` sont liés dans la portée englobante, CPython
+  leur donne une portée propre), métaclasses actives (`__new__`,
+  `__init__`, `__call__`, `__prepare__`, `__instancecheck__`,
+  `__subclasscheck__`), `__slots__` appliqués, `\N{...}`, `compile()`,
+  `memoryview`, `complex`, `bytearray`, `list[int]` (types.GenericAlias),
+  `float.fromhex`, `OSError(2, ...)` devenu `FileNotFoundError`.
+- **Messages** : erreurs de syntaxe en anglais avec le texte de CPython,
+  caret sous l'erreur et `IndentationError` ; traces avec les carets de
+  PEP 657 (`~~^~~`) et le cadre qui attrape l'exception ;
+  `__traceback__`, `sys.exc_info()[2]` ; `repr` et `str.is*` selon la
+  base Unicode.
+- **Bibliothèque ajoutée** : `abc` (ABCMeta réelle), `collections.abc`,
+  `numbers`, `fractions`, `decimal` (arithmétique exacte, `sqrt`, `exp`,
+  `ln`, `log10`, puissances, correctement arrondis), `statistics`,
+  `datetime`, `hashlib`, `hmac`, `zlib`, `binascii`, `base64`, `struct`,
+  `io`, `textwrap`, `pathlib`, `glob`, `fnmatch`, `unicodedata` (Unicode
+  15.1, table générée par `tools/unicode/generate.py`), `traceback`
+  complet, `logging`, `argparse`, `warnings`, `getopt`, `getpass`,
+  `platform`, `locale`, `timeit`, `unittest` et `unittest.mock`, `pprint`,
+  `difflib`, `shlex`, `html`, `html.entities`, `html.parser`. `logging`,
+  `argparse`, `warnings`, `getopt`, `timeit`, `unittest`, `unittest.mock`,
+  `difflib`, `pprint`, `html.parser` sont des portages du code de
+  CPython 3.13 (licence PSF, en-têtes conservés).
+- **math** : `erf`, `erfc`, `gamma`, `lgamma`, fonctions hyperboliques
+  inverses, `cbrt`, `remainder`, `nextafter`, `ulp`, `fma`, `sumprod`
+  (portages de fdlibm et de CPython : 13 écarts d'un ulp sur 117 000
+  valeurs comparées à la glibc).
+- Corpus : 30 programmes identiques à CPython 3.13.
+
 **Ce qui reste ouvert dans la 16.5**
-- Hors du sous-ensemble : `async`/`await`, `match`, métaclasses actives
-  (`metaclass=` est accepté et sans effet ; des crochets de classe en
-  tiennent lieu), nombres complexes, échappes `\N{...}` ; `bytearray` et
-  `memoryview` n'existent pas (`NameError`).
-- `re` : `\d`, `\w`, `\s` ne connaissent que l'ASCII.
-- Absents : `statistics`, `datetime`, `decimal`, `fractions`, `pathlib`,
-  `subprocess`, `socket`, `threading`, `asyncio`, `unittest`, `pickle`.
-- `random.seed("texte")` ne donne pas les tirages de CPython (graine
-  entière seulement).
-- Fichiers lus en entier à l'ouverture et écrits à la fermeture ; pas
-  d'accès concurrent entre deux programmes.
-- Messages d'erreur de syntaxe en français et sans caret ; les traces ne
-  soulignent pas l'expression fautive (CPython 3.13 le fait).
-- `Enum(valeur)` réexécute `__init__` d'un membre défini par une classe à
-  `__init__` personnalisé ; `Flag` composé sans pseudo-membres nommés comme
-  CPython.
-- Performance : 3 à 4 fois CPython sur l'hôte ; un programme à la fois
-  (`BUSY`), le registre des conteneurs étant global.
+- Absents : `pickle`, `copyreg`, `types`, `inspect`, `weakref`, `gc`,
+  `atexit`, `errno`, `stat`, `csv`, `calendar`, `uuid`, `secrets`,
+  `urllib.parse`, `tempfile`, `shutil`, `gzip`, `array`, `threading`,
+  `queue`, `contextvars`, `subprocess`, `socket`, `sqlite3`, `email`,
+  `http` (travail commencé puis interrompu à la demande de
+  l'utilisateur, rien n'est livré pour ces modules).
+- Pas de cadres d'exécution visibles (`sys._getframe`, `inspect.stack`) ;
+  les traces omettent les cadres de la bibliothèque (CPython les montre).
+- Carets d'une expression étalée sur plusieurs lignes non dessinés ; le
+  caret d'une erreur de syntaxe est placé au jeton où l'analyse échoue,
+  pas toujours là où CPython le met.
+- `zlib.compress` produit un flux valide mais pas les octets de la zlib ;
+  `os.urandom` n'est pas une source cryptographique.
+- Surrogates (`'\ud800'`) non représentables ; `str.upper`/`lower`
+  suivent les tables Unicode de Rust (16.0) et non 15.1.
+- `random.seed("texte")` ne donne pas les tirages de CPython ; fichiers lus
+  en entier à l'ouverture ; un programme à la fois (`BUSY`) ; performance
+  3 à 4 fois CPython sur l'hôte.
+
 #### 16.6 C (9.5.2)
 - [ ] 16.6.1 Compilateur d'un sous-ensemble défini de C vers x86_64, binaire
   Nova qui s'exécute en ring 3 ; C++ refusé nommément

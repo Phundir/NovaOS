@@ -62,7 +62,20 @@ fn print(vm: &mut Vm, a: &[Value], kw: &[(Rc<str>, Value)]) -> PyResult<Value> {
         out.push_str(&vm.str_of(value)?);
     }
     out.push_str(&end);
-    match args::keyword(kw, "file") {
+    let mut file = args::keyword(kw, "file").cloned();
+    if file.as_ref().is_none_or(|f| f.is_none()) {
+        // `sys.stdout` replaced by the program (redirect_stdout, StringIO).
+        let sys = vm.sys_modules.as_ref().and_then(|d| d.borrow().get_str("sys"));
+        if let Some(Value::Module(sys)) = sys {
+            let stdout = sys.dict.borrow().get_str("stdout");
+            match stdout {
+                Some(Value::File(f)) if &*f.borrow().path == "<stdout>" => {}
+                Some(Value::None) | None => {}
+                Some(other) => file = Some(other),
+            }
+        }
+    }
+    match file.as_ref() {
         None | Some(Value::None) => vm.host.write(&out, false),
         Some(Value::File(f)) => {
             let f = f.clone();
@@ -257,6 +270,19 @@ fn pow(vm: &mut Vm, a: &[Value], kw: &[(Rc<str>, Value)]) -> PyResult<Value> {
     }
     let ints = |v: &Value| matches!(v, Value::Int(_) | Value::Bool(_));
     if !(ints(base) && ints(exp) && ints(&modulus)) {
+        // Three-argument pow of an object: its own `__pow__(exp, mod)`.
+        if let Value::Instance(_) = base {
+            let class = vm.class_of(base);
+            if let Some(method @ Value::Function(_)) = class.lookup("__pow__") {
+                let r = vm.call(&method, &[base.clone(), exp.clone(), modulus.clone()], &[])?;
+                if !matches!(r, Value::NotImplemented) {
+                    return Ok(r);
+                }
+            }
+            let (x, y, z) = (vm.type_name(base), vm.type_name(exp), vm.type_name(&modulus));
+            let message = alloc::format!("unsupported operand type(s) for ** or pow(): '{}', '{}', '{}'", x, y, z);
+            return vm.type_error(&message);
+        }
         return vm.type_error("pow() 3rd argument not allowed unless all arguments are integers");
     }
     let b = index_value(vm, base)?;
@@ -1092,19 +1118,50 @@ fn source_text(vm: &mut Vm, value: Option<&Value>, function: &str) -> PyResult<S
 }
 
 fn eval(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
-    let source = source_text(vm, a.first(), "eval")?;
     let (module, ns) = namespaces(vm, a.get(1), a.get(2))?;
+    if let Some(Value::Code(code)) = a.first() {
+        return super::run_code(vm, code.clone(), module, ns);
+    }
+    let source = source_text(vm, a.first(), "eval")?;
     let trimmed = source.trim_start_matches([' ', '\t']);
     let code = super::compile(vm, trimmed, "<string>", super::Mode::Eval)?;
     super::run_code(vm, code, module, ns)
 }
 
 fn exec(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
-    let source = source_text(vm, a.first(), "exec")?;
     let (module, ns) = namespaces(vm, a.get(1), a.get(2))?;
-    let code = super::compile(vm, &source, "<string>", super::Mode::Module)?;
+    let code = match a.first() {
+        Some(Value::Code(code)) => code.clone(),
+        other => {
+            let source = source_text(vm, other, "exec")?;
+            super::compile(vm, &source, "<string>", super::Mode::Module)?
+        }
+    };
     super::run_code(vm, code, module, ns)?;
     Ok(Value::None)
+}
+
+/// `compile(source, filename, mode)`: a code object for exec or eval.
+fn compile(vm: &mut Vm, a: &[Value], kw: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let source = args::get(a, kw, 0, "source").cloned();
+    if let Some(Value::Code(_)) = source {
+        return Ok(source.unwrap_or(Value::None));
+    }
+    let text = source_text(vm, source.as_ref(), "compile")?;
+    let filename = match args::get(a, kw, 1, "filename") {
+        Some(v) => super::modules::system::fspath(vm, v)?,
+        None => return vm.type_error("compile() missing required argument 'filename' (pos 2)"),
+    };
+    let mode = match args::get(a, kw, 2, "mode") {
+        Some(Value::Str(m)) => m.clone(),
+        _ => return vm.type_error("compile() missing required argument 'mode' (pos 3)"),
+    };
+    let code = match &*mode {
+        "exec" | "single" => super::compile(vm, &text, &filename, super::Mode::Module)?,
+        "eval" => super::compile(vm, text.trim_start_matches([' ', '\t']), &filename, super::Mode::Eval)?,
+        _ => return vm.value_error("compile() mode must be 'exec', 'eval' or 'single'"),
+    };
+    Ok(Value::Code(code))
 }
 
 fn import(vm: &mut Vm, a: &[Value], kw: &[(Rc<str>, Value)]) -> PyResult<Value> {
@@ -1134,7 +1191,7 @@ pub fn module(vm: &mut Vm) -> Rc<Module> {
         ("max", max), ("all", all), ("any", any), ("callable", callable), ("getattr", getattr), ("hasattr", hasattr),
         ("setattr", setattr), ("delattr", delattr), ("isinstance", isinstance), ("issubclass", issubclass), ("id", id),
         ("hash", hash), ("globals", globals), ("locals", locals), ("vars", vars), ("dir", dir), ("eval", eval),
-        ("exec", exec), ("__import__", import), ("exit", exit), ("quit", exit),
+        ("exec", exec), ("compile", compile), ("__import__", import), ("exit", exit), ("quit", exit),
     ];
     {
         let mut d = dict.borrow_mut();

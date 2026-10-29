@@ -61,6 +61,11 @@ pub enum Tok {
 pub struct Token {
     pub tok: Tok,
     pub line: u32,
+    /// Columns in characters, 0-based; the end is exclusive and may sit
+    /// on a later line (triple-quoted strings).
+    pub col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
 }
 
 /// Longest first.
@@ -73,6 +78,14 @@ const OPERATORS: &[&str] = &[
 pub struct LexError {
     pub message: String,
     pub line: u32,
+    /// 1-based column, 0 when unknown.
+    pub offset: u32,
+}
+
+impl LexError {
+    pub fn new(message: impl Into<String>, line: u32) -> LexError {
+        LexError { message: message.into(), line, offset: 0 }
+    }
 }
 
 type LResult<T> = Result<T, LexError>;
@@ -88,6 +101,18 @@ struct Lexer<'a> {
     out: Vec<Token>,
     /// At the start of a logical line.
     at_line_start: bool,
+    /// Where the token being read starts.
+    start_line: u32,
+    start_col: u32,
+}
+
+/// CPython's message for a character no token starts with.
+fn invalid_character(c: char) -> String {
+    if super::modules::unicodedata::is_printable(c) {
+        alloc::format!("invalid character '{}' (U+{:04X})", c, c as u32)
+    } else {
+        alloc::format!("invalid non-printable character U+{:04X}", c as u32)
+    }
 }
 
 fn is_id_start(c: char) -> bool {
@@ -100,7 +125,9 @@ fn is_id_continue(c: char) -> bool {
 
 impl<'a> Lexer<'a> {
     fn error<T>(&self, message: &str) -> LResult<T> {
-        Err(LexError { message: String::from(message), line: self.line })
+        let mut e = LexError::new(String::from(message), self.line);
+        e.offset = self.col_of(self.pos) + 1;
+        Err(e)
     }
 
     fn peek(&self) -> Option<u8> {
@@ -112,7 +139,17 @@ impl<'a> Lexer<'a> {
     }
 
     fn push(&mut self, tok: Tok) {
-        self.out.push(Token { tok, line: self.line });
+        let end_col = self.col_of(self.pos);
+        let (line, col) = if self.start_line == 0 { (self.line, end_col) } else { (self.start_line, self.start_col) };
+        self.out.push(Token { tok, line, col, end_line: self.line, end_col });
+        self.start_line = 0;
+    }
+
+    /// The column (in characters) of byte offset `pos` on its line.
+    fn col_of(&self, pos: usize) -> u32 {
+        let pos = pos.min(self.text.len());
+        let start = self.text[..pos].rfind('\n').map_or(0, |i| i + 1);
+        self.text[start..pos].chars().count() as u32
     }
 
     fn char_at(&self, pos: usize) -> Option<char> {
@@ -178,7 +215,7 @@ impl<'a> Lexer<'a> {
                                 self.push(Tok::Dedent);
                             }
                             if width != *self.indents.last().unwrap_or(&0) {
-                                return self.error("indentation incoherente (IndentationError)");
+                                return self.error("unindent does not match any outer indentation level");
                             }
                         }
                         self.at_line_start = false;
@@ -188,6 +225,10 @@ impl<'a> Lexer<'a> {
             let Some(byte) = self.peek() else {
                 break;
             };
+            if !matches!(byte, b' ' | b'\t' | b'\x0c' | b'\r' | b'#' | b'\n' | b'\\') {
+                self.start_line = self.line;
+                self.start_col = self.col_of(self.pos);
+            }
             match byte {
                 b' ' | b'\t' | b'\x0c' => self.pos += 1,
                 b'\r' => self.pos += 1,
@@ -209,7 +250,7 @@ impl<'a> Lexer<'a> {
                         self.pos += 3;
                         self.line += 1;
                     } else {
-                        return self.error("caractere inattendu apres une barre oblique inverse");
+                        return self.error("unexpected character after line continuation character");
                     }
                 }
                 b'0'..=b'9' => self.number()?,
@@ -229,7 +270,7 @@ impl<'a> Lexer<'a> {
             }
         }
         if self.depth > 0 {
-            return self.error("parenthese non fermee en fin de fichier");
+            return self.error("unexpected EOF while parsing");
         }
         if !self.at_line_start {
             self.push(Tok::Newline);
@@ -268,7 +309,7 @@ impl<'a> Lexer<'a> {
             }
         }
         let c = self.char_at(self.pos).unwrap_or('?');
-        self.error(&alloc::format!("caractere invalide : {:?}", c))
+        self.error(&invalid_character(c))
     }
 
     fn name_or_string(&mut self) -> LResult<()> {
@@ -314,7 +355,7 @@ impl<'a> Lexer<'a> {
                     self.push(Tok::Int(value));
                     Ok(())
                 }
-                None => self.error("litteral entier invalide"),
+                None => self.error("invalid decimal literal"),
             };
         }
         let mut is_float = false;
@@ -353,11 +394,11 @@ impl<'a> Lexer<'a> {
             self.push(Tok::Float(Num::parse(&text)));
         } else {
             if text.len() > 1 && text.starts_with('0') && text.bytes().any(|b| b != b'0') {
-                return self.error("zeros en tete interdits dans un entier decimal");
+                return self.error("leading zeros in decimal integer literals are not permitted; use an 0o prefix for octal integers");
             }
             match Int::parse_radix(&text, 10) {
                 Some(value) => self.push(Tok::Int(value)),
-                None => return self.error("litteral entier invalide"),
+                None => return self.error("invalid decimal literal"),
             }
         }
         Ok(())
@@ -377,7 +418,7 @@ impl<'a> Lexer<'a> {
         let body_start = self.pos;
         loop {
             let Some(c) = self.peek() else {
-                return Err(LexError { message: String::from("chaine non terminee"), line: start_line });
+                return Err(LexError::new(String::from("unterminated string literal"), start_line));
             };
             if c == b'\\' {
                 if self.peek_at(1) == Some(b'\n') {
@@ -388,7 +429,7 @@ impl<'a> Lexer<'a> {
             }
             if c == b'\n' {
                 if !triple {
-                    return Err(LexError { message: String::from("chaine non terminee"), line: start_line });
+                    return Err(LexError::new(String::from("unterminated string literal"), start_line));
                 }
                 self.line += 1;
             }
@@ -405,13 +446,13 @@ impl<'a> Lexer<'a> {
         let body = &self.text[body_start..self.pos];
         self.pos += if triple { 3 } else { 1 };
         if fstring {
-            let parts = fstring_parts(body, raw, start_line).map_err(|message| LexError { message, line: start_line })?;
+            let parts = fstring_parts(body, raw, start_line).map_err(|message| LexError::new(message, start_line))?;
             return Ok(Tok::FString(parts));
         }
-        let cooked = if raw { String::from(body) } else { unescape(body, bytes).map_err(|message| LexError { message, line: start_line })? };
+        let cooked = if raw { String::from(body) } else { unescape(body, bytes).map_err(|message| LexError::new(message, start_line))? };
         if bytes {
             if cooked.chars().any(|c| c as u32 > 0xff) {
-                return Err(LexError { message: String::from("une chaine b'' ne contient que de l'ASCII"), line: start_line });
+                return Err(LexError::new(String::from("bytes can only contain ASCII literal characters"), start_line));
             }
             return Ok(Tok::Bytes(cooked.chars().map(|c| c as u8).collect()));
         }
@@ -460,16 +501,33 @@ fn unescape(body: &str, bytes: bool) -> Result<String, String> {
             }
             'x' => {
                 let hex: String = (0..2).filter_map(|_| chars.next()).collect();
-                let value = u32::from_str_radix(&hex, 16).map_err(|_| String::from("echappement \\x invalide"))?;
+                let value = u32::from_str_radix(&hex, 16).map_err(|_| String::from("(unicode error) 'unicodeescape' codec can't decode bytes in position 0-1: truncated \\xXX escape"))?;
                 out.push(char::from_u32(value).unwrap_or('\u{fffd}'));
             }
             'u' | 'U' if !bytes => {
                 let count = if e == 'u' { 4 } else { 8 };
                 let hex: String = (0..count).filter_map(|_| chars.next()).collect();
-                let value = u32::from_str_radix(&hex, 16).map_err(|_| String::from("echappement unicode invalide"))?;
-                out.push(char::from_u32(value).ok_or_else(|| String::from("point de code invalide"))?);
+                let value = u32::from_str_radix(&hex, 16).map_err(|_| String::from("(unicode error) 'unicodeescape' codec can't decode bytes in position 0-5: truncated \\uXXXX escape"))?;
+                out.push(char::from_u32(value).ok_or_else(|| String::from("(unicode error) 'unicodeescape' codec can't decode bytes in position 0-9: illegal Unicode character"))?);
             }
-            'N' if !bytes => return Err(String::from("\\N{...} n'est pas pris en charge")),
+            'N' if !bytes => {
+                if chars.peek() != Some(&'{') {
+                    return Err(String::from("(unicode error) 'unicodeescape' codec can't decode bytes: malformed \\N character escape"));
+                }
+                chars.next();
+                let mut name = String::new();
+                loop {
+                    match chars.next() {
+                        Some('}') => break,
+                        Some(c) => name.push(c),
+                        None => return Err(String::from("(unicode error) 'unicodeescape' codec can't decode bytes: malformed \\N character escape")),
+                    }
+                }
+                match super::modules::unicodedata::lookup(&name).and_then(char::from_u32) {
+                    Some(c) => out.push(c),
+                    None => return Err(String::from("(unicode error) 'unicodeescape' codec can't decode bytes: unknown Unicode character name")),
+                }
+            }
             other => {
                 // Unknown escapes stay as they are.
                 out.push('\\');
@@ -504,7 +562,7 @@ fn parse_fparts(chars: &[char], index: &mut usize, raw: bool, line: u32, in_spec
                 text.push('}');
                 *index += 2;
             }
-            '}' => return Err(String::from("f-string : '}' seule")),
+            '}' => return Err(String::from("f-string: single '}' is not allowed")),
             '{' => {
                 if !text.is_empty() {
                     let cooked = if raw { core::mem::take(&mut text) } else { unescape(&core::mem::take(&mut text), false)? };
@@ -563,13 +621,13 @@ fn parse_field(chars: &[char], index: &mut usize, raw: bool, line: u32) -> Resul
         source.truncate(cut);
     }
     if source.trim().is_empty() {
-        return Err(String::from("f-string : expression vide"));
+        return Err(String::from("f-string: valid expression required before '}'"));
     }
     let mut conversion = None;
     if chars.get(*index) == Some(&'!') {
         conversion = chars.get(*index + 1).copied();
         if !matches!(conversion, Some('r' | 's' | 'a')) {
-            return Err(String::from("f-string : conversion invalide"));
+            return Err(String::from("f-string: invalid conversion character: expected 's', 'r', or 'a'"));
         }
         *index += 2;
     }
@@ -579,7 +637,7 @@ fn parse_field(chars: &[char], index: &mut usize, raw: bool, line: u32) -> Resul
         spec = Some(parse_fparts(chars, index, raw, line, true)?);
     }
     if chars.get(*index) != Some(&'}') {
-        return Err(String::from("f-string : '}' attendue"));
+        return Err(String::from("f-string: expecting '}'"));
     }
     *index += 1;
     if debug.is_some() && conversion.is_none() && spec.is_none() {
@@ -591,5 +649,5 @@ fn parse_field(chars: &[char], index: &mut usize, raw: bool, line: u32) -> Resul
 /// Tokenizes a whole source.
 pub fn tokenize(text: &str) -> Result<Vec<Token>, LexError> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    Lexer { src: text.as_bytes(), text, pos: 0, line: 1, depth: 0, indents: alloc::vec![0], out: Vec::new(), at_line_start: true }.run()
+    Lexer { src: text.as_bytes(), text, pos: 0, line: 1, depth: 0, indents: alloc::vec![0], out: Vec::new(), at_line_start: true, start_line: 0, start_col: 0 }.run()
 }

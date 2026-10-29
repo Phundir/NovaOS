@@ -51,6 +51,7 @@ types!(
     module_not_found_error, os_error, file_not_found_error, file_exists_error, permission_error,
     is_a_directory_error, not_a_directory_error, eof_error, syntax_error, unicode_error, warning,
     stop_async_iteration, timeout_error, unicode_decode_error, unicode_encode_error,
+    indentation_error, tab_error, system_error, buffer_error, floating_point_error, reference_error, unicode_translate_error, python_finalization_error, blocking_io_error, child_process_error, connection_error, broken_pipe_error, connection_aborted_error, connection_refused_error, connection_reset_error, interrupted_error, process_lookup_error, user_warning, deprecation_warning, pending_deprecation_warning, syntax_warning, runtime_warning, future_warning, import_warning, unicode_warning, bytes_warning, resource_warning, encoding_warning,
 );
 
 /// A class with its MRO computed.
@@ -93,6 +94,9 @@ impl Types {
         let value_error = e("ValueError", &exception);
         let warning = e("Warning", &exception);
         let unicode_error = e("UnicodeError", &value_error);
+        let syntax_error = e("SyntaxError", &exception);
+        let indentation_error = e("IndentationError", &syntax_error);
+        let connection_error = e("ConnectionError", &os_error);
         Types {
             type_,
             none_type: class("NoneType", o(), Base::Other),
@@ -153,7 +157,35 @@ impl Types {
             is_a_directory_error: e("IsADirectoryError", &os_error),
             not_a_directory_error: e("NotADirectoryError", &os_error),
             eof_error: e("EOFError", &exception),
-            syntax_error: e("SyntaxError", &exception),
+            tab_error: e("TabError", &indentation_error),
+            system_error: e("SystemError", &exception),
+            buffer_error: e("BufferError", &exception),
+            floating_point_error: e("FloatingPointError", &arithmetic_error),
+            reference_error: e("ReferenceError", &exception),
+            unicode_translate_error: e("UnicodeTranslateError", &unicode_error),
+            python_finalization_error: e("PythonFinalizationError", &runtime_error),
+            blocking_io_error: e("BlockingIOError", &os_error),
+            child_process_error: e("ChildProcessError", &os_error),
+            broken_pipe_error: e("BrokenPipeError", &connection_error),
+            connection_aborted_error: e("ConnectionAbortedError", &connection_error),
+            connection_refused_error: e("ConnectionRefusedError", &connection_error),
+            connection_reset_error: e("ConnectionResetError", &connection_error),
+            interrupted_error: e("InterruptedError", &os_error),
+            process_lookup_error: e("ProcessLookupError", &os_error),
+            user_warning: e("UserWarning", &warning),
+            deprecation_warning: e("DeprecationWarning", &warning),
+            pending_deprecation_warning: e("PendingDeprecationWarning", &warning),
+            syntax_warning: e("SyntaxWarning", &warning),
+            runtime_warning: e("RuntimeWarning", &warning),
+            future_warning: e("FutureWarning", &warning),
+            import_warning: e("ImportWarning", &warning),
+            unicode_warning: e("UnicodeWarning", &warning),
+            bytes_warning: e("BytesWarning", &warning),
+            resource_warning: e("ResourceWarning", &warning),
+            encoding_warning: e("EncodingWarning", &warning),
+            syntax_error,
+            indentation_error,
+            connection_error,
             unicode_decode_error: e("UnicodeDecodeError", &unicode_error),
             unicode_encode_error: e("UnicodeEncodeError", &unicode_error),
             unicode_error,
@@ -191,6 +223,34 @@ impl Types {
             self.syntax_error.clone(), self.unicode_error.clone(), self.warning.clone(),
             self.stop_async_iteration.clone(), self.timeout_error.clone(), self.unicode_decode_error.clone(),
             self.unicode_encode_error.clone(),
+            self.indentation_error.clone(),
+            self.tab_error.clone(),
+            self.system_error.clone(),
+            self.buffer_error.clone(),
+            self.floating_point_error.clone(),
+            self.reference_error.clone(),
+            self.unicode_translate_error.clone(),
+            self.python_finalization_error.clone(),
+            self.blocking_io_error.clone(),
+            self.child_process_error.clone(),
+            self.connection_error.clone(),
+            self.broken_pipe_error.clone(),
+            self.connection_aborted_error.clone(),
+            self.connection_refused_error.clone(),
+            self.connection_reset_error.clone(),
+            self.interrupted_error.clone(),
+            self.process_lookup_error.clone(),
+            self.user_warning.clone(),
+            self.deprecation_warning.clone(),
+            self.pending_deprecation_warning.clone(),
+            self.syntax_warning.clone(),
+            self.runtime_warning.clone(),
+            self.future_warning.clone(),
+            self.import_warning.clone(),
+            self.unicode_warning.clone(),
+            self.bytes_warning.clone(),
+            self.resource_warning.clone(),
+            self.encoding_warning.clone(),
         ]
     }
 }
@@ -584,7 +644,19 @@ pub fn get_item(vm: &mut Vm, object: &Value, index: &Value) -> PyResult<Value> {
                 };
                 return vm.call(&function, &[object.clone(), index.clone()], &[]);
             }
-            Ok(object.clone())
+            // `list[int]`: a types.GenericAlias of the built-in generics.
+            let generic = [&vm.types.list, &vm.types.dict, &vm.types.tuple, &vm.types.set, &vm.types.frozenset, &vm.types.type_]
+                .iter()
+                .any(|t| c.is_subclass(t));
+            if generic {
+                let alias = match vm.lazy_builtin("_nova_generic_alias")? {
+                    Some(f) => f,
+                    None => return Ok(object.clone()),
+                };
+                return vm.call(&alias, &[object.clone(), index.clone()], &[]);
+            }
+            let message = alloc::format!("type '{}' is not subscriptable", c.name);
+            vm.type_error(&message)
         }
         Value::Instance(i) => {
             if let Some(r) = vm.call_special(object, "__getitem__", core::slice::from_ref(index))? {

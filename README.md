@@ -382,9 +382,12 @@ en rendu logiciel.
   entiers illimités, classes, exceptions chaînées, descripteurs, modules
   locaux et paquets ; `math`, `random` (mêmes tirages que CPython à graine
   égale), `json`, `re`, `os`, `collections`, `itertools`, `functools`,
-  `dataclasses`, `enum`, `typing`... Le corpus `tests/python/` donne la
-  sortie de CPython 3.13 caractère pour caractère. Hors sous-ensemble :
-  `async`, `match`, métaclasses, `complex`.
+  `dataclasses`, `enum`, `typing`, `asyncio`, `decimal`, `fractions`,
+  `statistics`, `datetime`, `pathlib`, `logging`, `argparse`, `unittest`,
+  `unicodedata`... ; `match`, `async`/`await`, `except*`, métaclasses,
+  `complex`, PEP 695. Le corpus `tests/python/` (30 programmes) donne la
+  sortie de CPython 3.13 caractère pour caractère, traces et carets
+  compris. Liste de ce qui manque encore : `ROADMAP.md`, étape 16.5.
 - **Shell** : interprète de commandes (fichiers, tâches, mémoire, disques,
   `spm`, `dev`), fenêtre **Terminal** avec historique et défilement, shell
   sur la console série et mode recovery.
@@ -479,7 +482,7 @@ d'interruption, appels système, invariants — est dans
 | 6 | Couche OS : pilotes, réseau, audio, services | ✅ |
 | 7 | Système graphique | ✅ |
 | 8 | SPM et mises à jour de l'OS | ✅ |
-| 9 | SDK et langages | 🔄 21 cases sur 27 |
+| 9 | SDK et langages | 🔄 24 cases sur 27 |
 | 10 | Accessibilité, i18n, sécurité, compatibilité | ✅ |
 | 11 | Navigateur (fork de Firefox) | ✅ close |
 | 12 | Navigateur natif (libc Nova) | 🔧 à valider |

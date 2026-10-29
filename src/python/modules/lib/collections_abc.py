@@ -52,6 +52,7 @@ class Hashable(metaclass=ABCMeta):
 
 class Awaitable(metaclass=ABCMeta):
     __slots__ = ()
+    __class_getitem__ = classmethod(type(list[int]))
 
     @abstractmethod
     def __await__(self):
@@ -96,6 +97,7 @@ class Coroutine(Awaitable):
 
 class AsyncIterable(metaclass=ABCMeta):
     __slots__ = ()
+    __class_getitem__ = classmethod(type(list[int]))
 
     @abstractmethod
     def __aiter__(self):
@@ -161,6 +163,7 @@ class AsyncGenerator(AsyncIterator):
 
 class Iterable(metaclass=ABCMeta):
     __slots__ = ()
+    __class_getitem__ = classmethod(type(list[int]))
 
     @abstractmethod
     def __iter__(self):
@@ -256,6 +259,7 @@ class Sized(metaclass=ABCMeta):
 
 class Container(metaclass=ABCMeta):
     __slots__ = ()
+    __class_getitem__ = classmethod(type(list[int]))
 
     @abstractmethod
     def __contains__(self, x):
@@ -294,6 +298,7 @@ class Buffer(metaclass=ABCMeta):
 
 class Callable(metaclass=ABCMeta):
     __slots__ = ()
+    __class_getitem__ = classmethod(type(list[int]))
 
     @abstractmethod
     def __call__(self, *args, **kwds):

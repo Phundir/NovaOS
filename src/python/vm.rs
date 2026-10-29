@@ -136,6 +136,10 @@ pub struct Vm {
     pub regexes: Vec<super::modules::re::Compiled>,
     /// The object an asynchronous generator's `yield` is wrapped with.
     pub async_marker: Option<Value>,
+    /// `sys.modules` and `sys.path` once sys is imported: the program
+    /// may change them, and imports follow.
+    pub sys_modules: Option<Rc<RefCell<Dict>>>,
+    pub sys_path: Option<Rc<RefCell<Vec<Value>>>>,
 }
 
 impl Vm {
@@ -163,6 +167,8 @@ impl Vm {
             open_files: Vec::new(),
             regexes: Vec::new(),
             async_marker: None,
+            sys_modules: None,
+            sys_path: None,
         };
         super::types::install(&mut vm);
         let builtins = super::builtins::module(&mut vm);
@@ -190,6 +196,16 @@ impl Vm {
         self.frames.clear();
         self.handling.clear();
         self.open_files.clear();
+        self.sys_path = None;
+        if let Some(d) = self.sys_modules.take() {
+            // Modules the program put in sys.modules itself.
+            let all = core::mem::take(&mut *d.borrow_mut());
+            for entry in all.iter() {
+                if let Value::Module(m) = &entry.value {
+                    drop(core::mem::take(&mut *m.dict.borrow_mut()));
+                }
+            }
+        }
         for (_, module) in core::mem::take(&mut self.modules) {
             if let Value::Module(m) = module {
                 let dict = core::mem::take(&mut *m.dict.borrow_mut());
@@ -808,10 +824,23 @@ impl Vm {
     /// Sends `exc` into the top frame: to its innermost handler, or out
     /// of it, frame after frame, down to `base`.
     fn raise_in_top(&mut self, exc: Value, base: usize) -> PyResult<()> {
+        let mut first = true;
         loop {
             let Some(frame) = self.frames.last_mut() else {
                 return Err(PyErr::Exc(exc));
             };
+            // A traceback entry for each frame the exception reaches, the
+            // one that catches it included (as CPython's tb chain), but
+            // not for a bare `raise` or the end of a `finally`.
+            let reraise = first && matches!(frame.code.ops.get(frame.last), Some(Op::Reraise) | Some(Op::Raise(0)));
+            first = false;
+            if !reraise && !is_library(&frame.code) {
+                if let Value::Instance(i) = &exc {
+                    let line = frame.code.lines.get(frame.last).copied().unwrap_or(frame.code.first_line);
+                    let pos = frame.code.positions.get(frame.last).copied().unwrap_or_default();
+                    i.traceback.borrow_mut().push((frame.code.filename.clone(), line, frame.code.name.clone(), pos));
+                }
+            }
             while let Some(block) = frame.blocks.pop() {
                 match block.kind {
                     BlockKind::ExceptHandler => {
@@ -837,13 +866,7 @@ impl Vm {
                     }
                 }
             }
-            // No handler here: a traceback line, and the frame goes.
-            let line = frame.code.lines.get(frame.last).copied().unwrap_or(frame.code.first_line);
-            if let Value::Instance(i) = &exc {
-                if !is_library(&frame.code) {
-                    i.traceback.borrow_mut().push((frame.code.filename.clone(), line, frame.code.name.clone()));
-                }
-            }
+            // No handler here: the frame goes.
             if self.frames.len() - 1 == base {
                 self.frames.pop();
                 return Err(PyErr::Exc(exc));
@@ -1748,7 +1771,33 @@ impl Vm {
         if let Some(v) = self.builtins.dict.borrow().get_str(name) {
             return Ok(v);
         }
+        if let Some(v) = self.lazy_builtin(name)? {
+            return Ok(v);
+        }
         self.name_error(name)
+    }
+
+    /// The built-in names written in Python (`ExceptionGroup`,
+    /// `memoryview`, the helpers of `except*` and `type`): their module is
+    /// loaded on first use, and they are then ordinary builtins.
+    pub fn lazy_builtin(&mut self, name: &str) -> PyResult<Option<Value>> {
+        const LAZY: &[&str] = &[
+            "BaseExceptionGroup", "ExceptionGroup", "memoryview", "_nova_excstar_prepare", "_nova_excstar_split",
+            "_nova_excstar_reraise", "_nova_type_alias", "_nova_typevar", "_nova_generic", "_nova_generic_alias", "_nova_traceback",
+        ];
+        if !LAZY.contains(&name) {
+            return Ok(None);
+        }
+        let module = super::modules::import(self, "_builtins_extra", 0, &Value::None)?;
+        let Value::Module(module) = module else {
+            return Ok(None);
+        };
+        for n in LAZY {
+            if let Some(v) = module.dict.borrow().get_str(n) {
+                self.builtins.dict.borrow_mut().set_str(n, v);
+            }
+        }
+        Ok(self.builtins.dict.borrow().get_str(name))
     }
 
     /// `raise`, `raise e`, `raise e from c`: the exception to unwind with.

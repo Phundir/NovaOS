@@ -202,7 +202,7 @@ BENCH_MIB   ?= 512
 BENCH_ACCEL ?=
 BENCH_PORT  ?= 8000
 
-.PHONY: js-test py-test test test-smp1 test-novga test-recovery test-all dist version venus venus-check shaders kmd-test webroot nova-libc disk-migrate disk-lifs print-qemu-flags print-qemu-headless bench-net all kernel iso audio-devices run run-full run-smp run-nogui log debug debug-int clean check check-ascii police racines re prev unprev cargo-build disk disk-reset check-export run-netdump run-nonet
+.PHONY: js-test py-test test test-smp1 test-novga test-recovery test-all dist version venus venus-check shaders kmd-test webroot nova-libc disk-migrate disk-lifs print-qemu-flags print-qemu-headless bench-net all kernel iso audio-devices run run-full run-smp run-nogui log debug debug-int clean check check-ascii police unicode racines re prev unprev cargo-build disk disk-reset check-export run-netdump run-nonet
 
 all: iso
 
@@ -372,6 +372,11 @@ check-ascii:
 # Regenere src/graphics/font.rs depuis la description en ASCII-art.
 police:
 	python3 tools/generer-police.py
+
+# Regenere les tables Unicode de Python (src/python/modules/unidata.bin)
+# depuis le module unicodedata du CPython de l'hote.
+unicode:
+	python3 tools/unicode/generate.py
 
 # Regenere l'encodeur Venus du pilote GPU (src/gpu/venus/protocol.rs) depuis
 # le registre Vulkan (phase 13). Les trois fichiers XML viennent de

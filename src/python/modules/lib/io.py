@@ -181,6 +181,7 @@ class _Memory(IOBase):
 
 
 class StringIO(_Memory, TextIOBase):
+    __nova_type_name__ = '_io.StringIO'
     _closed_message = 'I/O operation on closed file'
 
     def __init__(self, initial_value='', newline='\n'):
@@ -219,6 +220,7 @@ class StringIO(_Memory, TextIOBase):
 
 
 class BytesIO(_Memory, BufferedIOBase):
+    __nova_type_name__ = '_io.BytesIO'
     def __init__(self, initial_bytes=b''):
         self._init(bytes(initial_bytes) if initial_bytes else b'', b'')
 

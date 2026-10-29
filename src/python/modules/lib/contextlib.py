@@ -141,11 +141,22 @@ class ExitStack:
 
 
 class redirect_stdout:
+    _stream = 'stdout'
+
     def __init__(self, new_target):
         self._new_target = new_target
+        self._old_targets = []
 
     def __enter__(self):
+        import sys
+        self._old_targets.append(getattr(sys, self._stream))
+        setattr(sys, self._stream, self._new_target)
         return self._new_target
 
     def __exit__(self, exctype, excinst, exctb):
-        pass
+        import sys
+        setattr(sys, self._stream, self._old_targets.pop())
+
+
+class redirect_stderr(redirect_stdout):
+    _stream = 'stderr'

@@ -75,6 +75,12 @@ pub struct SymError {
     pub line: u32,
 }
 
+impl SymError {
+    pub fn new(message: impl Into<String>, line: u32) -> SymError {
+        SymError { message: message.into(), line }
+    }
+}
+
 struct Builder {
     table: Table,
     current: usize,
@@ -155,7 +161,7 @@ impl Builder {
             .collect();
         for name in &names {
             if self.scope().params.contains(name) {
-                return Err(SymError { message: alloc::format!("parametre '{}' en double", name), line: 0 });
+                return Err(SymError::new(alloc::format!("duplicate argument '{}' in function definition", name), 0));
             }
             self.scope().params.push(name.clone());
             self.bind(name);
@@ -318,7 +324,7 @@ impl Builder {
                 for (name, alias) in names {
                     if &**name == "*" {
                         if self.scope().kind != ScopeKind::Module {
-                            return Err(SymError { message: String::from("import * n'est permis qu'au niveau du module"), line: statement.line });
+                            return Err(SymError::new(String::from("import * only allowed at module level"), statement.line));
                         }
                         continue;
                     }
@@ -332,7 +338,7 @@ impl Builder {
                         // CPython: "name 'x' is assigned to before global
                         // declaration" -- only for parameters is it fatal.
                         if self.scope().params.contains(name) {
-                            return Err(SymError { message: alloc::format!("le nom '{}' est un parametre et global", name), line: statement.line });
+                            return Err(SymError::new(alloc::format!("name '{}' is parameter and global", name), statement.line));
                         }
                     }
                     self.scope().globals.insert(name.clone());
@@ -341,7 +347,7 @@ impl Builder {
             }
             StmtKind::Nonlocal(names) => {
                 if matches!(self.scope().kind, ScopeKind::Module | ScopeKind::Class) {
-                    return Err(SymError { message: String::from("nonlocal hors d'une fonction"), line: statement.line });
+                    return Err(SymError::new(String::from("nonlocal declaration not allowed at module level"), statement.line));
                 }
                 for name in names {
                     self.scope().nonlocals.insert(name.clone());
@@ -535,7 +541,7 @@ impl Builder {
                 }
                 let target = &mut self.table.scopes[index];
                 if target.kind == ScopeKind::Class && index != self.current {
-                    return Err(SymError { message: String::from(":= dans une comprehension au niveau d'une classe"), line: expr.line });
+                    return Err(SymError::new(String::from("assignment expression within a comprehension cannot be used in a class body"), expr.line));
                 }
                 target.bound.insert(name.clone());
                 if index != self.current && target.kind == ScopeKind::Module {
@@ -622,7 +628,7 @@ fn resolve(table: &mut Table, index: usize, enclosing: &BTreeSet<Rc<str>>) -> Re
     let scope = &mut table.scopes[index];
     for name in scope.nonlocals.iter() {
         if !enclosing.contains(name) {
-            return Err(SymError { message: alloc::format!("pas de liaison pour le nonlocal '{}'", name), line: 0 });
+            return Err(SymError::new(alloc::format!("no binding for nonlocal '{}' found", name), 0));
         }
     }
     let names: BTreeSet<Rc<str>> = scope.bound.iter().chain(scope.used.iter()).chain(scope.globals.iter()).cloned().collect();

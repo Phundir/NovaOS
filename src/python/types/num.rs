@@ -608,6 +608,76 @@ fn float_hex(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value
     Ok(Value::str(&text))
 }
 
+/// `float.fromhex('0x1.8p1')`: the value rounded once, as CPython.
+fn float_fromhex(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
+    let Some(Value::Str(text)) = a.get(1) else {
+        return vm.type_error("fromhex() argument must be str");
+    };
+    let t = text.trim();
+    let invalid = |vm: &mut Vm| vm.value_error::<Value>("invalid hexadecimal floating-point string");
+    let (negative, body) = match t.as_bytes().first() {
+        Some(b'-') => (true, &t[1..]),
+        Some(b'+') => (false, &t[1..]),
+        _ => (false, t),
+    };
+    let lower = body.to_ascii_lowercase();
+    let special = match lower.as_str() {
+        "inf" | "infinity" => Some(Num::INFINITY),
+        "nan" => Some(Num::NAN),
+        _ => None,
+    };
+    if let Some(v) = special {
+        return Ok(Value::Float(if negative { v.neg() } else { v }));
+    }
+    let body = lower.strip_prefix("0x").unwrap_or(&lower);
+    let (digits, exponent) = match body.find('p') {
+        Some(i) => (&body[..i], Some(&body[i + 1..])),
+        None => (body, None),
+    };
+    let (whole, fraction) = match digits.find('.') {
+        Some(i) => (&digits[..i], &digits[i + 1..]),
+        None => (digits, ""),
+    };
+    if whole.is_empty() && fraction.is_empty() {
+        return invalid(vm);
+    }
+    let mut mantissa = Int::zero();
+    for c in whole.chars().chain(fraction.chars()) {
+        let Some(d) = c.to_digit(16) else {
+            return invalid(vm);
+        };
+        mantissa = mantissa.shl(4).unwrap_or(Int::zero()).add(&Int::Small(d as i64));
+    }
+    let exp: i64 = match exponent {
+        Some(e) => {
+            let ok = !e.is_empty() && e.trim_start_matches(['+', '-']).chars().all(|c| c.is_ascii_digit()) && e.trim_start_matches(['+', '-']).len() > 0;
+            if !ok {
+                return invalid(vm);
+            }
+            e.parse::<i64>().unwrap_or(if e.starts_with('-') { -1 << 40 } else { 1 << 40 })
+        }
+        None => 0,
+    };
+    let e2 = exp - 4 * fraction.len() as i64;
+    let value = if mantissa.is_zero() {
+        Num::ZERO
+    } else if e2 >= 0 {
+        if mantissa.bit_length() as i64 + e2 > 1100 {
+            return vm.overflow("hexadecimal value too large to represent as a float");
+        }
+        mantissa.shl(e2 as u64).unwrap_or(Int::zero()).to_float()
+    } else if (mantissa.bit_length() as i64 + e2) < -1100 {
+        Num::ZERO
+    } else {
+        let den = Int::Small(1).shl((-e2) as u64).unwrap_or(Int::Small(1));
+        super::int_true_div(&mantissa, &den)
+    };
+    if value.is_infinite() {
+        return vm.overflow("hexadecimal value too large to represent as a float");
+    }
+    Ok(Value::Float(if negative { value.neg() } else { value }))
+}
+
 fn float_conjugate(vm: &mut Vm, a: &[Value], _: &[(Rc<str>, Value)]) -> PyResult<Value> {
     Ok(Value::Float(this_float(vm, a)?))
 }
@@ -622,6 +692,8 @@ pub fn install(vm: &mut Vm) {
         method(&int, name, *f);
     }
     int.dict.borrow_mut().set_str("from_bytes", Value::ClassMethod(Rc::new(super::native("from_bytes", from_bytes))));
+    let float = vm.types.float.clone();
+    float.dict.borrow_mut().set_str("fromhex", Value::ClassMethod(Rc::new(super::native("fromhex", float_fromhex))));
     let float = vm.types.float.clone();
     let entries: &[(&'static str, NativeFn)] = &[
         ("is_integer", float_is_integer), ("as_integer_ratio", float_ratio), ("hex", float_hex), ("conjugate", float_conjugate),
