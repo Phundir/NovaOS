@@ -36,7 +36,7 @@ async def slow():
 
 async def main():
     log = []
-    results = await asyncio.gather(worker("a", 0.03, log), worker("b", 0.01, log), worker("c", 0.02, log))
+    results = await asyncio.gather(worker("a", 0.3, log), worker("b", 0.1, log), worker("c", 0.2, log))
     print(results)
     print(log)
     print(await countdown(3))
